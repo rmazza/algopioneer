@@ -13,6 +13,23 @@ This crate is part of the algopioneer project. It contains the core application 
 - Rust (stable) and Cargo installed: https://www.rust-lang.org/tools/install
 - Optional but useful: `cargo-edit` (for `cargo add`) — install with `cargo install cargo-edit`.
 
+# algopioneer
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+Lightweight README for the `algopioneer` Rust crate.
+
+## Overview
+
+This crate is part of the algopioneer project. It contains the core application and related logic for algorithmic trading research and experiments.
+
+(If you expected a different folder, tell me and I can move or create a README elsewhere.)
+
+## Prerequisites
+
+- Rust (stable) and Cargo installed: https://www.rust-lang.org/tools/install
+- Optional but useful: `cargo-edit` (for `cargo add`) — install with `cargo install cargo-edit`.
+
 ## Environment variables
 
 This project expects certain secrets and configuration to be provided via a local `.env` file during development. For safety we do not commit `.env` to the repository. Instead, copy the example file and fill in your credentials:
