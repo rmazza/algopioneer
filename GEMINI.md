@@ -49,3 +49,4 @@ cargo test
 *   **Asynchronous Operations:** The project uses the `tokio` runtime for asynchronous operations, which is essential for interacting with web APIs.
 *   **Error Handling:** The code uses `Result` and `Box<dyn std::error::Error>` for error handling, which is a standard practice in Rust.
 
+
