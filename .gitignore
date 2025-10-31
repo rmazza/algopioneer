@@ -1,0 +1,34 @@
+/target/
+
+# dotenv files with secrets
+.env
+.env.*
+!/.env.example
+
+# IDE/editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Editor swap/temp files
+*~
+*.swp
+*.tmp
+*.bak
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Node (if you have frontend code)
+node_modules/
+
+# Python virtualenvs (if present)
+venv/
+.envrc
+
+# Coverage / tool output
+coverage/
+

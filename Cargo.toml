@@ -1,0 +1,11 @@
+[package]
+name = "algopioneer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cbadv = "2.0.2"
+dotenv = "0.15.0"
+polars = { version = "0.51.0", features = ["lazy"] }
+ta = "0.5.0"
+tokio = { version = "1.48.0", features = ["full"] }
