@@ -13,6 +13,17 @@ This crate is part of the algopioneer project. It contains the core application 
 - Rust (stable) and Cargo installed: https://www.rust-lang.org/tools/install
 - Optional but useful: `cargo-edit` (for `cargo add`) — install with `cargo install cargo-edit`.
 
+## Environment variables
+
+This project expects certain secrets and configuration to be provided via a local `.env` file during development. For safety we do not commit `.env` to the repository. Instead, copy the example file and fill in your credentials:
+
+```bash
+cp .env.example .env
+# edit .env and add your real API keys/secrets (DO NOT commit .env)
+```
+
+Keep `.env` private and use your CI provider or secret manager for production credentials.
+
 ## Adding dependencies
 
 I previously attempted to run:
