@@ -1,61 +1,79 @@
 # algopioneer
-
-Lightweight README for the `algopioneer` Rust crate.
-
-## Overview
-
-This crate is part of the algopioneer project. It contains the core application and related logic for algorithmic trading research and experiments.
-
-(If you expected a different folder, tell me and I can move or create a README elsewhere.)
-
-## Prerequisites
-
-- Rust (stable) and Cargo installed: https://www.rust-lang.org/tools/install
-- Optional but useful: `cargo-edit` (for `cargo add`) — install with `cargo install cargo-edit`.
-
-# algopioneer
+## algopioneer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-Lightweight README for the `algopioneer` Rust crate.
+AlgoPioneer is a lightweight Rust toolkit for algorithmic trading research and experiments. The project provides a small wrapper around the Coinbase Advanced Trade API (via the `cbadv` crate), a Polars-based data pipeline, and a sample Moving Average Crossover strategy with unit tests.
 
-## Overview
+This README describes how to build, run, and test the current implementation.
 
-This crate is part of the algopioneer project. It contains the core application and related logic for algorithmic trading research and experiments.
+Features
+- Coinbase Advanced Trade API client (authentication wired from environment)
+- Polars for fast in-memory data handling and rolling-window computations
+- A Moving Average Crossover strategy with unit tests demonstrating signal generation
+- Local development convenience: `.env.example`, `.gitignore`, and test harness
 
-(If you expected a different folder, tell me and I can move or create a README elsewhere.)
+Prerequisites
+- Rust (stable) and Cargo: https://www.rust-lang.org/tools/install
+- Optional tools: `cargo-edit` (`cargo install cargo-edit`), `gh` (GitHub CLI) if you use repository automation
 
-## Prerequisites
-
-- Rust (stable) and Cargo installed: https://www.rust-lang.org/tools/install
-- Optional but useful: `cargo-edit` (for `cargo add`) — install with `cargo install cargo-edit`.
-
-## Environment variables
-
-This project expects certain secrets and configuration to be provided via a local `.env` file during development. For safety we do not commit `.env` to the repository. Instead, copy the example file and fill in your credentials:
+Environment variables
+This project reads credentials from a local `.env` file (loaded with `dotenv`). Do NOT commit your real `.env` file. Instead create a local copy from the example:
 
 ```bash
 cp .env.example .env
-# edit .env and add your real API keys/secrets (DO NOT commit .env)
+# fill in your Coinbase credentials in .env
 ```
 
-Keep `.env` private and use your CI provider or secret manager for production credentials.
+The following variables are used by the code:
+- COINBASE_API_KEY — Advanced Trade API key identifier
+- COINBASE_API_SECRET — Advanced Trade API secret (private key)
+- (Optional) COINBASE_USE_SANDBOX — set to `true` to use sandbox endpoints if supported
 
-## Adding dependencies
+Project layout (important files)
+- `src/main.rs` — binary entrypoint (initializes client, runs a connectivity test)
+- `src/coinbase/mod.rs` — Coinbase client wrapper that wires credentials into `cbadv::RestClientBuilder`
+- `src/strategy/moving_average.rs` — Moving Average Crossover strategy and unit tests
+- `Cargo.toml` — dependencies (Polars, cbadv, tokio, dotenv, etc.)
+- `.env.example` — template for required environment variables (safe to commit)
 
-I previously attempted to run:
+Build & run
+From the project root:
 
-cargo add cbadv-rs polars ta-rs tokio --features "tokio/full polars/lazy" dotenv
+```bash
+cargo build
+cargo run
+```
 
-Note: that command failed because crates.io did not contain a crate named `cbadv-rs`. If `cbadv-rs` is a private crate, provide a git URL or a local path and it can be added with `cargo add --git <url> cbadv-rs` or by editing `Cargo.toml`.
+`cargo run` executes the binary which performs a basic connectivity test (server time) and prints the result. Authenticated endpoints (account info, balances) require valid API credentials and the proper permissions on your API key.
 
-To add the other dependencies (polars, ta-rs, tokio, dotenv) you can run:
+Tests
 
-cargo add polars ta-rs tokio --features "tokio/full polars/lazy" dotenv
+Run the unit tests with:
 
-(Adjust features or crate names as needed.)
+```bash
+cargo test
+```
 
-## Build & run
+The repository includes a unit-tested moving-average strategy. Tests should pass with the current codebase.
+
+Development notes
+- Rolling-window computations are implemented using Polars' native `rolling_mean` (requires the `rolling_window` feature).
+- Keep secrets out of the repo: use `.env` locally and CI secret stores for automated runs.
+- If you add large data files or outputs, ignore them via `.gitignore` (the repo already ignores `/target`).
+
+Contributing
+- Fork or branch and open a PR. Add unit tests for new behavior. CI (GitHub Actions) can be added to run `cargo test` on PRs — I can scaffold that for you.
+
+License
+- MIT — see the `LICENSE` file.
+
+Questions / Next steps
+- Want a CI workflow to run tests on push/PR? I can add a basic GitHub Actions YAML that runs `cargo test`.
+- Want example authenticated read-only calls (list accounts) added to `src/coinbase/mod.rs`? I can add and run them locally (they will hit your live API keys).
+
+---
+Updated to match the current implementation.
 
 From the crate root (`/home/bob/dev/algopioneer`):
 
