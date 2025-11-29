@@ -22,7 +22,7 @@ The project is structured as a modular application with a CLI entry point define
 *   **Entry Point (`src/main.rs`):** Handles CLI argument parsing and dispatches commands to the appropriate execution logic.
 *   **Strategies (`src/strategy/`):** Contains the trading logic.
     *   `moving_average.rs`: Implements a Moving Average Crossover strategy.
-    *   `basis_trading.rs`: Implements a Basis Trading strategy (Spot vs Future arbitrage) with risk management and recovery mechanisms.
+    *   `basis_trading.rs`: Implements a Basis Trading strategy (Spot vs Future arbitrage) with risk management and a **Queue-Based Recovery System** for handling failed execution legs.
 *   **Coinbase Integration (`src/coinbase/`):** Handles API interactions and WebSocket data streams.
 *   **Backtesting (`src/backtest/`):** Provides a framework for testing strategies against historical data.
 
