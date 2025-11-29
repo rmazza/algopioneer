@@ -7,16 +7,13 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, Executor, MarketData};
+use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, RecoveryWorker};
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use rust_decimal::prelude::*;
 
 // --- Constants ---
 const MAX_HISTORY: usize = 200;
@@ -54,6 +51,10 @@ impl TradeState {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Set the verbosity level (error, warn, info, debug, trace)
+    #[arg(long, global = true, default_value = "info")]
+    verbose: String,
 }
 
 #[derive(clap::Subcommand)]
@@ -94,6 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     let cli = Cli::parse();
+
+    // Initialize Logger
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&cli.verbose)).init();
 
     match &cli.command {
         Commands::Trade { product_id, duration, paper } => {
@@ -246,9 +250,19 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     // Initialize components
     // Initialize components
     let client = Arc::new(CoinbaseClient::new(env)?);
+
+    // Create Recovery Channel
+    let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(100);
+
+    // Spawn Recovery Worker
+    let recovery_worker = RecoveryWorker::new(client.clone(), recovery_rx);
+    tokio::spawn(async move {
+        recovery_worker.run().await;
+    });
+
     let entry_manager = Box::new(EntryManager::new(dec!(10.0), dec!(2.0))); // 10 bps entry, 2 bps exit
     let risk_monitor = RiskMonitor::new(dec!(3.0)); // 3x max leverage
-    let execution_engine = ExecutionEngine::new(client.clone());
+    let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx);
 
     let mut strategy = BasisTradingStrategy::new(
         entry_manager,
