@@ -28,6 +28,7 @@ use tokio::time::Duration;
 
 const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
 const MAX_TICK_DIFF_MS: i64 = 500; // 500 milliseconds
+const EXECUTION_TIMEOUT_MS: i64 = 30000; // 30 seconds
 
 // --- Domain Models ---
 
@@ -333,6 +334,7 @@ pub struct BasisTradingStrategy {
     execution_engine: ExecutionEngine,
     pair: InstrumentPair,
     state: StrategyState,
+    last_state_change_ts: i64,
     report_tx: mpsc::Sender<ExecutionReport>,
     report_rx: mpsc::Receiver<ExecutionReport>,
 }
@@ -353,6 +355,7 @@ impl BasisTradingStrategy {
             execution_engine,
             pair: InstrumentPair { spot_symbol, future_symbol },
             state: StrategyState::Flat,
+            last_state_change_ts: Utc::now().timestamp_millis(),
             report_tx,
             report_rx,
         }
@@ -364,9 +367,13 @@ impl BasisTradingStrategy {
 
         let mut latest_spot: Option<MarketData> = None;
         let mut latest_future: Option<MarketData> = None;
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
+                _ = heartbeat.tick() => {
+                    self.check_timeout();
+                }
                 Some(spot_data) = spot_rx.recv() => {
                     latest_spot = Some(spot_data);
                 }
@@ -393,10 +400,12 @@ impl BasisTradingStrategy {
                     Signal::Buy => {
                         info!("Entry Successful. Transitioning to InPosition.");
                         self.state = StrategyState::InPosition;
+                        self.last_state_change_ts = Utc::now().timestamp_millis();
                     },
                     Signal::Sell => {
                         info!("Exit Successful. Transitioning to Flat.");
                         self.state = StrategyState::Flat;
+                        self.last_state_change_ts = Utc::now().timestamp_millis();
                     },
                     _ => {}
                 }
@@ -406,8 +415,14 @@ impl BasisTradingStrategy {
                 // If entry failed, we go back to Flat. If exit failed, we might still be InPosition (or partial).
                 // For TotalFailure (atomic rollback succeeded), we revert to previous state.
                 match report.action {
-                    Signal::Buy => self.state = StrategyState::Flat,
-                    Signal::Sell => self.state = StrategyState::InPosition, // Failed to exit, still in position
+                    Signal::Buy => {
+                         self.state = StrategyState::Flat;
+                         self.last_state_change_ts = Utc::now().timestamp_millis();
+                    },
+                    Signal::Sell => {
+                         self.state = StrategyState::InPosition; // Failed to exit, still in position
+                         self.last_state_change_ts = Utc::now().timestamp_millis();
+                    },
                     _ => {}
                 }
             },
@@ -415,6 +430,31 @@ impl BasisTradingStrategy {
                 error!("CRITICAL: Partial Execution Failure: {}. Manual Intervention Required.", reason);
                 // In a real system, we'd transition to a "Broken" or "ManualIntervention" state.
                 // For now, we'll stay in the current state but log heavily.
+            }
+        }
+    }
+
+    fn check_timeout(&mut self) {
+        if self.state == StrategyState::Entering || self.state == StrategyState::Exiting {
+            let now = Utc::now().timestamp_millis();
+            if now - self.last_state_change_ts > EXECUTION_TIMEOUT_MS {
+                error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Resetting state.", self.state, EXECUTION_TIMEOUT_MS);
+                
+                // Timeout Recovery Logic
+                // In a real system, we would query the exchange here to see if the order actually filled.
+                // For now, we assume it failed silently and revert to the previous safe state.
+                match self.state {
+                    StrategyState::Entering => {
+                        info!("Timeout: Reverting Entering -> Flat");
+                        self.state = StrategyState::Flat;
+                    },
+                    StrategyState::Exiting => {
+                        info!("Timeout: Reverting Exiting -> InPosition");
+                        self.state = StrategyState::InPosition;
+                    },
+                    _ => {}
+                }
+                self.last_state_change_ts = now;
             }
         }
     }
@@ -445,6 +485,7 @@ impl BasisTradingStrategy {
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
                     info!("Entry Signal! Transitioning to Entering state and spawning execution...");
                     self.state = StrategyState::Entering; // Prevent further spawns
+                    self.last_state_change_ts = Utc::now().timestamp_millis();
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
@@ -464,6 +505,7 @@ impl BasisTradingStrategy {
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
                     info!("Exit Signal! Transitioning to Exiting state and spawning execution...");
                     self.state = StrategyState::Exiting;
+                    self.last_state_change_ts = Utc::now().timestamp_millis();
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
