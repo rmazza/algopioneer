@@ -53,7 +53,7 @@ impl CoinbaseClient {
     }
 
     /// Places an order.
-    pub async fn place_order(&self, product_id: &str, side: &str, size: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn place_order(&self, product_id: &str, side: &str, size: rust_decimal::Decimal) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match self.mode {
             AppEnv::Live => {
                 println!("-- Live Mode: Placing order for {} {} of {} --", side, size, product_id);

@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use rust_decimal_macros::dec;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 
 // --- Constants ---
 const MAX_HISTORY: usize = 200;
@@ -187,13 +189,15 @@ async fn run_trading(product_id: &str, duration: u64, env: AppEnv) -> Result<(),
             match signal {
                 Signal::Buy => {
                     println!("Buy signal received. Placing order.");
-                    client.place_order(product_id, "buy", ORDER_SIZE).await.map_err(|e| e as Box<dyn std::error::Error>)?;
+                    let size = Decimal::from_f64(ORDER_SIZE).unwrap();
+                    client.place_order(product_id, "buy", size).await.map_err(|e| e as Box<dyn std::error::Error>)?;
                     state.position_open = true;
                     state.save()?;
                 }
                 Signal::Sell => {
                     println!("Sell signal received. Placing order.");
-                    client.place_order(product_id, "sell", ORDER_SIZE).await.map_err(|e| e as Box<dyn std::error::Error>)?;
+                    let size = Decimal::from_f64(ORDER_SIZE).unwrap();
+                    client.place_order(product_id, "sell", size).await.map_err(|e| e as Box<dyn std::error::Error>)?;
                     state.position_open = false;
                     state.save()?;
                 }

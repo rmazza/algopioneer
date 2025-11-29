@@ -471,7 +471,6 @@ impl BasisTradingStrategy {
 #[async_trait]
 impl Executor for CoinbaseClient {
     async fn execute_order(&self, symbol: &str, side: &str, quantity: Decimal) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let qty_f64 = quantity.to_f64().ok_or("Failed to convert quantity to f64")?;
-        self.place_order(symbol, side, qty_f64).await
+        self.place_order(symbol, side, quantity).await
     }
 }

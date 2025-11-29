@@ -10,7 +10,7 @@
 *   **Real-time Data**: WebSocket integration for streaming market data (ticker, orderbook).
 *   **Strategy Engine**:
     *   **Moving Average Crossover**: A classic trend-following strategy with configurable windows.
-    *   **Basis Trading**: A sophisticated delta-neutral strategy exploiting price differences between Spot and Futures markets.
+    *   **Basis Trading**: A sophisticated delta-neutral strategy exploiting price differences between Spot and Futures markets, featuring a robust **Queue-Based Recovery System** to handle execution failures and ensure delta neutrality.
 *   **Execution Modes**:
     *   **Live Trading**: Execute real orders on Coinbase.
     *   **Paper Trading**: Simulate execution with real-time data to test strategies without financial risk.
@@ -87,7 +87,7 @@ cargo run --release -- backtest
 *   `src/main.rs`: Application entry point and CLI command orchestration.
 *   `src/coinbase/`: Coinbase API client wrapper and WebSocket implementation.
 *   `src/strategy/`: Strategy implementations.
-    *   `basis_trading.rs`: Logic for the Basis Trading strategy.
+    *   `basis_trading.rs`: Logic for the Basis Trading strategy, including execution engine and recovery worker.
     *   `moving_average.rs`: Logic for the Moving Average Crossover strategy.
 *   `src/backtest/`: Backtesting engine logic.
 *   `src/sandbox/`: Utilities for simulated environments.
