@@ -1,95 +1,109 @@
 # algopioneer
-## algopioneer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-AlgoPioneer is a lightweight Rust toolkit for algorithmic trading research and experiments. The project provides a small wrapper around the Coinbase Advanced Trade API (via the `cbadv` crate), a Polars-based data pipeline, and a sample Moving Average Crossover strategy with unit tests.
+**AlgoPioneer** is a robust Rust toolkit designed for algorithmic trading research and execution on Coinbase Advanced Trade. It provides a high-performance foundation for building, testing, and deploying trading strategies, featuring real-time data streaming, backtesting capabilities, and support for complex strategies like Basis Trading.
 
-This README describes how to build, run, and test the current implementation.
+## Features
 
-Features
-- Coinbase Advanced Trade API client (authentication wired from environment)
-- Polars for fast in-memory data handling and rolling-window computations
-- A Moving Average Crossover strategy with unit tests demonstrating signal generation
-- Local development convenience: `.env.example`, `.gitignore`, and test harness
+*   **Coinbase Advanced Trade Integration**: Seamless interaction with the Coinbase Advanced Trade API via the `cbadv` crate.
+*   **Real-time Data**: WebSocket integration for streaming market data (ticker, orderbook).
+*   **Strategy Engine**:
+    *   **Moving Average Crossover**: A classic trend-following strategy with configurable windows.
+    *   **Basis Trading**: A sophisticated delta-neutral strategy exploiting price differences between Spot and Futures markets.
+*   **Execution Modes**:
+    *   **Live Trading**: Execute real orders on Coinbase.
+    *   **Paper Trading**: Simulate execution with real-time data to test strategies without financial risk.
+    *   **Backtesting**: Validate strategies against historical data using a built-in backtesting engine.
+*   **High Performance**: Built on `tokio` for asynchronous I/O and `polars` for fast data manipulation.
 
-Prerequisites
-- Rust (stable) and Cargo: https://www.rust-lang.org/tools/install
-- Optional tools: `cargo-edit` (`cargo install cargo-edit`), `gh` (GitHub CLI) if you use repository automation
+## Prerequisites
 
-Environment variables
-This project reads credentials from a local `.env` file (loaded with `dotenv`). Do NOT commit your real `.env` file. Instead create a local copy from the example:
+*   **Rust**: Stable release (install via [rustup](https://rustup.rs/)).
+*   **Coinbase API Credentials**: You need an API Key and Secret from Coinbase Advanced Trade.
 
+## Setup
+
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/yourusername/algopioneer.git
+    cd algopioneer
+    ```
+
+2.  **Configure Environment Variables**:
+    Create a `.env` file in the project root based on the example:
+    ```bash
+    cp .env.example .env
+    ```
+    Edit `.env` and add your API credentials:
+    ```env
+    COINBASE_API_KEY=your_api_key
+    COINBASE_API_SECRET=your_api_secret
+    # Optional: Set to true if using Sandbox API (if supported)
+    # COINBASE_USE_SANDBOX=true
+    ```
+
+3.  **Build the Project**:
+    ```bash
+    cargo build --release
+    ```
+
+## Usage
+
+AlgoPioneer uses a CLI interface to manage different modes and strategies.
+
+### 1. Standard Trading (Moving Average Crossover)
+
+Run the standard trading bot on a specific product.
+
+**Live Mode:**
 ```bash
-cp .env.example .env
-# fill in your Coinbase credentials in .env
+cargo run --release -- trade --product-id BTC-USD --duration 60
 ```
 
-The following variables are used by the code:
-- COINBASE_API_KEY — Advanced Trade API key identifier
-- COINBASE_API_SECRET — Advanced Trade API secret (private key)
-- (Optional) COINBASE_USE_SANDBOX — set to `true` to use sandbox endpoints if supported
-
-Project layout (important files)
-- `src/main.rs` — binary entrypoint (initializes client, runs a connectivity test)
-- `src/coinbase/mod.rs` — Coinbase client wrapper that wires credentials into `cbadv::RestClientBuilder`
-- `src/strategy/moving_average.rs` — Moving Average Crossover strategy and unit tests
-- `Cargo.toml` — dependencies (Polars, cbadv, tokio, dotenv, etc.)
-- `.env.example` — template for required environment variables (safe to commit)
-
-Build & run
-From the project root:
-
+**Paper Trading Mode (Simulated):**
 ```bash
-cargo build
-cargo run
+cargo run --release -- trade --product-id BTC-USD --paper
 ```
 
-`cargo run` executes the binary which performs a basic connectivity test (server time) and prints the result. Authenticated endpoints (account info, balances) require valid API credentials and the proper permissions on your API key.
+### 2. Basis Trading (Spot vs Future)
 
-Tests
+Run the delta-neutral basis trading strategy.
 
-Run the unit tests with:
+```bash
+cargo run --release -- basis-trade --spot-id BTC-USD --future-id BTC-USDT --paper
+```
 
+### 3. Backtesting
+
+Run a backtest using historical data (currently configured for the Moving Average strategy).
+
+```bash
+cargo run --release -- backtest
+```
+
+## Project Structure
+
+*   `src/main.rs`: Application entry point and CLI command orchestration.
+*   `src/coinbase/`: Coinbase API client wrapper and WebSocket implementation.
+*   `src/strategy/`: Strategy implementations.
+    *   `basis_trading.rs`: Logic for the Basis Trading strategy.
+    *   `moving_average.rs`: Logic for the Moving Average Crossover strategy.
+*   `src/backtest/`: Backtesting engine logic.
+*   `src/sandbox/`: Utilities for simulated environments.
+
+## Development
+
+**Run Unit Tests:**
 ```bash
 cargo test
 ```
 
-The repository includes a unit-tested moving-average strategy. Tests should pass with the current codebase.
+**Linting:**
+```bash
+cargo clippy
+```
 
-Development notes
-- Rolling-window computations are implemented using Polars' native `rolling_mean` (requires the `rolling_window` feature).
-- Keep secrets out of the repo: use `.env` locally and CI secret stores for automated runs.
-- If you add large data files or outputs, ignore them via `.gitignore` (the repo already ignores `/target`).
+## License
 
-Contributing
-- Fork or branch and open a PR. Add unit tests for new behavior. CI (GitHub Actions) can be added to run `cargo test` on PRs — I can scaffold that for you.
-
-License
-- MIT — see the `LICENSE` file.
-
-Questions / Next steps
-- Want a CI workflow to run tests on push/PR? I can add a basic GitHub Actions YAML that runs `cargo test`.
-- Want example authenticated read-only calls (list accounts) added to `src/coinbase/mod.rs`? I can add and run them locally (they will hit your live API keys).
-
----
-Updated to match the current implementation.
-
-From the crate root (`/home/bob/dev/algopioneer`):
-
-cargo build --release
-cargo run --release
-
-## Tests
-
-Run unit/integration tests with:
-
-cargo test
-
-## Notes
-
-- If you want me to re-run the `cargo add` command after you provide a correct crate name or source for `cbadv-rs`, say so and I'll run it.
-- If you'd like a README at the workspace root or for the other crate (`algo-pioneer`), tell me and I'll create one there.
-
----
-Generated by an automated assistant to bootstrap documentation and track the missing dependency `cbadv-rs`.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
