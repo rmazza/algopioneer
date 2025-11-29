@@ -100,6 +100,7 @@ impl EntryManager {
 impl EntryStrategy for EntryManager {
     async fn analyze(&self, spot: &MarketData, future: &MarketData) -> Signal {
         let basis_bps = self.calculate_basis_bps(spot.price, future.price);
+        println!("Basis Spread: {:.4} bps (Spot: {}, Future: {})", basis_bps, spot.price, future.price);
         
         // Long Spot / Short Future when basis is high (contango)
         // Close when basis converges

@@ -58,9 +58,6 @@ impl CoinbaseWebsocket {
             "type": "subscribe",
             "product_ids": product_ids,
             "channel": "ticker",
-            "api_key": self.api_key,
-            "timestamp": Utc::now().timestamp().to_string(),
-            "signature": self.sign_message(&Utc::now().timestamp().to_string(), "ticker", &product_ids),
         });
 
         write.send(Message::Text(subscribe_msg.to_string().into())).await.map_err(|e| e.to_string())?;
