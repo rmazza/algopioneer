@@ -26,6 +26,9 @@ use log::{info, debug, error};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
+const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
+const MAX_TICK_DIFF_MS: i64 = 500; // 500 milliseconds
+
 // --- Domain Models ---
 
 /// Represents a market data update (price tick).
@@ -418,8 +421,18 @@ impl BasisTradingStrategy {
 
     /// Processes a single tick of matched Spot and Future data.
     async fn process_tick(&mut self, spot: &MarketData, future: &MarketData) {
-        let now = Utc::now().timestamp();
-        if (now - spot.timestamp).abs() > 2 || (now - future.timestamp).abs() > 2 { return; }
+        let now = Utc::now().timestamp_millis();
+        
+        // Check 1: Data freshness (Age)
+        if (now - spot.timestamp).abs() > MAX_TICK_AGE_MS || (now - future.timestamp).abs() > MAX_TICK_AGE_MS {
+            return; 
+        }
+
+        // Check 2: Data correlation (Synchronization)
+        // Ensure the two price points are from roughly the same moment in time.
+        if (spot.timestamp - future.timestamp).abs() > MAX_TICK_DIFF_MS {
+            return;
+        }
 
         let spread = Spread::new(spot.price, future.price);
         let signal = self.entry_manager.analyze(spread).await;

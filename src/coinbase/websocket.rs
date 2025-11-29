@@ -83,7 +83,7 @@ impl CoinbaseWebsocket {
                                                     let data = MarketData {
                                                         symbol: ticker.product_id,
                                                         price,
-                                                        timestamp: Utc::now().timestamp(),
+                                                        timestamp: Utc::now().timestamp_millis(),
                                                     };
                                                     if let Err(e) = sender.send(data).await {
                                                         error!("Error sending market data: {}", e);
