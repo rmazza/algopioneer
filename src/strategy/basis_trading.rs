@@ -21,14 +21,32 @@ use crate::coinbase::CoinbaseClient;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use rust_decimal::prelude::*;
-use chrono::Utc;
-use log::{info, debug, error};
-use tokio::sync::mpsc;
+use chrono::{Utc, DateTime};
+use tracing::{info, debug, error, instrument};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Duration;
 
 const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
 const MAX_TICK_DIFF_MS: i64 = 500; // 500 milliseconds
 const EXECUTION_TIMEOUT_MS: i64 = 30000; // 30 seconds
+
+// --- Time Abstraction ---
+
+pub trait Clock: Send + Sync + std::fmt::Debug {
+    fn now(&self) -> DateTime<Utc>;
+    fn now_ts_millis(&self) -> i64 {
+        self.now().timestamp_millis()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
 
 // --- Domain Models ---
 
@@ -86,7 +104,8 @@ pub enum StrategyState {
     Entering,
     InPosition,
     Exiting,
-    // In a real system, we'd have more granular states like "PartiallyFilled", "Unwinding", etc.
+    Reconciling, // New State: "I don't know what happened, let me check."
+    Halted,      // New State: "Something is broken, human needed."
 }
 
 #[derive(Debug)]
@@ -147,6 +166,7 @@ impl EntryManager {
 
 #[async_trait]
 impl EntryStrategy for EntryManager {
+    #[instrument(skip(self))]
     async fn analyze(&self, spread: Spread) -> Signal {
         debug!("Basis Spread: {:.4} bps (Spot: {}, Future: {})", spread.value_bps, spread.spot_price, spread.future_price);
         
@@ -187,34 +207,55 @@ impl RiskMonitor {
 pub struct RecoveryWorker {
     client: Arc<dyn Executor>,
     rx: mpsc::Receiver<RecoveryTask>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl RecoveryWorker {
     pub fn new(client: Arc<dyn Executor>, rx: mpsc::Receiver<RecoveryTask>) -> Self {
-        Self { client, rx }
+        Self { 
+            client, 
+            rx,
+            semaphore: Arc::new(Semaphore::new(5)), // Limit to 5 concurrent recoveries
+        }
     }
 
+    #[instrument(skip(self), name = "recovery_worker")]
     pub async fn run(mut self) {
         info!("Recovery Worker started.");
         while let Some(task) = self.rx.recv().await {
-            info!("Processing Recovery Task: {:?}", task);
-            let mut attempts = 0;
-            loop {
-                attempts += 1;
-                match self.client.execute_order(&task.symbol, &task.action, task.quantity).await {
-                    Ok(_) => {
-                        info!("Recovery Successful for {} on attempt {}", task.symbol, attempts);
-                        break;
-                    },
-                    Err(e) => {
-                        error!("Recovery Failed for {} (Attempt {}): {}", task.symbol, attempts, e);
-                        if attempts >= 5 {
-                            error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
-                            break;
+            let client = self.client.clone();
+            let permit = self.semaphore.clone().acquire_owned().await;
+            
+            if let Ok(permit) = permit {
+                tokio::spawn(async move {
+                    // Permit is held until dropped at end of scope
+                    let _permit = permit;
+                    
+                    info!("Processing Recovery Task: {:?}", task);
+                    let mut attempts = 0;
+                    let mut backoff = Duration::from_secs(2);
+
+                    loop {
+                        attempts += 1;
+                        match client.execute_order(&task.symbol, &task.action, task.quantity).await {
+                            Ok(_) => {
+                                info!("Recovery Successful for {} on attempt {}", task.symbol, attempts);
+                                break;
+                            },
+                            Err(e) => {
+                                error!("Recovery Failed for {} (Attempt {}): {}", task.symbol, attempts, e);
+                                if attempts >= 5 {
+                                    error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
+                                    break;
+                                }
+                                tokio::time::sleep(backoff).await;
+                                backoff = backoff.checked_mul(2).unwrap_or(Duration::from_secs(60)); // Exponential backoff with cap check
+                            }
                         }
-                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
-                }
+                });
+            } else {
+                error!("Failed to acquire semaphore for recovery task");
             }
         }
     }
@@ -232,6 +273,7 @@ impl ExecutionEngine {
         Self { client, recovery_tx }
     }
 
+    #[instrument(skip(self))]
     pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal) -> ExecutionResult {
         // Concurrently execute both legs to minimize leg risk
         let spot_leg = self.client.execute_order(&pair.spot_symbol, "buy", quantity);
@@ -279,6 +321,7 @@ impl ExecutionEngine {
         ExecutionResult::Success
     }
 
+    #[instrument(skip(self))]
     pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal) -> ExecutionResult {
          // Reverse of entry: Sell Spot, Buy Future
         let spot_leg = self.client.execute_order(&pair.spot_symbol, "sell", quantity);
@@ -337,6 +380,7 @@ pub struct BasisTradingStrategy {
     last_state_change_ts: i64,
     report_tx: mpsc::Sender<ExecutionReport>,
     report_rx: mpsc::Receiver<ExecutionReport>,
+    clock: Box<dyn Clock>,
 }
 
 impl BasisTradingStrategy {
@@ -347,21 +391,25 @@ impl BasisTradingStrategy {
         execution_engine: ExecutionEngine,
         spot_symbol: String,
         future_symbol: String,
+        clock: Box<dyn Clock>,
     ) -> Self {
         let (report_tx, report_rx) = mpsc::channel(100);
+        let now = clock.now_ts_millis();
         Self {
             entry_manager,
             risk_monitor,
             execution_engine,
             pair: InstrumentPair { spot_symbol, future_symbol },
             state: StrategyState::Flat,
-            last_state_change_ts: Utc::now().timestamp_millis(),
+            last_state_change_ts: now,
             report_tx,
             report_rx,
+            clock,
         }
     }
 
     /// Runs the strategy loop.
+    #[instrument(skip(self, spot_rx, future_rx), name = "strategy_loop")]
     pub async fn run(&mut self, mut spot_rx: tokio::sync::mpsc::Receiver<MarketData>, mut future_rx: tokio::sync::mpsc::Receiver<MarketData>) {
         info!("Starting Delta-Neutral Basis Strategy for {}/{}", self.pair.spot_symbol, self.pair.future_symbol);
 
@@ -400,12 +448,12 @@ impl BasisTradingStrategy {
                     Signal::Buy => {
                         info!("Entry Successful. Transitioning to InPosition.");
                         self.state = StrategyState::InPosition;
-                        self.last_state_change_ts = Utc::now().timestamp_millis();
+                        self.last_state_change_ts = self.clock.now_ts_millis();
                     },
                     Signal::Sell => {
                         info!("Exit Successful. Transitioning to Flat.");
                         self.state = StrategyState::Flat;
-                        self.last_state_change_ts = Utc::now().timestamp_millis();
+                        self.last_state_change_ts = self.clock.now_ts_millis();
                     },
                     _ => {}
                 }
@@ -417,11 +465,11 @@ impl BasisTradingStrategy {
                 match report.action {
                     Signal::Buy => {
                          self.state = StrategyState::Flat;
-                         self.last_state_change_ts = Utc::now().timestamp_millis();
+                         self.last_state_change_ts = self.clock.now_ts_millis();
                     },
                     Signal::Sell => {
                          self.state = StrategyState::InPosition; // Failed to exit, still in position
-                         self.last_state_change_ts = Utc::now().timestamp_millis();
+                         self.last_state_change_ts = self.clock.now_ts_millis();
                     },
                     _ => {}
                 }
@@ -430,38 +478,42 @@ impl BasisTradingStrategy {
                 error!("CRITICAL: Partial Execution Failure: {}. Manual Intervention Required.", reason);
                 // In a real system, we'd transition to a "Broken" or "ManualIntervention" state.
                 // For now, we'll stay in the current state but log heavily.
+                self.state = StrategyState::Halted;
             }
         }
     }
 
     fn check_timeout(&mut self) {
         if self.state == StrategyState::Entering || self.state == StrategyState::Exiting {
-            let now = Utc::now().timestamp_millis();
+            let now = self.clock.now_ts_millis();
             if now - self.last_state_change_ts > EXECUTION_TIMEOUT_MS {
-                error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Resetting state.", self.state, EXECUTION_TIMEOUT_MS);
+                error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Transitioning to Reconciling.", self.state, EXECUTION_TIMEOUT_MS);
                 
-                // Timeout Recovery Logic
-                // In a real system, we would query the exchange here to see if the order actually filled.
-                // For now, we assume it failed silently and revert to the previous safe state.
-                match self.state {
-                    StrategyState::Entering => {
-                        info!("Timeout: Reverting Entering -> Flat");
-                        self.state = StrategyState::Flat;
-                    },
-                    StrategyState::Exiting => {
-                        info!("Timeout: Reverting Exiting -> InPosition");
-                        self.state = StrategyState::InPosition;
-                    },
-                    _ => {}
-                }
+                // Transition to Reconciling instead of blind reset
+                self.state = StrategyState::Reconciling;
                 self.last_state_change_ts = now;
+                self.trigger_reconciliation();
             }
         }
     }
 
+    fn trigger_reconciliation(&self) {
+        info!("Triggering reconciliation process...");
+        // In a real system, this would spawn a task to query the exchange for open orders and positions
+        // and send a report back to the main loop to resolve the state.
+        // For now, we log an alert.
+        error!("MANUAL INTERVENTION REQUIRED: Strategy is in Reconciling state. Please check exchange positions and restart if necessary.");
+    }
+
     /// Processes a single tick of matched Spot and Future data.
+    #[instrument(skip(self, spot, future), fields(spot_price = %spot.price, future_price = %future.price))]
     async fn process_tick(&mut self, spot: &MarketData, future: &MarketData) {
-        let now = Utc::now().timestamp_millis();
+        // Safety Guard: Do not process ticks if we are in an unstable state
+        if matches!(self.state, StrategyState::Reconciling | StrategyState::Halted) {
+            return;
+        }
+
+        let now = self.clock.now_ts_millis();
         
         // Check 1: Data freshness (Age)
         if (now - spot.timestamp).abs() > MAX_TICK_AGE_MS || (now - future.timestamp).abs() > MAX_TICK_AGE_MS {
@@ -485,7 +537,7 @@ impl BasisTradingStrategy {
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
                     info!("Entry Signal! Transitioning to Entering state and spawning execution...");
                     self.state = StrategyState::Entering; // Prevent further spawns
-                    self.last_state_change_ts = Utc::now().timestamp_millis();
+                    self.last_state_change_ts = self.clock.now_ts_millis();
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
@@ -505,7 +557,7 @@ impl BasisTradingStrategy {
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
                     info!("Exit Signal! Transitioning to Exiting state and spawning execution...");
                     self.state = StrategyState::Exiting;
-                    self.last_state_change_ts = Utc::now().timestamp_millis();
+                    self.last_state_change_ts = self.clock.now_ts_millis();
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();

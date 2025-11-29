@@ -7,7 +7,7 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, RecoveryWorker};
+use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock};
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,7 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
         execution_engine,
         spot_id.to_string(),
         future_id.to_string(),
+        Box::new(SystemClock),
     );
 
     // Create channels for market data
