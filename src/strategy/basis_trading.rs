@@ -538,6 +538,7 @@ pub struct BasisTradingStrategy {
     recovery_rx: mpsc::Receiver<RecoveryResult>,
     clock: Box<dyn Clock>,
     throttler: BasisLogThrottler,
+    pub state_notifier: Option<mpsc::Sender<StrategyState>>,
 }
 
 impl BasisTradingStrategy {
@@ -565,6 +566,23 @@ impl BasisTradingStrategy {
             recovery_rx,
             clock,
             throttler: BasisLogThrottler::new(5), // 5 seconds default
+            state_notifier: None,
+        }
+    }
+
+    pub fn set_observer(&mut self, tx: mpsc::Sender<StrategyState>) {
+        self.state_notifier = Some(tx);
+    }
+
+    fn transition_state(&mut self, new_state: StrategyState) {
+        if self.state != new_state {
+            info!("State Transition: {:?} -> {:?}", self.state, new_state);
+            self.state = new_state.clone();
+            self.last_state_change_ts = self.clock.now_ts_millis();
+            
+            if let Some(tx) = &self.state_notifier {
+                let _ = tx.try_send(new_state);
+            }
         }
     }
 
@@ -610,13 +628,11 @@ impl BasisTradingStrategy {
                 match report.action {
                     Signal::Buy => {
                         info!("Entry Successful. Transitioning to InPosition.");
-                        self.state = StrategyState::InPosition;
-                        self.last_state_change_ts = self.clock.now_ts_millis();
+                        self.transition_state(StrategyState::InPosition);
                     },
                     Signal::Sell => {
                         info!("Exit Successful. Transitioning to Flat.");
-                        self.state = StrategyState::Flat;
-                        self.last_state_change_ts = self.clock.now_ts_millis();
+                        self.transition_state(StrategyState::Flat);
                     },
                     _ => {}
                 }
@@ -627,12 +643,10 @@ impl BasisTradingStrategy {
                 // For TotalFailure (atomic rollback succeeded), we revert to previous state.
                 match report.action {
                     Signal::Buy => {
-                         self.state = StrategyState::Flat;
-                         self.last_state_change_ts = self.clock.now_ts_millis();
+                         self.transition_state(StrategyState::Flat);
                     },
                     Signal::Sell => {
-                         self.state = StrategyState::InPosition; // Failed to exit, still in position
-                         self.last_state_change_ts = self.clock.now_ts_millis();
+                         self.transition_state(StrategyState::InPosition); // Failed to exit, still in position
                     },
                     _ => {}
                 }
@@ -641,8 +655,7 @@ impl BasisTradingStrategy {
                 error!("CRITICAL: Partial Execution Failure: {}. Transitioning to Reconciling.", reason);
                 // We don't know the exact state, so we go to Reconciling.
                 // The RecoveryWorker is already working on it.
-                self.state = StrategyState::Reconciling;
-                self.last_state_change_ts = self.clock.now_ts_millis();
+                self.transition_state(StrategyState::Reconciling);
             }
         }
     }
@@ -669,13 +682,12 @@ impl BasisTradingStrategy {
                 // So in both current cases, success means Flat.
                 if self.state == StrategyState::Reconciling {
                     info!("Recovery complete. Transitioning to Flat.");
-                    self.state = StrategyState::Flat;
-                    self.last_state_change_ts = self.clock.now_ts_millis();
+                    self.transition_state(StrategyState::Flat);
                 }
             },
             RecoveryResult::Failed(symbol) => {
                 error!("Recovery FAILED for {}. Transitioning to Halted.", symbol);
-                self.state = StrategyState::Halted;
+                self.transition_state(StrategyState::Halted);
             }
         }
     }
@@ -687,8 +699,7 @@ impl BasisTradingStrategy {
                 error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Transitioning to Reconciling.", self.state, EXECUTION_TIMEOUT_MS);
                 
                 // Transition to Reconciling instead of blind reset
-                self.state = StrategyState::Reconciling;
-                self.last_state_change_ts = now;
+                self.transition_state(StrategyState::Reconciling);
                 self.trigger_reconciliation();
             }
         }
@@ -748,8 +759,7 @@ impl BasisTradingStrategy {
                 let spot_qty = dec!(0.1); 
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
                     info!("Entry Signal! Transitioning to Entering state and spawning execution...");
-                    self.state = StrategyState::Entering; // Prevent further spawns
-                    self.last_state_change_ts = self.clock.now_ts_millis();
+                    self.transition_state(StrategyState::Entering); // Prevent further spawns
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
@@ -768,8 +778,7 @@ impl BasisTradingStrategy {
                 let spot_qty = dec!(0.1); 
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
                     info!("Exit Signal! Transitioning to Exiting state and spawning execution...");
-                    self.state = StrategyState::Exiting;
-                    self.last_state_change_ts = self.clock.now_ts_millis();
+                    self.transition_state(StrategyState::Exiting);
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
