@@ -50,6 +50,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ta",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",

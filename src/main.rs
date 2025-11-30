@@ -7,7 +7,7 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock};
+use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType};
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -257,15 +257,20 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
 
     // Create Recovery Channel
     let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(100);
+    // Create Feedback Channel for Recovery Worker -> Strategy
+    let (feedback_tx, feedback_rx) = tokio::sync::mpsc::channel(100);
 
     // Spawn Recovery Worker
-    let recovery_worker = RecoveryWorker::new(client.clone(), recovery_rx);
+    let recovery_worker = RecoveryWorker::new(client.clone(), recovery_rx, feedback_tx);
     tokio::spawn(async move {
         recovery_worker.run().await;
     });
 
-    let entry_manager = Box::new(EntryManager::new(dec!(10.0), dec!(2.0))); // 10 bps entry, 2 bps exit
-    let risk_monitor = RiskMonitor::new(dec!(3.0)); // 3x max leverage
+    // Initialize Cost Model (e.g., 10 bps maker, 20 bps taker, 5 bps slippage)
+    let cost_model = TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0));
+
+    let entry_manager = Box::new(EntryManager::new(dec!(10.0), dec!(2.0), cost_model)); // 10 bps entry (net), 2 bps exit
+    let risk_monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear); // 3x max leverage, Linear (BTC-USD spot vs BTC-USD future)
     let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx);
 
     let mut strategy = BasisTradingStrategy::new(
@@ -274,6 +279,7 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
         execution_engine,
         spot_id.to_string(),
         future_id.to_string(),
+        feedback_rx,
         Box::new(SystemClock),
     );
 

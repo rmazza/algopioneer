@@ -22,13 +22,53 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use rust_decimal::prelude::*;
 use chrono::{Utc, DateTime};
-use tracing::{info, debug, error, instrument};
+use tracing::{info, debug, error, instrument, warn};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Duration;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum BasisTradingError {
+    #[error("Invalid input parameters: {0}")]
+    InvalidInput(String),
+    #[error("Math error: {0}")]
+    MathError(String),
+    #[error("Execution error: {0}")]
+    ExecutionError(String),
+    #[error("Unknown error: {0}")]
+    Unknown(String),
+}
 
 const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
 const MAX_TICK_DIFF_MS: i64 = 500; // 500 milliseconds
 const EXECUTION_TIMEOUT_MS: i64 = 30000; // 30 seconds
+
+// --- Financial Models ---
+
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionCostModel {
+    pub maker_fee_bps: Decimal,
+    pub taker_fee_bps: Decimal,
+    pub slippage_bps: Decimal,
+}
+
+impl TransactionCostModel {
+    pub fn new(maker_fee_bps: Decimal, taker_fee_bps: Decimal, slippage_bps: Decimal) -> Self {
+        Self { maker_fee_bps, taker_fee_bps, slippage_bps }
+    }
+
+    pub fn calc_net_spread(&self, gross_spread_bps: Decimal) -> Decimal {
+        // Net = Gross - (4 * Fees) - Slippage
+        // Assuming 4 legs (Entry Spot, Entry Future, Exit Spot, Exit Future)
+        // And assuming we are Taker on all for worst case, or Maker?
+        // Let's assume Taker for conservatism in this model unless specified.
+        // Actually, usually we might be Maker on one. Let's stick to the requirement:
+        // "Net Spread (Gross Spread - (4 * Fees) - Slippage)"
+        // We'll use taker fee as the conservative fee.
+        let total_fees = self.taker_fee_bps * dec!(4.0);
+        gross_spread_bps - total_fees - self.slippage_bps
+    }
+}
 
 // --- Time Abstraction ---
 
@@ -109,6 +149,12 @@ pub enum StrategyState {
 }
 
 #[derive(Debug)]
+pub enum RecoveryResult {
+    Success(String), // Symbol
+    Failed(String),  // Symbol
+}
+
+#[derive(Debug)]
 pub enum ExecutionResult {
     Success,
     PartialFailure(String), // e.g., "Spot filled, Future failed"
@@ -127,6 +173,7 @@ pub struct RecoveryTask {
     pub action: String, // "buy" or "sell"
     pub quantity: Decimal,
     pub reason: String,
+    pub attempts: u32,
 }
 
 // --- Interfaces (Dependency Injection) ---
@@ -153,13 +200,15 @@ pub trait Executor: Send + Sync {
 pub struct EntryManager {
     entry_threshold_bps: Decimal,
     exit_threshold_bps: Decimal,
+    cost_model: TransactionCostModel,
 }
 
 impl EntryManager {
-    pub fn new(entry_threshold_bps: Decimal, exit_threshold_bps: Decimal) -> Self {
+    pub fn new(entry_threshold_bps: Decimal, exit_threshold_bps: Decimal, cost_model: TransactionCostModel) -> Self {
         Self {
             entry_threshold_bps,
             exit_threshold_bps,
+            cost_model,
         }
     }
 }
@@ -168,11 +217,15 @@ impl EntryManager {
 impl EntryStrategy for EntryManager {
     #[instrument(skip(self))]
     async fn analyze(&self, spread: Spread) -> Signal {
-        debug!("Basis Spread: {:.4} bps (Spot: {}, Future: {})", spread.value_bps, spread.spot_price, spread.future_price);
+        let net_spread = self.cost_model.calc_net_spread(spread.value_bps);
+        debug!("Basis Spread: {:.4} bps (Net: {:.4}) (Spot: {}, Future: {})", spread.value_bps, net_spread, spread.spot_price, spread.future_price);
         
-        if spread.value_bps > self.entry_threshold_bps {
+        if net_spread > self.entry_threshold_bps {
             Signal::Buy
         } else if spread.value_bps < self.exit_threshold_bps {
+            // For exit, we might care about gross spread being low enough, or net spread being high enough (if we are shorting the basis).
+            // Usually for basis trading: Buy when spread is high, Sell when spread is low (converges).
+            // So exit condition is usually just convergence.
             Signal::Sell
         } else {
             Signal::Hold
@@ -180,26 +233,48 @@ impl EntryStrategy for EntryManager {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InstrumentType {
+    Linear,
+    Inverse,
+}
+
 /// Tracks delta and enforces safety limits.
 pub struct RiskMonitor {
     _max_leverage: Decimal,
     _target_delta: Decimal, // Should be 0.0 for delta-neutral
+    instrument_type: InstrumentType,
 }
 
 impl RiskMonitor {
-    pub fn new(max_leverage: Decimal) -> Self {
+    pub fn new(max_leverage: Decimal, instrument_type: InstrumentType) -> Self {
         Self {
             _max_leverage: max_leverage,
             _target_delta: Decimal::zero(),
+            instrument_type,
         }
     }
 
-    pub fn calc_hedge_ratio(&self, spot_quantity: Decimal, _spot_price: Decimal, _future_price: Decimal) -> Result<Decimal, String> {
+    pub fn calc_hedge_ratio(&self, spot_quantity: Decimal, _spot_price: Decimal, future_price: Decimal) -> Result<Decimal, BasisTradingError> {
         if spot_quantity <= Decimal::zero() {
-            return Err("Invalid input parameters".to_string());
+            return Err(BasisTradingError::InvalidInput("Spot quantity must be positive".to_string()));
         }
-        // Simple 1:1 hedge for now
-        Ok(spot_quantity)
+        
+        match self.instrument_type {
+            InstrumentType::Linear => Ok(spot_quantity),
+            InstrumentType::Inverse => {
+                // Inverse: Contract value = 1 USD (usually)
+                // Quantity = (Spot Value in USD) / (Contract Value in USD)
+                // Spot Value = spot_quantity * spot_price (but here we are hedging the USD value)
+                // Wait, for Inverse (e.g. BTC-USD perp), 1 contract = 1 USD.
+                // To hedge 1 BTC at $50,000, we need 50,000 contracts.
+                // Hedge Qty = Spot Qty * Future Price
+                if future_price.is_zero() {
+                    return Err(BasisTradingError::MathError("Future price cannot be zero for inverse calculation".to_string()));
+                }
+                Ok(spot_quantity * future_price)
+            }
+        }
     }
 }
 
@@ -207,14 +282,16 @@ impl RiskMonitor {
 pub struct RecoveryWorker {
     client: Arc<dyn Executor>,
     rx: mpsc::Receiver<RecoveryTask>,
+    feedback_tx: mpsc::Sender<RecoveryResult>,
     semaphore: Arc<Semaphore>,
 }
 
 impl RecoveryWorker {
-    pub fn new(client: Arc<dyn Executor>, rx: mpsc::Receiver<RecoveryTask>) -> Self {
+    pub fn new(client: Arc<dyn Executor>, rx: mpsc::Receiver<RecoveryTask>, feedback_tx: mpsc::Sender<RecoveryResult>) -> Self {
         Self { 
             client, 
             rx,
+            feedback_tx,
             semaphore: Arc::new(Semaphore::new(5)), // Limit to 5 concurrent recoveries
         }
     }
@@ -222,8 +299,9 @@ impl RecoveryWorker {
     #[instrument(skip(self), name = "recovery_worker")]
     pub async fn run(mut self) {
         info!("Recovery Worker started.");
-        while let Some(task) = self.rx.recv().await {
+        while let Some(mut task) = self.rx.recv().await {
             let client = self.client.clone();
+            let feedback_tx = self.feedback_tx.clone();
             let permit = self.semaphore.clone().acquire_owned().await;
             
             if let Ok(permit) = permit {
@@ -232,24 +310,25 @@ impl RecoveryWorker {
                     let _permit = permit;
                     
                     info!("Processing Recovery Task: {:?}", task);
-                    let mut attempts = 0;
                     let mut backoff = Duration::from_secs(2);
 
                     loop {
-                        attempts += 1;
+                        task.attempts += 1;
                         match client.execute_order(&task.symbol, &task.action, task.quantity).await {
                             Ok(_) => {
-                                info!("Recovery Successful for {} on attempt {}", task.symbol, attempts);
+                                info!("Recovery Successful for {} on attempt {}", task.symbol, task.attempts);
+                                let _ = feedback_tx.send(RecoveryResult::Success(task.symbol.clone())).await;
                                 break;
                             },
                             Err(e) => {
-                                error!("Recovery Failed for {} (Attempt {}): {}", task.symbol, attempts, e);
-                                if attempts >= 5 {
+                                error!("Recovery Failed for {} (Attempt {}): {}", task.symbol, task.attempts, e);
+                                if task.attempts >= 5 {
                                     error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
+                                    let _ = feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
                                     break;
                                 }
                                 tokio::time::sleep(backoff).await;
-                                backoff = backoff.checked_mul(2).unwrap_or(Duration::from_secs(60)); // Exponential backoff with cap check
+                                backoff = std::cmp::min(backoff * 2, Duration::from_secs(60));
                             }
                         }
                     }
@@ -294,6 +373,7 @@ impl ExecutionEngine {
                      action: "buy".to_string(),
                      quantity: hedge_qty,
                      reason: format!("Spot failed: {}", e),
+                     attempts: 0,
                  };
                  if let Err(send_err) = self.recovery_tx.send(task).await {
                      error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
@@ -311,6 +391,7 @@ impl ExecutionEngine {
                 action: "sell".to_string(),
                 quantity: quantity,
                 reason: format!("Future failed: {}", e),
+                attempts: 0,
             };
             if let Err(send_err) = self.recovery_tx.send(task).await {
                 error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
@@ -332,6 +413,10 @@ impl ExecutionEngine {
         let spot_res = spot_res.map_err(|e| e.to_string());
         let future_res = future_res.map_err(|e| e.to_string());
 
+        if spot_res.is_err() && future_res.is_err() {
+            return ExecutionResult::TotalFailure(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err()));
+        }
+
         if spot_res.is_err() || future_res.is_err() {
             // For exit, failures are messy. We might be left with a position.
             // A real system would have complex unwinding logic here.
@@ -346,6 +431,7 @@ impl ExecutionEngine {
                     action: "sell".to_string(),
                     quantity: quantity,
                     reason: format!("Exit Spot failed: {}", e),
+                    attempts: 0,
                 };
                 let _ = self.recovery_tx.send(task).await;
             }
@@ -357,6 +443,7 @@ impl ExecutionEngine {
                     action: "buy".to_string(),
                     quantity: hedge_qty,
                     reason: format!("Exit Future failed: {}", e),
+                    attempts: 0,
                 };
                 let _ = self.recovery_tx.send(task).await;
             }
@@ -380,6 +467,7 @@ pub struct BasisTradingStrategy {
     last_state_change_ts: i64,
     report_tx: mpsc::Sender<ExecutionReport>,
     report_rx: mpsc::Receiver<ExecutionReport>,
+    recovery_rx: mpsc::Receiver<RecoveryResult>,
     clock: Box<dyn Clock>,
 }
 
@@ -391,6 +479,7 @@ impl BasisTradingStrategy {
         execution_engine: ExecutionEngine,
         spot_symbol: String,
         future_symbol: String,
+        recovery_rx: mpsc::Receiver<RecoveryResult>,
         clock: Box<dyn Clock>,
     ) -> Self {
         let (report_tx, report_rx) = mpsc::channel(100);
@@ -404,6 +493,7 @@ impl BasisTradingStrategy {
             last_state_change_ts: now,
             report_tx,
             report_rx,
+            recovery_rx,
             clock,
         }
     }
@@ -430,6 +520,9 @@ impl BasisTradingStrategy {
                 }
                 Some(report) = self.report_rx.recv() => {
                     self.handle_execution_report(report);
+                }
+                Some(recovery_res) = self.recovery_rx.recv() => {
+                    self.handle_recovery_result(recovery_res);
                 }
                 else => break, // Channels closed
             }
@@ -475,9 +568,43 @@ impl BasisTradingStrategy {
                 }
             },
             ExecutionResult::PartialFailure(reason) => {
-                error!("CRITICAL: Partial Execution Failure: {}. Manual Intervention Required.", reason);
-                // In a real system, we'd transition to a "Broken" or "ManualIntervention" state.
-                // For now, we'll stay in the current state but log heavily.
+                error!("CRITICAL: Partial Execution Failure: {}. Transitioning to Reconciling.", reason);
+                // We don't know the exact state, so we go to Reconciling.
+                // The RecoveryWorker is already working on it.
+                self.state = StrategyState::Reconciling;
+                self.last_state_change_ts = self.clock.now_ts_millis();
+            }
+        }
+    }
+
+    fn handle_recovery_result(&mut self, result: RecoveryResult) {
+        info!("Received Recovery Result: {:?}", result);
+        match result {
+            RecoveryResult::Success(symbol) => {
+                info!("Recovery successful for {}. Attempting to resolve state.", symbol);
+                // If we were Reconciling, we might be able to go back to Flat or InPosition.
+                // This logic depends on what we were trying to do.
+                // For simplicity: If we were entering and failed partially, recovery means we unwound -> Flat.
+                // If we were exiting and failed partially, recovery means we finished exiting -> Flat.
+                // Or maybe we reverted to InPosition?
+                
+                // Ideally we should track "Target State".
+                // For now, let's assume recovery means we are "Safe".
+                // If we are in Reconciling, we can move to Flat if we believe we are flat.
+                // But we might be InPosition if we failed to exit and recovery just re-established the position?
+                // Actually, the recovery tasks in ExecutionEngine are:
+                // Entry Partial -> Kill Switch (Unwind) -> Goal: Flat
+                // Exit Partial -> Retry Exit -> Goal: Flat
+                
+                // So in both current cases, success means Flat.
+                if self.state == StrategyState::Reconciling {
+                    info!("Recovery complete. Transitioning to Flat.");
+                    self.state = StrategyState::Flat;
+                    self.last_state_change_ts = self.clock.now_ts_millis();
+                }
+            },
+            RecoveryResult::Failed(symbol) => {
+                error!("Recovery FAILED for {}. Transitioning to Halted.", symbol);
                 self.state = StrategyState::Halted;
             }
         }
