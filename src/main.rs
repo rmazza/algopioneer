@@ -259,7 +259,6 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
 
     // Create Recovery Channel
     let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(100);
-    println!("Recovery channels created.");
     // Create Feedback Channel for Recovery Worker -> Strategy
     let (feedback_tx, feedback_rx) = tokio::sync::mpsc::channel(100);
 
@@ -294,7 +293,6 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     let ws_client = CoinbaseWebsocket::new()?;
     let products = vec![spot_id.to_string(), future_id.to_string()];
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
-    println!("WebSocket client initialized.");
 
     // Spawn WebSocket Client
     tokio::spawn(async move {
@@ -302,7 +300,6 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
             eprintln!("WebSocket Error: {}", e);
         }
     });
-    println!("WebSocket task spawned.");
 
     // Demultiplexer: Route WS messages to appropriate strategy channels
     let spot_id_clone = spot_id.to_string();
@@ -322,7 +319,6 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     });
 
     // Run strategy
-    println!("--- Starting Strategy Loop ---");
     strategy.run(spot_rx, future_rx).await;
 
     Ok(())

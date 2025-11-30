@@ -583,11 +583,9 @@ impl BasisTradingStrategy {
                     self.check_timeout();
                 }
                 Some(spot_data) = spot_rx.recv() => {
-                    debug!("Strategy received Spot data: {}", spot_data.price);
                     latest_spot = Some(spot_data);
                 }
                 Some(future_data) = future_rx.recv() => {
-                    debug!("Strategy received Future data: {}", future_data.price);
                     latest_future = Some(future_data);
                 }
                 Some(report) = self.report_rx.recv() => {
@@ -601,8 +599,6 @@ impl BasisTradingStrategy {
 
             if let (Some(spot), Some(future)) = (&latest_spot, &latest_future) {
                 self.process_tick(spot, future).await;
-            } else {
-                debug!("Skipping process_tick. Spot present: {}, Future present: {}", latest_spot.is_some(), latest_future.is_some());
             }
         }
     }
