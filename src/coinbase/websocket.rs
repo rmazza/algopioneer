@@ -9,7 +9,7 @@ use crate::strategy::basis_trading::MarketData;
 use rust_decimal::Decimal;
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
-use log::{info, debug, error};
+use tracing::{info, debug, error};
 
 const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
 

@@ -99,7 +99,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Initialize Logger
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&cli.verbose)).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&cli.verbose))
+        .init();
 
     match &cli.command {
         Commands::Trade { product_id, duration, paper } => {
@@ -257,6 +259,7 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
 
     // Create Recovery Channel
     let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(100);
+    println!("Recovery channels created.");
     // Create Feedback Channel for Recovery Worker -> Strategy
     let (feedback_tx, feedback_rx) = tokio::sync::mpsc::channel(100);
 
@@ -291,6 +294,7 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     let ws_client = CoinbaseWebsocket::new()?;
     let products = vec![spot_id.to_string(), future_id.to_string()];
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
+    println!("WebSocket client initialized.");
 
     // Spawn WebSocket Client
     tokio::spawn(async move {
@@ -298,6 +302,7 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
             eprintln!("WebSocket Error: {}", e);
         }
     });
+    println!("WebSocket task spawned.");
 
     // Demultiplexer: Route WS messages to appropriate strategy channels
     let spot_id_clone = spot_id.to_string();
@@ -305,15 +310,19 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     
     tokio::spawn(async move {
         while let Some(data) = ws_rx.recv().await {
+            tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
             if data.symbol == spot_id_clone {
                 if let Err(_) = spot_tx.send(data).await { break; }
             } else if data.symbol == future_id_clone {
                 if let Err(_) = future_tx.send(data).await { break; }
+            } else {
+                tracing::warn!("Demux received unknown symbol: {}", data.symbol);
             }
         }
     });
 
     // Run strategy
+    println!("--- Starting Strategy Loop ---");
     strategy.run(spot_rx, future_rx).await;
 
     Ok(())

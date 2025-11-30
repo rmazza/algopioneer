@@ -24,7 +24,7 @@ use rust_decimal::prelude::*;
 use chrono::{Utc, DateTime};
 use tracing::{info, debug, error, instrument, warn};
 use tokio::sync::{mpsc, Semaphore};
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -42,6 +42,74 @@ pub enum BasisTradingError {
 const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
 const MAX_TICK_DIFF_MS: i64 = 500; // 500 milliseconds
 const EXECUTION_TIMEOUT_MS: i64 = 30000; // 30 seconds
+
+// --- Logging Utilities ---
+
+/// A lightweight rate limiter for logging to prevent log storms.
+#[derive(Debug)]
+pub struct LogThrottle {
+    last_log_time: Option<Instant>,
+    suppressed_count: u64,
+    interval: Duration,
+}
+
+impl LogThrottle {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            last_log_time: None,
+            suppressed_count: 0,
+            interval,
+        }
+    }
+
+    /// Checks if a log should be emitted.
+    /// Returns true if the interval has passed since the last log.
+    /// If false, increments the suppressed counter.
+    pub fn should_log(&mut self) -> bool {
+        let now = Instant::now();
+        match self.last_log_time {
+            Some(last) => {
+                if now.duration_since(last) >= self.interval {
+                    self.last_log_time = Some(now);
+                    true
+                } else {
+                    self.suppressed_count += 1;
+                    false
+                }
+            }
+            None => {
+                self.last_log_time = Some(now);
+                true
+            }
+        }
+    }
+
+    /// Returns the number of suppressed logs since the last successful log, and resets the counter.
+    pub fn get_and_reset_suppressed_count(&mut self) -> u64 {
+        let count = self.suppressed_count;
+        self.suppressed_count = 0;
+        count
+    }
+}
+
+/// container for all log throttlers used in the strategy.
+#[derive(Debug)]
+pub struct BasisLogThrottler {
+    pub unstable_state: LogThrottle,
+    pub tick_age: LogThrottle,
+    pub sync_issue: LogThrottle,
+}
+
+impl BasisLogThrottler {
+    pub fn new(interval_secs: u64) -> Self {
+        let interval = Duration::from_secs(interval_secs);
+        Self {
+            unstable_state: LogThrottle::new(interval),
+            tick_age: LogThrottle::new(interval),
+            sync_issue: LogThrottle::new(interval),
+        }
+    }
+}
 
 // --- Financial Models ---
 
@@ -469,6 +537,7 @@ pub struct BasisTradingStrategy {
     report_rx: mpsc::Receiver<ExecutionReport>,
     recovery_rx: mpsc::Receiver<RecoveryResult>,
     clock: Box<dyn Clock>,
+    throttler: BasisLogThrottler,
 }
 
 impl BasisTradingStrategy {
@@ -495,6 +564,7 @@ impl BasisTradingStrategy {
             report_rx,
             recovery_rx,
             clock,
+            throttler: BasisLogThrottler::new(5), // 5 seconds default
         }
     }
 
@@ -513,9 +583,11 @@ impl BasisTradingStrategy {
                     self.check_timeout();
                 }
                 Some(spot_data) = spot_rx.recv() => {
+                    debug!("Strategy received Spot data: {}", spot_data.price);
                     latest_spot = Some(spot_data);
                 }
                 Some(future_data) = future_rx.recv() => {
+                    debug!("Strategy received Future data: {}", future_data.price);
                     latest_future = Some(future_data);
                 }
                 Some(report) = self.report_rx.recv() => {
@@ -529,6 +601,8 @@ impl BasisTradingStrategy {
 
             if let (Some(spot), Some(future)) = (&latest_spot, &latest_future) {
                 self.process_tick(spot, future).await;
+            } else {
+                debug!("Skipping process_tick. Spot present: {}, Future present: {}", latest_spot.is_some(), latest_future.is_some());
             }
         }
     }
@@ -637,19 +711,34 @@ impl BasisTradingStrategy {
     async fn process_tick(&mut self, spot: &MarketData, future: &MarketData) {
         // Safety Guard: Do not process ticks if we are in an unstable state
         if matches!(self.state, StrategyState::Reconciling | StrategyState::Halted) {
+            if self.throttler.unstable_state.should_log() {
+                let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
+                warn!("Dropping tick due to unstable state: {:?} (Suppressed: {})", self.state, suppressed);
+            }
             return;
         }
 
         let now = self.clock.now_ts_millis();
         
         // Check 1: Data freshness (Age)
-        if (now - spot.timestamp).abs() > MAX_TICK_AGE_MS || (now - future.timestamp).abs() > MAX_TICK_AGE_MS {
+        let spot_age = now - spot.timestamp;
+        let future_age = now - future.timestamp;
+        if spot_age.abs() > MAX_TICK_AGE_MS || future_age.abs() > MAX_TICK_AGE_MS {
+            if self.throttler.tick_age.should_log() {
+                let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
+                warn!("Dropping tick due to age. Spot Age: {}ms, Future Age: {}ms (Max: {}ms) (Suppressed: {})", spot_age, future_age, MAX_TICK_AGE_MS, suppressed);
+            }
             return; 
         }
 
         // Check 2: Data correlation (Synchronization)
         // Ensure the two price points are from roughly the same moment in time.
-        if (spot.timestamp - future.timestamp).abs() > MAX_TICK_DIFF_MS {
+        let diff = (spot.timestamp - future.timestamp).abs();
+        if diff > MAX_TICK_DIFF_MS {
+            if self.throttler.sync_issue.should_log() {
+                let suppressed = self.throttler.sync_issue.get_and_reset_suppressed_count();
+                warn!("Dropping tick due to sync. Diff: {}ms (Max: {}ms). Spot TS: {}, Future TS: {} (Suppressed: {})", diff, MAX_TICK_DIFF_MS, spot.timestamp, future.timestamp, suppressed);
+            }
             return;
         }
 
@@ -706,5 +795,36 @@ impl BasisTradingStrategy {
 impl Executor for CoinbaseClient {
     async fn execute_order(&self, symbol: &str, side: &str, quantity: Decimal) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.place_order(symbol, side, quantity).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::Duration;
+
+    #[test]
+    fn test_log_throttle() {
+        let mut throttle = LogThrottle::new(Duration::from_millis(100));
+
+        // First call should log
+        assert!(throttle.should_log());
+        assert_eq!(throttle.get_and_reset_suppressed_count(), 0);
+
+        // Immediate subsequent calls should be suppressed
+        assert!(!throttle.should_log());
+        assert!(!throttle.should_log());
+        assert!(!throttle.should_log());
+
+        // Check suppressed count
+        assert_eq!(throttle.get_and_reset_suppressed_count(), 3);
+        // Count should be reset
+        assert_eq!(throttle.get_and_reset_suppressed_count(), 0);
+
+        // Wait for interval
+        std::thread::sleep(Duration::from_millis(110));
+
+        // Should log again
+        assert!(throttle.should_log());
     }
 }
