@@ -91,12 +91,19 @@ cargo run --release -- backtest
     *   `moving_average.rs`: Logic for the Moving Average Crossover strategy.
 *   `src/backtest/`: Backtesting engine logic.
 *   `src/sandbox/`: Utilities for simulated environments.
+*   `tests/`: Integration tests.
+    *   `integration_test.rs`: "Phoenix" recovery scenario test for Basis Trading strategy.
 
 ## Development
 
 **Run Unit Tests:**
 ```bash
 cargo test
+```
+
+**Run Integration Tests:**
+```bash
+cargo test --test integration_test
 ```
 
 **Linting:**

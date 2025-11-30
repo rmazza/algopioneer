@@ -75,6 +75,12 @@ The application uses subcommands to control its behavior.
 cargo test
 ```
 
+**Integration Test:**
+
+```bash
+cargo test --test integration_test
+```
+
 # Development Conventions
 
 *   **Configuration:** API keys and other secrets are managed through a `.env` file.
