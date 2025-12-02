@@ -7,7 +7,7 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::basis_trading::{BasisTradingStrategy, EntryManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType};
+use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode};
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -75,14 +75,14 @@ enum Commands {
     },
     /// Run a backtest on historical data
     Backtest,
-    /// Run the Delta-Neutral Basis Trading Strategy
-    BasisTrade {
-        /// Spot product (e.g., "BTC-USD")
-        #[arg(long, default_value = "BTC-USD")]
-        spot_id: String,
-        /// Future product (e.g., "BTC-USDT")
-        #[arg(long, default_value = "BTC-USDT")]
-        future_id: String,
+    /// Run the Dual-Leg Trading Strategy (Basis or Pairs)
+    DualLeg {
+        /// Strategy type: 'basis' or 'pairs'
+        #[arg(long)]
+        strategy: String,
+        /// Trading symbols (comma separated, e.g., "BTC-USD,BTC-USDT")
+        #[arg(long)]
+        symbols: String,
         /// Run in paper trading mode (simulated execution)
         #[arg(long, default_value_t = false)]
         paper: bool,
@@ -111,9 +111,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Backtest => {
             run_backtest()?;
         }
-        Commands::BasisTrade { spot_id, future_id, paper } => {
+        Commands::DualLeg { strategy, symbols, paper } => {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
-            run_basis_trading(spot_id, future_id, env).await?;
+            let parts: Vec<&str> = symbols.split(',').collect();
+            if parts.len() != 2 {
+                eprintln!("Error: --symbols must contain exactly two symbols separated by a comma (e.g., BTC-USD,BTC-USDT)");
+                return Ok(());
+            }
+            run_dual_leg_trading(strategy, parts[0], parts[1], env).await?;
         }
     }
 
@@ -250,10 +255,9 @@ fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
-async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Result<(), Box<dyn std::error::Error>> {
-    println!("--- AlgoPioneer: Initializing Basis Trading Strategy ---");
+async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str, env: AppEnv) -> Result<(), Box<dyn std::error::Error>> {
+    println!("--- AlgoPioneer: Initializing Dual-Leg Strategy ({}) ---", strategy_type);
 
-    // Initialize components
     // Initialize components
     let client = Arc::new(CoinbaseClient::new(env)?);
 
@@ -268,30 +272,48 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
         recovery_worker.run().await;
     });
 
-    // Initialize Cost Model (e.g., 10 bps maker, 20 bps taker, 5 bps slippage)
-    let cost_model = TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0));
-
-    let entry_manager = Box::new(EntryManager::new(dec!(10.0), dec!(2.0), cost_model)); // 10 bps entry (net), 2 bps exit
-    let risk_monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear); // 3x max leverage, Linear (BTC-USD spot vs BTC-USD future)
     let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx);
 
-    let mut strategy = BasisTradingStrategy::new(
-        entry_manager,
+    // Dependency Injection based on Strategy Type
+    let (entry_strategy, risk_monitor) = match strategy_type {
+        "basis" => {
+            // Initialize Cost Model (e.g., 10 bps maker, 20 bps taker, 5 bps slippage)
+            let cost_model = TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0));
+            let manager = Box::new(BasisManager::new(dec!(10.0), dec!(2.0), cost_model)); // 10 bps entry, 2 bps exit
+            let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
+            (manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>, monitor)
+        },
+        "pairs" => {
+            // Pairs Trading: Z-Score based
+            // Window 20, Entry Z=2.0, Exit Z=0.1
+            let manager = Box::new(PairsManager::new(20, 2.0, 0.1));
+            // Pairs is usually Dollar Neutral
+            let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
+            (manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>, monitor)
+        },
+        _ => {
+            eprintln!("Error: Unknown strategy type '{}'. Use 'basis' or 'pairs'.", strategy_type);
+            return Ok(());
+        }
+    };
+
+    let mut strategy = DualLegStrategy::new(
+        entry_strategy,
         risk_monitor,
         execution_engine,
-        spot_id.to_string(),
-        future_id.to_string(),
+        leg1_id.to_string(),
+        leg2_id.to_string(),
         feedback_rx,
         Box::new(SystemClock),
     );
 
     // Create channels for market data
-    let (spot_tx, spot_rx) = tokio::sync::mpsc::channel(100);
-    let (future_tx, future_rx) = tokio::sync::mpsc::channel(100);
+    let (leg1_tx, leg1_rx) = tokio::sync::mpsc::channel(100);
+    let (leg2_tx, leg2_rx) = tokio::sync::mpsc::channel(100);
 
     // WebSocket Integration
     let ws_client = CoinbaseWebsocket::new()?;
-    let products = vec![spot_id.to_string(), future_id.to_string()];
+    let products = vec![leg1_id.to_string(), leg2_id.to_string()];
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
 
     // Spawn WebSocket Client
@@ -302,16 +324,16 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     });
 
     // Demultiplexer: Route WS messages to appropriate strategy channels
-    let spot_id_clone = spot_id.to_string();
-    let future_id_clone = future_id.to_string();
+    let leg1_id_clone = leg1_id.to_string();
+    let leg2_id_clone = leg2_id.to_string();
     
     tokio::spawn(async move {
         while let Some(data) = ws_rx.recv().await {
             tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
-            if data.symbol == spot_id_clone {
-                if let Err(_) = spot_tx.send(data).await { break; }
-            } else if data.symbol == future_id_clone {
-                if let Err(_) = future_tx.send(data).await { break; }
+            if data.symbol == leg1_id_clone {
+                if let Err(_) = leg1_tx.send(data).await { break; }
+            } else if data.symbol == leg2_id_clone {
+                if let Err(_) = leg2_tx.send(data).await { break; }
             } else {
                 tracing::warn!("Demux received unknown symbol: {}", data.symbol);
             }
@@ -319,7 +341,7 @@ async fn run_basis_trading(spot_id: &str, future_id: &str, env: AppEnv) -> Resul
     });
 
     // Run strategy
-    strategy.run(spot_rx, future_rx).await;
+    strategy.run(leg1_rx, leg2_rx).await;
 
     Ok(())
 }

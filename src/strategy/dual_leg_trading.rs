@@ -1,13 +1,16 @@
 //! # Delta-Neutral Basis Trading Strategy
 //!
-//! This module implements a Delta-Neutral Basis Trading strategy that exploits the price difference (basis)
-//! between the Spot market and Futures/Perpetuals.
+//! # Dual-Leg Trading Strategy
+//!
+//! This module implements a generic Dual-Leg Trading strategy that supports:
+//! - **Basis Trading**: Exploits the price difference (basis) between Spot and Futures.
+//! - **Statistical Arbitrage (Pairs)**: Exploits mean reversion of the spread between two assets.
 //!
 //! ## Architecture
 //! The strategy is composed of three main components:
-//! - `EntryManager`: Analyzes the basis spread and generates entry/exit signals.
-//! - `RiskMonitor`: Tracks delta, margin, and exposure, ensuring the strategy remains delta-neutral.
-//! - `ExecutionEngine`: Handles the concurrent execution of orders on both legs (Spot and Futures).
+//! - `EntryStrategy`: Trait for analyzing the relationship between two legs (Basis or Pairs).
+//! - `RiskMonitor`: Tracks delta/exposure and ensures proper hedging (Delta Neutral or Dollar Neutral).
+//! - `ExecutionEngine`: Handles the concurrent execution of orders on both legs.
 //!
 //! ## Safety
 //! The strategy enforces strict risk checks via `RiskMonitor::calc_hedge_ratio` to prevent over-leveraging
@@ -15,7 +18,7 @@
 
 use crate::strategy::Signal;
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::error::Error;
 use crate::coinbase::CoinbaseClient;
 use rust_decimal::Decimal;
@@ -28,7 +31,7 @@ use tokio::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum BasisTradingError {
+pub enum DualLegError {
     #[error("Invalid input parameters: {0}")]
     InvalidInput(String),
     #[error("Math error: {0}")]
@@ -94,13 +97,13 @@ impl LogThrottle {
 
 /// container for all log throttlers used in the strategy.
 #[derive(Debug)]
-pub struct BasisLogThrottler {
+pub struct DualLegLogThrottler {
     pub unstable_state: LogThrottle,
     pub tick_age: LogThrottle,
     pub sync_issue: LogThrottle,
 }
 
-impl BasisLogThrottler {
+impl DualLegLogThrottler {
     pub fn new(interval_secs: u64) -> Self {
         let interval = Duration::from_secs(interval_secs);
         Self {
@@ -250,8 +253,8 @@ pub struct RecoveryTask {
 /// Allows for swapping different entry algorithms (e.g., simple threshold vs. statistical arbitrage).
 #[async_trait]
 pub trait EntryStrategy: Send + Sync {
-    /// Analyzes the market data for Spot and Future to generate a trading signal.
-    async fn analyze(&self, spread: Spread) -> Signal;
+    /// Analyzes the market data for Leg 1 and Leg 2 to generate a trading signal.
+    async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal;
 }
 
 /// Trait for order execution.
@@ -265,13 +268,13 @@ pub trait Executor: Send + Sync {
 // --- Components ---
 
 /// Analyzes the basis spread and generates signals based on fixed thresholds.
-pub struct EntryManager {
+pub struct BasisManager {
     entry_threshold_bps: Decimal,
     exit_threshold_bps: Decimal,
     cost_model: TransactionCostModel,
 }
 
-impl EntryManager {
+impl BasisManager {
     pub fn new(entry_threshold_bps: Decimal, exit_threshold_bps: Decimal, cost_model: TransactionCostModel) -> Self {
         Self {
             entry_threshold_bps,
@@ -282,19 +285,93 @@ impl EntryManager {
 }
 
 #[async_trait]
-impl EntryStrategy for EntryManager {
+impl EntryStrategy for BasisManager {
     #[instrument(skip(self))]
-    async fn analyze(&self, spread: Spread) -> Signal {
+    async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal {
+        let spread = Spread::new(leg1.price, leg2.price);
         let net_spread = self.cost_model.calc_net_spread(spread.value_bps);
         debug!("Basis Spread: {:.4} bps (Net: {:.4}) (Spot: {}, Future: {})", spread.value_bps, net_spread, spread.spot_price, spread.future_price);
         
         if net_spread > self.entry_threshold_bps {
             Signal::Buy
         } else if spread.value_bps < self.exit_threshold_bps {
-            // For exit, we might care about gross spread being low enough, or net spread being high enough (if we are shorting the basis).
-            // Usually for basis trading: Buy when spread is high, Sell when spread is low (converges).
-            // So exit condition is usually just convergence.
             Signal::Sell
+        } else {
+            Signal::Hold
+        }
+    }
+}
+
+/// Statistical Arbitrage (Pairs Trading) Manager.
+/// Uses Z-Score of the log-spread to generate signals.
+pub struct PairsManager {
+    window_size: usize,
+    entry_z_score: f64,
+    exit_z_score: f64,
+    spread_history: Mutex<std::collections::VecDeque<f64>>,
+}
+
+impl PairsManager {
+    pub fn new(window_size: usize, entry_z_score: f64, exit_z_score: f64) -> Self {
+        Self {
+            window_size,
+            entry_z_score,
+            exit_z_score,
+            spread_history: Mutex::new(std::collections::VecDeque::with_capacity(window_size)),
+        }
+    }
+}
+
+#[async_trait]
+impl EntryStrategy for PairsManager {
+    #[instrument(skip(self))]
+    async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal {
+        let p1 = leg1.price.to_f64().unwrap_or(0.0);
+        let p2 = leg2.price.to_f64().unwrap_or(0.0);
+
+        if p1 <= 0.0 || p2 <= 0.0 {
+            return Signal::Hold;
+        }
+
+        let spread = p1.ln() - p2.ln();
+        
+        let z_score = {
+            let mut history = self.spread_history.lock().unwrap();
+            history.push_back(spread);
+            if history.len() > self.window_size {
+                history.pop_front();
+            }
+
+            if history.len() < self.window_size {
+                return Signal::Hold; // Not enough data
+            }
+
+            let n = history.len() as f64;
+            let sum: f64 = history.iter().sum();
+            let mean = sum / n;
+
+            let variance: f64 = history.iter().map(|val| {
+                let diff = mean - val;
+                diff * diff
+            }).sum::<f64>() / n;
+
+            let std_dev = variance.sqrt();
+
+            if std_dev == 0.0 {
+                0.0
+            } else {
+                (spread - mean) / std_dev
+            }
+        };
+
+        debug!("Pairs Spread: {:.6}, Z-Score: {:.4}", spread, z_score);
+
+        if z_score > self.entry_z_score {
+            Signal::Sell // Sell A / Buy B (Short the spread)
+        } else if z_score < -self.entry_z_score {
+            Signal::Buy // Buy A / Sell B (Long the spread)
+        } else if z_score.abs() < self.exit_z_score {
+            Signal::Sell // Close positions (Mean Reversion)
         } else {
             Signal::Hold
         }
@@ -307,40 +384,52 @@ pub enum InstrumentType {
     Inverse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HedgeMode {
+    DeltaNeutral,  // Quantity 1:1 (or adjusted for contract size)
+    DollarNeutral, // Value 1:1 (QtyA * PriceA = QtyB * PriceB)
+}
+
 /// Tracks delta and enforces safety limits.
 pub struct RiskMonitor {
     _max_leverage: Decimal,
-    _target_delta: Decimal, // Should be 0.0 for delta-neutral
+    hedge_mode: HedgeMode,
     instrument_type: InstrumentType,
 }
 
 impl RiskMonitor {
-    pub fn new(max_leverage: Decimal, instrument_type: InstrumentType) -> Self {
+    pub fn new(max_leverage: Decimal, instrument_type: InstrumentType, hedge_mode: HedgeMode) -> Self {
         Self {
             _max_leverage: max_leverage,
-            _target_delta: Decimal::zero(),
+            hedge_mode,
             instrument_type,
         }
     }
 
-    pub fn calc_hedge_ratio(&self, spot_quantity: Decimal, _spot_price: Decimal, future_price: Decimal) -> Result<Decimal, BasisTradingError> {
-        if spot_quantity <= Decimal::zero() {
-            return Err(BasisTradingError::InvalidInput("Spot quantity must be positive".to_string()));
+    pub fn calc_hedge_ratio(&self, leg1_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<Decimal, DualLegError> {
+        if leg1_qty <= Decimal::zero() {
+            return Err(DualLegError::InvalidInput("Leg 1 quantity must be positive".to_string()));
         }
-        
-        match self.instrument_type {
-            InstrumentType::Linear => Ok(spot_quantity),
-            InstrumentType::Inverse => {
-                // Inverse: Contract value = 1 USD (usually)
-                // Quantity = (Spot Value in USD) / (Contract Value in USD)
-                // Spot Value = spot_quantity * spot_price (but here we are hedging the USD value)
-                // Wait, for Inverse (e.g. BTC-USD perp), 1 contract = 1 USD.
-                // To hedge 1 BTC at $50,000, we need 50,000 contracts.
-                // Hedge Qty = Spot Qty * Future Price
-                if future_price.is_zero() {
-                    return Err(BasisTradingError::MathError("Future price cannot be zero for inverse calculation".to_string()));
+
+        match self.hedge_mode {
+            HedgeMode::DeltaNeutral => {
+                match self.instrument_type {
+                    InstrumentType::Linear => Ok(leg1_qty),
+                    InstrumentType::Inverse => {
+                        if leg2_price.is_zero() {
+                            return Err(DualLegError::MathError("Leg 2 price cannot be zero for inverse calculation".to_string()));
+                        }
+                        Ok(leg1_qty * leg2_price)
+                    }
                 }
-                Ok(spot_quantity * future_price)
+            },
+            HedgeMode::DollarNeutral => {
+                // Qty1 * Price1 = Qty2 * Price2
+                // Qty2 = (Qty1 * Price1) / Price2
+                if leg2_price.is_zero() {
+                    return Err(DualLegError::MathError("Leg 2 price cannot be zero for dollar neutral calculation".to_string()));
+                }
+                Ok((leg1_qty * leg1_price) / leg2_price)
             }
         }
     }
@@ -525,8 +614,8 @@ impl ExecutionEngine {
 
 // --- Main Strategy Class ---
 
-/// The main coordinator for the Delta-Neutral Basis Trading Strategy.
-pub struct BasisTradingStrategy {
+/// The main coordinator for the Dual-Leg Trading Strategy.
+pub struct DualLegStrategy {
     entry_manager: Box<dyn EntryStrategy>,
     risk_monitor: RiskMonitor,
     execution_engine: ExecutionEngine,
@@ -537,12 +626,12 @@ pub struct BasisTradingStrategy {
     report_rx: mpsc::Receiver<ExecutionReport>,
     recovery_rx: mpsc::Receiver<RecoveryResult>,
     clock: Box<dyn Clock>,
-    throttler: BasisLogThrottler,
+    throttler: DualLegLogThrottler,
     pub state_notifier: Option<mpsc::Sender<StrategyState>>,
 }
 
-impl BasisTradingStrategy {
-    /// Creates a new `BasisTradingStrategy`.
+impl DualLegStrategy {
+    /// Creates a new `DualLegStrategy`.
     pub fn new(
         entry_manager: Box<dyn EntryStrategy>,
         risk_monitor: RiskMonitor,
@@ -565,7 +654,7 @@ impl BasisTradingStrategy {
             report_rx,
             recovery_rx,
             clock,
-            throttler: BasisLogThrottler::new(5), // 5 seconds default
+            throttler: DualLegLogThrottler::new(5), // 5 seconds default
             state_notifier: None,
         }
     }
@@ -587,12 +676,12 @@ impl BasisTradingStrategy {
     }
 
     /// Runs the strategy loop.
-    #[instrument(skip(self, spot_rx, future_rx), name = "strategy_loop")]
-    pub async fn run(&mut self, mut spot_rx: tokio::sync::mpsc::Receiver<MarketData>, mut future_rx: tokio::sync::mpsc::Receiver<MarketData>) {
-        info!("Starting Delta-Neutral Basis Strategy for {}/{}", self.pair.spot_symbol, self.pair.future_symbol);
+    #[instrument(skip(self, leg1_rx, leg2_rx), name = "strategy_loop")]
+    pub async fn run(&mut self, mut leg1_rx: tokio::sync::mpsc::Receiver<MarketData>, mut leg2_rx: tokio::sync::mpsc::Receiver<MarketData>) {
+        info!("Starting Dual-Leg Strategy for {}/{}", self.pair.spot_symbol, self.pair.future_symbol);
 
-        let mut latest_spot: Option<MarketData> = None;
-        let mut latest_future: Option<MarketData> = None;
+        let mut latest_leg1: Option<MarketData> = None;
+        let mut latest_leg2: Option<MarketData> = None;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
 
         loop {
@@ -600,11 +689,11 @@ impl BasisTradingStrategy {
                 _ = heartbeat.tick() => {
                     self.check_timeout();
                 }
-                Some(spot_data) = spot_rx.recv() => {
-                    latest_spot = Some(spot_data);
+                Some(leg1_data) = leg1_rx.recv() => {
+                    latest_leg1 = Some(leg1_data);
                 }
-                Some(future_data) = future_rx.recv() => {
-                    latest_future = Some(future_data);
+                Some(leg2_data) = leg2_rx.recv() => {
+                    latest_leg2 = Some(leg2_data);
                 }
                 Some(report) = self.report_rx.recv() => {
                     self.handle_execution_report(report);
@@ -615,8 +704,8 @@ impl BasisTradingStrategy {
                 else => break, // Channels closed
             }
 
-            if let (Some(spot), Some(future)) = (&latest_spot, &latest_future) {
-                self.process_tick(spot, future).await;
+            if let (Some(leg1), Some(leg2)) = (&latest_leg1, &latest_leg2) {
+                self.process_tick(leg1, leg2).await;
             }
         }
     }
@@ -713,9 +802,9 @@ impl BasisTradingStrategy {
         error!("MANUAL INTERVENTION REQUIRED: Strategy is in Reconciling state. Please check exchange positions and restart if necessary.");
     }
 
-    /// Processes a single tick of matched Spot and Future data.
-    #[instrument(skip(self, spot, future), fields(spot_price = %spot.price, future_price = %future.price))]
-    async fn process_tick(&mut self, spot: &MarketData, future: &MarketData) {
+    /// Processes a single tick of matched Leg 1 and Leg 2 data.
+    #[instrument(skip(self, leg1, leg2), fields(leg1_price = %leg1.price, leg2_price = %leg2.price))]
+    async fn process_tick(&mut self, leg1: &MarketData, leg2: &MarketData) {
         // Safety Guard: Do not process ticks if we are in an unstable state
         if matches!(self.state, StrategyState::Reconciling | StrategyState::Halted) {
             if self.throttler.unstable_state.should_log() {
@@ -728,36 +817,35 @@ impl BasisTradingStrategy {
         let now = self.clock.now_ts_millis();
         
         // Check 1: Data freshness (Age)
-        let spot_age = now - spot.timestamp;
-        let future_age = now - future.timestamp;
-        if spot_age.abs() > MAX_TICK_AGE_MS || future_age.abs() > MAX_TICK_AGE_MS {
+        let leg1_age = now - leg1.timestamp;
+        let leg2_age = now - leg2.timestamp;
+        if leg1_age.abs() > MAX_TICK_AGE_MS || leg2_age.abs() > MAX_TICK_AGE_MS {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
-                warn!("Dropping tick due to age. Spot Age: {}ms, Future Age: {}ms (Max: {}ms) (Suppressed: {})", spot_age, future_age, MAX_TICK_AGE_MS, suppressed);
+                warn!("Dropping tick due to age. Leg1 Age: {}ms, Leg2 Age: {}ms (Max: {}ms) (Suppressed: {})", leg1_age, leg2_age, MAX_TICK_AGE_MS, suppressed);
             }
             return; 
         }
 
         // Check 2: Data correlation (Synchronization)
         // Ensure the two price points are from roughly the same moment in time.
-        let diff = (spot.timestamp - future.timestamp).abs();
+        let diff = (leg1.timestamp - leg2.timestamp).abs();
         if diff > MAX_TICK_DIFF_MS {
             if self.throttler.sync_issue.should_log() {
                 let suppressed = self.throttler.sync_issue.get_and_reset_suppressed_count();
-                warn!("Dropping tick due to sync. Diff: {}ms (Max: {}ms). Spot TS: {}, Future TS: {} (Suppressed: {})", diff, MAX_TICK_DIFF_MS, spot.timestamp, future.timestamp, suppressed);
+                warn!("Dropping tick due to sync. Diff: {}ms (Max: {}ms). Leg1 TS: {}, Leg2 TS: {} (Suppressed: {})", diff, MAX_TICK_DIFF_MS, leg1.timestamp, leg2.timestamp, suppressed);
             }
             return;
         }
 
-        let spread = Spread::new(spot.price, future.price);
-        let signal = self.entry_manager.analyze(spread).await;
+        let signal = self.entry_manager.analyze(leg1, leg2).await;
 
         match signal {
             Signal::Buy => {
                 if self.state != StrategyState::Flat { return; }
 
-                let spot_qty = dec!(0.1); 
-                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
+                let leg1_qty = dec!(0.1); 
+                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
                     info!("Entry Signal! Transitioning to Entering state and spawning execution...");
                     self.transition_state(StrategyState::Entering); // Prevent further spawns
 
@@ -766,7 +854,7 @@ impl BasisTradingStrategy {
                     let tx = self.report_tx.clone();
 
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_entry(&pair, spot_qty, hedge_qty).await;
+                        let result = engine.execute_basis_entry(&pair, leg1_qty, hedge_qty).await;
                         let report = ExecutionReport { result, action: Signal::Buy };
                         let _ = tx.send(report).await;
                     });
@@ -775,8 +863,8 @@ impl BasisTradingStrategy {
             Signal::Sell => {
                 if self.state != StrategyState::InPosition { return; }
 
-                let spot_qty = dec!(0.1); 
-                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(spot_qty, spot.price, future.price) {
+                let leg1_qty = dec!(0.1); 
+                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
                     info!("Exit Signal! Transitioning to Exiting state and spawning execution...");
                     self.transition_state(StrategyState::Exiting);
 
@@ -785,7 +873,7 @@ impl BasisTradingStrategy {
                     let tx = self.report_tx.clone();
 
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_exit(&pair, spot_qty, hedge_qty).await;
+                        let result = engine.execute_basis_exit(&pair, leg1_qty, hedge_qty).await;
                         let report = ExecutionReport { result, action: Signal::Sell };
                         let _ = tx.send(report).await;
                     });
@@ -831,5 +919,169 @@ mod tests {
 
         // Should log again
         assert!(throttle.should_log());
+    }
+    #[tokio::test]
+    async fn test_z_score_calculation() {
+        let manager = PairsManager::new(5, 2.0, 0.1);
+        
+        // Feed data: 10, 12, 12, 10, 12
+        // Log spreads: ln(10)-ln(10)=0, ln(12)-ln(10)=0.182, etc.
+        // Let's just feed synthetic spreads by mocking prices.
+        // P1 = e^spread, P2 = 1.0
+        
+        let spreads: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // Mean = 3.0, StdDev = sqrt(2) = 1.414
+        // Next spread = 6.0. Z = (6 - 3.4) / ...
+        // Rolling window behavior.
+        
+        for s in spreads {
+            let p1 = Decimal::from_f64(s.exp()).unwrap();
+            let p2 = dec!(1.0);
+            let _ = manager.analyze(
+                &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
+                &MarketData { symbol: "B".into(), price: p2, timestamp: 0 }
+            ).await;
+        }
+
+        // Window is full [1, 2, 3, 4, 5]. Mean=3, StdDev=1.4142
+        // Feed 6.0. New Window [2, 3, 4, 5, 6]. Mean=4, StdDev=1.4142
+        // Z = (6 - 4) / 1.4142 = 1.4142
+        
+        // We can't inspect internal state easily without exposing it, but we can check signals.
+        // Let's test signal generation.
+        
+        // Case 1: Z < -2.0 -> Buy
+        // Mean=0, Std=1. Feed -3.0 -> Z=-3.0 -> Buy
+        let manager = PairsManager::new(5, 2.0, 0.1);
+        // Fill with 0s
+        for _ in 0..5 {
+             let _ = manager.analyze(
+                &MarketData { symbol: "A".into(), price: dec!(1.0), timestamp: 0 },
+                &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+            ).await;
+        }
+        
+        // Feed a drop in spread (P1 drops)
+        // Spread = ln(0.1) - ln(1) = -2.3
+        let _p1 = Decimal::from_f64(0.1f64.exp()).unwrap(); // e^-2.3 approx 0.1
+        // Actually let's just use exact math.
+        // Spread = -3.0.
+        let p1 = Decimal::from_f64((-3.0f64).exp()).unwrap();
+        let _signal = manager.analyze(
+            &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
+            &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+        ).await;
+        
+        // Current window: [0, 0, 0, 0, -3]. Mean = -0.6. Var = (4*0.36 + 1*5.76)/5 = (1.44 + 5.76)/5 = 1.44. Std = 1.2
+        // Z = (-3 - (-0.6)) / 1.2 = -2.4 / 1.2 = -2.0
+        // Threshold is 2.0. Z <= -2.0 (if strictly less, might fail, let's go deeper)
+        
+        // Let's try -4.0
+        let p1 = Decimal::from_f64((-4.0f64).exp()).unwrap();
+        let _signal = manager.analyze(
+            &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
+            &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+        ).await;
+        
+        // Window: [0, 0, 0, -3, -4]. Mean = -1.4. 
+        // This is getting complicated to track manually.
+        // But we expect a Buy signal eventually if we drop enough.
+        
+        // Re-init for cleaner state
+        let manager = PairsManager::new(10, 2.0, 0.1);
+        for _ in 0..10 {
+             let _ = manager.analyze(
+                &MarketData { symbol: "A".into(), price: dec!(1.0), timestamp: 0 },
+                &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+            ).await;
+        }
+        // Spread 0, Mean 0, Std 0.
+        
+        // Sudden drop to -10.
+        let p1 = Decimal::from_f64((-10.0f64).exp()).unwrap();
+        let signal = manager.analyze(
+            &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
+            &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+        ).await;
+        
+        assert_eq!(signal, Signal::Buy);
+    }
+
+    #[test]
+    fn test_hedge_ratio_dollar_neutral() {
+        let monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
+        
+        // QtyA = 1, PriceA = 100, PriceB = 50.
+        // ValueA = 100. QtyB = 100 / 50 = 2.
+        let ratio = monitor.calc_hedge_ratio(dec!(1.0), dec!(100.0), dec!(50.0)).unwrap();
+        assert_eq!(ratio, dec!(2.0));
+        
+        // QtyA = 0.5, PriceA = 20000, PriceB = 1000.
+        // ValueA = 10000. QtyB = 10000 / 1000 = 10.
+        let ratio = monitor.calc_hedge_ratio(dec!(0.5), dec!(20000.0), dec!(1000.0)).unwrap();
+        assert_eq!(ratio, dec!(10.0));
+    }
+
+    #[test]
+    fn test_hedge_ratio_delta_neutral_linear() {
+        let monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
+        
+        // 1:1 ratio
+        let ratio = monitor.calc_hedge_ratio(dec!(1.5), dec!(100.0), dec!(50.0)).unwrap();
+        assert_eq!(ratio, dec!(1.5));
+    }
+
+    #[test]
+    fn test_hedge_ratio_delta_neutral_inverse() {
+        let monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Inverse, HedgeMode::DeltaNeutral);
+        
+        // QtyA = 1 (BTC). PriceB = 50000 (USD/BTC).
+        // Contracts = 1 * 50000 = 50000.
+        let ratio = monitor.calc_hedge_ratio(dec!(1.0), dec!(100.0), dec!(50000.0)).unwrap();
+        assert_eq!(ratio, dec!(50000.0));
+    }
+    #[test]
+    fn test_net_spread_calculation() {
+        // Maker 10, Taker 20, Slippage 5.
+        // Total Fees = 4 * 20 = 80 bps.
+        // Slippage = 5 bps.
+        // Net = Gross - 85.
+        let model = TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0));
+        
+        let net = model.calc_net_spread(dec!(100.0));
+        assert_eq!(net, dec!(15.0)); // 100 - 85
+        
+        let net = model.calc_net_spread(dec!(50.0));
+        assert_eq!(net, dec!(-35.0)); // 50 - 85
+    }
+
+    #[tokio::test]
+    async fn test_basis_manager_signals() {
+        let cost_model = TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0)); // Zero costs for simplicity
+        let manager = BasisManager::new(dec!(10.0), dec!(2.0), cost_model);
+        
+        // Spot 100, Future 100.2. Spread = 0.2/100 = 20 bps.
+        // Net = 20. > 10. -> Buy.
+        let signal = manager.analyze(
+            &MarketData { symbol: "S".into(), price: dec!(100.0), timestamp: 0 },
+            &MarketData { symbol: "F".into(), price: dec!(100.2), timestamp: 0 }
+        ).await;
+        assert_eq!(signal, Signal::Buy);
+        
+        // Spot 100, Future 100.01. Spread = 1 bps.
+        // < 2. -> Sell.
+        let signal = manager.analyze(
+            &MarketData { symbol: "S".into(), price: dec!(100.0), timestamp: 0 },
+            &MarketData { symbol: "F".into(), price: dec!(100.01), timestamp: 0 }
+        ).await;
+        assert_eq!(signal, Signal::Sell);
+        
+        // Spot 100, Future 100.05. Spread = 5 bps.
+        // Between 2 and 10. -> Hold.
+        let signal = manager.analyze(
+            &MarketData { symbol: "S".into(), price: dec!(100.0), timestamp: 0 },
+            &MarketData { symbol: "F".into(), price: dec!(100.05), timestamp: 0 }
+        ).await;
+        assert_eq!(signal, Signal::Hold);
     }
 }

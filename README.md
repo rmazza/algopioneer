@@ -10,7 +10,10 @@
 *   **Real-time Data**: WebSocket integration for streaming market data (ticker, orderbook).
 *   **Strategy Engine**:
     *   **Moving Average Crossover**: A classic trend-following strategy with configurable windows.
-    *   **Basis Trading**: A sophisticated delta-neutral strategy exploiting price differences between Spot and Futures markets, featuring a robust **Queue-Based Recovery System** to handle execution failures and ensure delta neutrality.
+    *   **Dual-Leg Trading**: A generic engine supporting multiple dual-leg strategies:
+        *   **Basis Trading**: Delta-neutral strategy exploiting price differences between Spot and Futures.
+        *   **Pairs Trading**: Statistical arbitrage strategy exploiting mean reversion of the spread between two assets.
+    *   **Robust Execution**: Features a **Queue-Based Recovery System** to handle execution failures and ensure hedging safety.
 *   **Execution Modes**:
     *   **Live Trading**: Execute real orders on Coinbase.
     *   **Paper Trading**: Simulate execution with real-time data to test strategies without financial risk.
@@ -66,12 +69,18 @@ cargo run --release -- trade --product-id BTC-USD --duration 60
 cargo run --release -- trade --product-id BTC-USD --paper
 ```
 
-### 2. Basis Trading (Spot vs Future)
+### 2. Dual-Leg Trading (Basis & Pairs)
 
-Run the delta-neutral basis trading strategy.
+Run dual-leg strategies using the `dual-leg` command.
 
+**Basis Trading (Spot vs Future):**
 ```bash
-cargo run --release -- basis-trade --spot-id BTC-USD --future-id BTC-USDT --paper
+cargo run --release -- dual-leg --strategy basis --symbols BTC-USD,BTC-USDT --paper
+```
+
+**Pairs Trading (Asset A vs Asset B):**
+```bash
+cargo run --release -- dual-leg --strategy pairs --symbols BTC-USD,ETH-USD --paper
 ```
 
 ### 3. Backtesting
@@ -87,7 +96,7 @@ cargo run --release -- backtest
 *   `src/main.rs`: Application entry point and CLI command orchestration.
 *   `src/coinbase/`: Coinbase API client wrapper and WebSocket implementation.
 *   `src/strategy/`: Strategy implementations.
-    *   `basis_trading.rs`: Logic for the Basis Trading strategy, including execution engine and recovery worker.
+    *   `dual_leg_trading.rs`: Generic Dual-Leg Trading Engine (Basis & Pairs), including execution engine and recovery worker.
     *   `moving_average.rs`: Logic for the Moving Average Crossover strategy.
 *   `src/backtest/`: Backtesting engine logic.
 *   `src/sandbox/`: Utilities for simulated environments.

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::env;
 use std::error::Error;
-use crate::strategy::basis_trading::MarketData;
+use crate::strategy::dual_leg_trading::MarketData;
 use rust_decimal::Decimal;
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
