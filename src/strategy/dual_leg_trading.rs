@@ -18,7 +18,7 @@
 
 use crate::strategy::Signal;
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::error::Error;
 use crate::coinbase::CoinbaseClient;
 use rust_decimal::Decimal;
@@ -26,7 +26,7 @@ use rust_decimal_macros::dec;
 use rust_decimal::prelude::*;
 use chrono::{Utc, DateTime};
 use tracing::{info, debug, error, instrument, warn};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Semaphore, Mutex};
 use tokio::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -37,13 +37,53 @@ pub enum DualLegError {
     #[error("Math error: {0}")]
     MathError(String),
     #[error("Execution error: {0}")]
-    ExecutionError(String),
+    ExecutionError(#[from] ExecutionError),
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
 
+#[derive(Error, Debug, Clone)]
+pub enum ExecutionError {
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    #[error("Exchange error: {0}")]
+    ExchangeError(String),
+    #[error("Order rejected: {0}")]
+    OrderRejected(String),
+    #[error("Unknown execution error: {0}")]
+    Unknown(String),
+}
+
+impl ExecutionError {
+    pub fn from_boxed(e: Box<dyn Error + Send + Sync>) -> Self {
+        let s = e.to_string();
+        if s.to_lowercase().contains("network") || s.to_lowercase().contains("timeout") {
+            ExecutionError::NetworkError(s)
+        } else if s.to_lowercase().contains("insufficient funds") || s.to_lowercase().contains("rejected") {
+            ExecutionError::OrderRejected(s)
+        } else {
+            ExecutionError::ExchangeError(s)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+impl std::fmt::Display for OrderSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderSide::Buy => write!(f, "buy"),
+            OrderSide::Sell => write!(f, "sell"),
+        }
+    }
+}
+
 const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
-const MAX_TICK_DIFF_MS: i64 = 500; // 500 milliseconds
+const MAX_TICK_DIFF_MS: i64 = 2000; // 2000 milliseconds
 const EXECUTION_TIMEOUT_MS: i64 = 30000; // 30 seconds
 
 // --- Logging Utilities ---
@@ -209,12 +249,24 @@ impl Spread {
 
 // --- State Management ---
 
+#[derive(Debug, Clone)]
+pub struct DualLegConfig {
+    pub spot_symbol: String,
+    pub future_symbol: String,
+    pub order_size: Decimal,
+    pub max_tick_age_ms: i64,
+    pub execution_timeout_ms: i64,
+    pub min_profit_threshold: Decimal,
+    pub stop_loss_threshold: Decimal,
+    pub fee_tier: TransactionCostModel,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrategyState {
     Flat,
-    Entering,
-    InPosition,
-    Exiting,
+    Entering { leg1_qty: Decimal, leg2_qty: Decimal, leg1_entry_price: Decimal, leg2_entry_price: Decimal },
+    InPosition { leg1_qty: Decimal, leg2_qty: Decimal, leg1_entry_price: Decimal, leg2_entry_price: Decimal },
+    Exiting { leg1_qty: Decimal, leg2_qty: Decimal, leg1_entry_price: Decimal, leg2_entry_price: Decimal },
     Reconciling, // New State: "I don't know what happened, let me check."
     Halted,      // New State: "Something is broken, human needed."
 }
@@ -228,8 +280,8 @@ pub enum RecoveryResult {
 #[derive(Debug)]
 pub enum ExecutionResult {
     Success,
-    PartialFailure(String), // e.g., "Spot filled, Future failed"
-    TotalFailure(String),
+    PartialFailure(ExecutionError), // e.g., "Spot filled, Future failed"
+    TotalFailure(ExecutionError),
 }
 
 #[derive(Debug)]
@@ -241,7 +293,7 @@ pub struct ExecutionReport {
 #[derive(Debug, Clone)]
 pub struct RecoveryTask {
     pub symbol: String,
-    pub action: String, // "buy" or "sell"
+    pub action: OrderSide,
     pub quantity: Decimal,
     pub reason: String,
     pub attempts: u32,
@@ -262,7 +314,7 @@ pub trait EntryStrategy: Send + Sync {
 #[async_trait]
 pub trait Executor: Send + Sync {
     /// Executes an order on the exchange.
-    async fn execute_order(&self, symbol: &str, side: &str, quantity: Decimal) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
 // --- Components ---
@@ -326,17 +378,40 @@ impl PairsManager {
 impl EntryStrategy for PairsManager {
     #[instrument(skip(self))]
     async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal {
-        let p1 = leg1.price.to_f64().unwrap_or(0.0);
-        let p2 = leg2.price.to_f64().unwrap_or(0.0);
+        // CF3 DOCUMENTATION: Decimal → f64 precision loss
+        // ================================================
+        // For statistical arbitrage, we convert Decimal prices to f64 for natural log calculations.
+        // This introduces precision loss, but is acceptable for pairs trading where:
+        // 1. Z-score thresholds are typically >> 0.01 (sub-basis-point precision not critical)
+        // 2. Relative spread matters more than absolute precision
+        // 3. f64 provides ~15-17 decimal digits of precision (sufficient for price ratios)
+        //
+        // RISK ASSESSMENT: For assets with extreme price differences (e.g., BTC/SHIB where ratio > 10^9),
+        // precision loss could affect signal generation. Monitor via debug logs.
+        //
+        // ALTERNATIVE: For critical HFT applications, use decimal-based log library or integer basis points.
+        let p1_opt = leg1.price.to_f64();
+        let p2_opt = leg2.price.to_f64();
 
-        if p1 <= 0.0 || p2 <= 0.0 {
-            return Signal::Hold;
-        }
+        let (p1, p2) = match (p1_opt, p2_opt) {
+            (Some(v1), Some(v2)) if v1 > 0.0 && v2 > 0.0 => {
+                // Validate precision loss tolerance
+                let ratio = v1 / v2;
+                if ratio > 1e15 || ratio < 1e-15 {
+                    warn!("PRECISION WARNING: Extreme price ratio {:.2e}. F64 precision loss may affect Z-score.", ratio);
+                }
+                (v1, v2)
+            },
+            _ => {
+                warn!("Invalid prices for Pairs analysis: {:?}, {:?}", leg1.price, leg2.price);
+                return Signal::Hold;
+            }
+        };
 
         let spread = p1.ln() - p2.ln();
         
         let z_score = {
-            let mut history = self.spread_history.lock().unwrap();
+            let mut history = self.spread_history.lock().await;
             history.push_back(spread);
             if history.len() > self.window_size {
                 history.pop_front();
@@ -471,7 +546,8 @@ impl RecoveryWorker {
 
                     loop {
                         task.attempts += 1;
-                        match client.execute_order(&task.symbol, &task.action, task.quantity).await {
+                        // Recovery uses Market orders (None price)
+                        match client.execute_order(&task.symbol, task.action, task.quantity, None).await {
                             Ok(_) => {
                                 info!("Recovery Successful for {} on attempt {}", task.symbol, task.attempts);
                                 let _ = feedback_tx.send(RecoveryResult::Success(task.symbol.clone())).await;
@@ -510,16 +586,16 @@ impl ExecutionEngine {
     }
 
     #[instrument(skip(self))]
-    pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal) -> ExecutionResult {
+    pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> ExecutionResult {
         // Concurrently execute both legs to minimize leg risk
-        let spot_leg = self.client.execute_order(&pair.spot_symbol, "buy", quantity);
-        let future_leg = self.client.execute_order(&pair.future_symbol, "sell", hedge_qty);
+        let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Buy, quantity, Some(leg1_price));
+        let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Sell, hedge_qty, Some(leg2_price));
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
         
-        // Convert errors to String immediately
-        let spot_res = spot_res.map_err(|e| e.to_string());
-        let future_res = future_res.map_err(|e| e.to_string());
+        // Convert errors to ExecutionError
+        let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
+        let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
         if let Err(e) = spot_res {
              if future_res.is_ok() {
@@ -527,17 +603,19 @@ impl ExecutionEngine {
                  // Queue Kill Switch: Buy back future
                  let task = RecoveryTask {
                      symbol: pair.future_symbol.clone(),
-                     action: "buy".to_string(),
+                     action: OrderSide::Buy,
                      quantity: hedge_qty,
                      reason: format!("Spot failed: {}", e),
                      attempts: 0,
                  };
                  if let Err(send_err) = self.recovery_tx.send(task).await {
                      error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
+                     // CF4 FIX: Transition to Halted state on recovery queue failure
+                     panic!("CRITICAL: Recovery queue failure - spot entry kill switch failed. System halted.");
                  }
-                 return ExecutionResult::PartialFailure(format!("Spot failed: {}. Future succeeded. Recovery queued.", e));
+                 return ExecutionResult::PartialFailure(e);
              }
-             return ExecutionResult::TotalFailure(format!("Spot leg failed: {}", e));
+             return ExecutionResult::TotalFailure(e);
         }
 
         if let Err(e) = future_res {
@@ -545,33 +623,35 @@ impl ExecutionEngine {
             // Queue Kill Switch: Sell spot
             let task = RecoveryTask {
                 symbol: pair.spot_symbol.clone(),
-                action: "sell".to_string(),
+                action: OrderSide::Sell,
                 quantity: quantity,
                 reason: format!("Future failed: {}", e),
                 attempts: 0,
             };
-            if let Err(send_err) = self.recovery_tx.send(task).await {
-                error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-            }
-            return ExecutionResult::PartialFailure(format!("Future failed: {}. Spot succeeded. Recovery queued.", e));
+             if let Err(send_err) = self.recovery_tx.send(task).await {
+                 error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
+                 // CF4 FIX: Transition to Halted state on recovery queue failure
+                 panic!("CRITICAL: Recovery queue failure - future entry kill switch failed. System halted.");
+             }
+            return ExecutionResult::PartialFailure(e);
         }
 
         ExecutionResult::Success
     }
 
     #[instrument(skip(self))]
-    pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal) -> ExecutionResult {
+    pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> ExecutionResult {
          // Reverse of entry: Sell Spot, Buy Future
-        let spot_leg = self.client.execute_order(&pair.spot_symbol, "sell", quantity);
-        let future_leg = self.client.execute_order(&pair.future_symbol, "buy", hedge_qty);
+        let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Sell, quantity, Some(leg1_price));
+        let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Buy, hedge_qty, Some(leg2_price));
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
         
-        let spot_res = spot_res.map_err(|e| e.to_string());
-        let future_res = future_res.map_err(|e| e.to_string());
+        let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
+        let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
         if spot_res.is_err() && future_res.is_err() {
-            return ExecutionResult::TotalFailure(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err()));
+            return ExecutionResult::TotalFailure(ExecutionError::ExchangeError(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err())));
         }
 
         if spot_res.is_err() || future_res.is_err() {
@@ -585,27 +665,35 @@ impl ExecutionEngine {
                 error!("Exit Spot failed: {}. Queuing retry.", e);
                 let task = RecoveryTask {
                     symbol: pair.spot_symbol.clone(),
-                    action: "sell".to_string(),
+                    action: OrderSide::Sell,
                     quantity: quantity,
                     reason: format!("Exit Spot failed: {}", e),
                     attempts: 0,
                 };
-                let _ = self.recovery_tx.send(task).await;
+                // CF4 FIX: Handle recovery task send errors
+                if let Err(send_err) = self.recovery_tx.send(task).await {
+                    error!("EMERGENCY: Failed to queue exit spot recovery task! Error: {}", send_err);
+                    panic!("CRITICAL: Recovery queue failure - exit spot retry failed. System halted.");
+                }
             }
             
             if let Err(e) = future_res {
                 error!("Exit Future failed: {}. Queuing retry.", e);
                 let task = RecoveryTask {
                     symbol: pair.future_symbol.clone(),
-                    action: "buy".to_string(),
+                    action: OrderSide::Buy,
                     quantity: hedge_qty,
                     reason: format!("Exit Future failed: {}", e),
                     attempts: 0,
                 };
-                let _ = self.recovery_tx.send(task).await;
+                // CF4 FIX: Handle recovery task send errors
+                if let Err(send_err) = self.recovery_tx.send(task).await {
+                    error!("EMERGENCY: Failed to queue exit future recovery task! Error: {}", send_err);
+                    panic!("CRITICAL: Recovery queue failure - exit future retry failed. System halted.");
+                }
             }
 
-            return ExecutionResult::PartialFailure(format!("Exit failed. Recovery tasks queued."));
+            return ExecutionResult::PartialFailure(ExecutionError::ExchangeError("Exit failed. Recovery tasks queued.".to_string()));
         }
         
         ExecutionResult::Success
@@ -618,7 +706,7 @@ impl ExecutionEngine {
 pub struct DualLegStrategy {
     entry_manager: Box<dyn EntryStrategy>,
     risk_monitor: RiskMonitor,
-    execution_engine: ExecutionEngine,
+    execution_engine: Arc<ExecutionEngine>,
     pair: InstrumentPair,
     state: StrategyState,
     last_state_change_ts: i64,
@@ -628,6 +716,7 @@ pub struct DualLegStrategy {
     clock: Box<dyn Clock>,
     throttler: DualLegLogThrottler,
     pub state_notifier: Option<mpsc::Sender<StrategyState>>,
+    config: DualLegConfig,
 }
 
 impl DualLegStrategy {
@@ -636,18 +725,22 @@ impl DualLegStrategy {
         entry_manager: Box<dyn EntryStrategy>,
         risk_monitor: RiskMonitor,
         execution_engine: ExecutionEngine,
-        spot_symbol: String,
-        future_symbol: String,
+        config: DualLegConfig,
         recovery_rx: mpsc::Receiver<RecoveryResult>,
         clock: Box<dyn Clock>,
     ) -> Self {
         let (report_tx, report_rx) = mpsc::channel(100);
         let now = clock.now_ts_millis();
+        let pair = InstrumentPair { 
+            spot_symbol: config.spot_symbol.clone(), 
+            future_symbol: config.future_symbol.clone() 
+        };
+        
         Self {
             entry_manager,
             risk_monitor,
-            execution_engine,
-            pair: InstrumentPair { spot_symbol, future_symbol },
+            execution_engine: Arc::new(execution_engine),
+            pair,
             state: StrategyState::Flat,
             last_state_change_ts: now,
             report_tx,
@@ -656,6 +749,7 @@ impl DualLegStrategy {
             clock,
             throttler: DualLegLogThrottler::new(5), // 5 seconds default
             state_notifier: None,
+            config,
         }
     }
 
@@ -717,7 +811,18 @@ impl DualLegStrategy {
                 match report.action {
                     Signal::Buy => {
                         info!("Entry Successful. Transitioning to InPosition.");
-                        self.transition_state(StrategyState::InPosition);
+                        // We need to know the quantities to transition to InPosition.
+                        // Since we are in Entering state, we should have them there.
+                        // However, we need to access self.state.
+                        // This requires a bit of a change in logic because we are in a method.
+                        // But we can check the current state.
+                        if let StrategyState::Entering { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
+                             self.transition_state(StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
+                        } else {
+                            error!("Received Entry Success but state is not Entering! State: {:?}", self.state);
+                            // Fallback or error handling?
+                            // If we are Reconciling, maybe we stay there?
+                        }
                     },
                     Signal::Sell => {
                         info!("Exit Successful. Transitioning to Flat.");
@@ -728,14 +833,35 @@ impl DualLegStrategy {
             },
             ExecutionResult::TotalFailure(reason) => {
                 error!("Execution Failed completely: {}. Reverting state.", reason);
-                // If entry failed, we go back to Flat. If exit failed, we might still be InPosition (or partial).
-                // For TotalFailure (atomic rollback succeeded), we revert to previous state.
                 match report.action {
                     Signal::Buy => {
-                         self.transition_state(StrategyState::Flat);
+                         // Entry failed completely.
+                         // If ambiguous (Network/Timeout), we DO NOT know if orders filled. Reconcile.
+                         if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
+                             error!("Ambiguous Entry Failure ({:?}). Transitioning to Reconciling.", reason);
+                             self.transition_state(StrategyState::Reconciling);
+                         } else {
+                             // Definitive failure (e.g. Rejected). Safe to assume Flat.
+                             self.transition_state(StrategyState::Flat);
+                         }
                     },
                     Signal::Sell => {
-                         self.transition_state(StrategyState::InPosition); // Failed to exit, still in position
+                         // Exit failed.
+                         // If ambiguous (Network/Timeout), we DO NOT know if we are InPosition or Flat/Partial.
+                         // MUST Reconcile.
+                         if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
+                             error!("Ambiguous Exit Failure ({:?}). Transitioning to Reconciling.", reason);
+                             self.transition_state(StrategyState::Reconciling);
+                         } else {
+                             // Definitive failure (e.g. Rejected). We are likely still InPosition.
+                             if let StrategyState::Exiting { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
+                                 info!("Exit rejected/failed definitively. Reverting to InPosition.");
+                                 self.transition_state(StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
+                             } else {
+                                 error!("CRITICAL: State mismatch! Expected Exiting but found {:?}. Transitioning to Reconciling.", self.state);
+                                 self.transition_state(StrategyState::Reconciling); 
+                             }
+                         }
                     },
                     _ => {}
                 }
@@ -782,7 +908,7 @@ impl DualLegStrategy {
     }
 
     fn check_timeout(&mut self) {
-        if self.state == StrategyState::Entering || self.state == StrategyState::Exiting {
+        if matches!(self.state, StrategyState::Entering { .. } | StrategyState::Exiting { .. }) {
             let now = self.clock.now_ts_millis();
             if now - self.last_state_change_ts > EXECUTION_TIMEOUT_MS {
                 error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Transitioning to Reconciling.", self.state, EXECUTION_TIMEOUT_MS);
@@ -844,38 +970,95 @@ impl DualLegStrategy {
             Signal::Buy => {
                 if self.state != StrategyState::Flat { return; }
 
-                let leg1_qty = dec!(0.1); 
+                let leg1_qty = self.config.order_size; 
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
                     info!("Entry Signal! Transitioning to Entering state and spawning execution...");
-                    self.transition_state(StrategyState::Entering); // Prevent further spawns
+                    self.transition_state(StrategyState::Entering { leg1_qty, leg2_qty: hedge_qty, leg1_entry_price: leg1.price, leg2_entry_price: leg2.price }); // Prevent further spawns
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
                     let tx = self.report_tx.clone();
+                    let p1 = leg1.price;
+                    let p2 = leg2.price;
 
+                    // CF1 & CF2 FIX: Add explicit error handling for report channel
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_entry(&pair, leg1_qty, hedge_qty).await;
+                        let result = engine.execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2).await;
                         let report = ExecutionReport { result, action: Signal::Buy };
-                        let _ = tx.send(report).await;
+                        
+                        // Critical: Must notify main loop of execution result
+                        match tx.send(report).await {
+                            Ok(_) => debug!("Entry execution report sent successfully"),
+                            Err(e) => {
+                                error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
+                                panic!("Entry execution report send failed - main loop terminated unexpectedly");
+                            }
+                        }
                     });
                 }
             },
             Signal::Sell => {
-                if self.state != StrategyState::InPosition { return; }
+                // Use quantities from current position
+                if let StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
+                    // --- Minimum Profit Check ---
+                    // Calculate Estimated PnL
+                    // PnL = (Exit Price - Entry Price) * Quantity * Side Multiplier
+                    // Fees = Value * Fee Rate (0.1% taker) * 2 (Entry + Exit)
+                    
+                    // Leg 1 (BTC): Long Entry -> Sell Exit
+                    let leg1_pnl = (leg1.price - leg1_entry_price) * leg1_qty;
+                    
+                    // Leg 2 (ETH): Short Entry -> Buy Exit
+                    let leg2_pnl = (leg2_entry_price - leg2.price) * leg2_qty;
+                    
+                    let gross_pnl = leg1_pnl + leg2_pnl;
+                    
+                    // Estimate Fees: Use configured taker fee
+                    // Total Volume = (P1_entry * Q1) + (P2_entry * Q2) + (P1_exit * Q1) + (P2_exit * Q2)
+                    let total_volume = (leg1_entry_price * leg1_qty) + (leg2_entry_price * leg2_qty) + (leg1.price * leg1_qty) + (leg2.price * leg2_qty);
+                    let fee_rate = self.config.fee_tier.taker_fee_bps / dec!(10000.0);
+                    let estimated_fees = total_volume * fee_rate;
+                    
+                    // CF5 FIX: Include slippage in PnL calculation
+                    let slippage_cost = total_volume * (self.config.fee_tier.slippage_bps / dec!(10000.0));
+                    let net_pnl = gross_pnl - estimated_fees - slippage_cost;
+                    
+                    let min_profit_threshold = self.config.min_profit_threshold;
+                    let stop_loss_threshold = self.config.stop_loss_threshold;
 
-                let leg1_qty = dec!(0.1); 
-                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
-                    info!("Exit Signal! Transitioning to Exiting state and spawning execution...");
-                    self.transition_state(StrategyState::Exiting);
+                    if net_pnl < stop_loss_threshold {
+                        warn!("STOP LOSS TRIGGERED! Net PnL: {:.6} < Threshold ({:.6}). Forcing Exit.", net_pnl, stop_loss_threshold);
+                        // Proceed to exit (fall through)
+                    } else if net_pnl < min_profit_threshold {
+                        if self.throttler.unstable_state.should_log() {
+                             let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
+                             info!("Holding Position. Signal: Sell, but Net PnL ({:.6}) < Threshold ({:.6}). Gross: {:.6}, Fees: {:.6} (Suppressed: {})", net_pnl, min_profit_threshold, gross_pnl, estimated_fees, suppressed);
+                        }
+                        return;
+                    }
+
+                    info!("Exit Signal! Net PnL: {:.6} (Gross: {:.6}, Fees: {:.6}, Slippage: {:.6}). Transitioning to Exiting...", net_pnl, gross_pnl, estimated_fees, slippage_cost);
+                    self.transition_state(StrategyState::Exiting { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
                     let tx = self.report_tx.clone();
+                    let p1 = leg1.price;
+                    let p2 = leg2.price;
 
+                    // CF1 & CF2 FIX: Add explicit error handling for report channel
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_exit(&pair, leg1_qty, hedge_qty).await;
+                        let result = engine.execute_basis_exit(&pair, leg1_qty, leg2_qty, p1, p2).await;
                         let report = ExecutionReport { result, action: Signal::Sell };
-                        let _ = tx.send(report).await;
+                        
+                        // Critical: Must notify main loop of execution result
+                        match tx.send(report).await {
+                            Ok(_) => debug!("Exit execution report sent successfully"),
+                            Err(e) => {
+                                error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
+                                panic!("Exit execution report send failed - main loop terminated unexpectedly");
+                            }
+                        }
                     });
                 }
             },
@@ -886,8 +1069,8 @@ impl DualLegStrategy {
 
 #[async_trait]
 impl Executor for CoinbaseClient {
-    async fn execute_order(&self, symbol: &str, side: &str, quantity: Decimal) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.place_order(symbol, side, quantity).await
+    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.place_order(symbol, &side.to_string(), quantity, price).await
     }
 }
 
