@@ -50,6 +50,8 @@ pub enum ExecutionError {
     ExchangeError(String),
     #[error("Order rejected: {0}")]
     OrderRejected(String),
+    #[error("Critical system failure: {0}")]
+    CriticalFailure(String),
     #[error("Unknown execution error: {0}")]
     Unknown(String),
 }
@@ -82,9 +84,12 @@ impl std::fmt::Display for OrderSide {
     }
 }
 
-const MAX_TICK_AGE_MS: i64 = 2000; // 2 seconds
-const MAX_TICK_DIFF_MS: i64 = 2000; // 2000 milliseconds
-const EXECUTION_TIMEOUT_MS: i64 = 30000; // 30 seconds
+// Constants removed in favor of Config
+// const MAX_TICK_AGE_MS: i64 = 2000;
+// const MAX_TICK_DIFF_MS: i64 = 2000;
+// const EXECUTION_TIMEOUT_MS: i64 = 30000;
+
+const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
 
 // --- Logging Utilities ---
 
@@ -395,6 +400,10 @@ impl EntryStrategy for PairsManager {
 
         let (p1, p2) = match (p1_opt, p2_opt) {
             (Some(v1), Some(v2)) if v1 > 0.0 && v2 > 0.0 => {
+                if v1.is_infinite() || v1.is_nan() || v2.is_infinite() || v2.is_nan() {
+                    warn!("PRECISION WARNING: Infinite or NaN prices detected. P1: {}, P2: {}", v1, v2);
+                    return Signal::Hold;
+                }
                 // Validate precision loss tolerance
                 let ratio = v1 / v2;
                 if ratio > 1e15 || ratio < 1e-15 {
@@ -516,6 +525,7 @@ pub struct RecoveryWorker {
     rx: mpsc::Receiver<RecoveryTask>,
     feedback_tx: mpsc::Sender<RecoveryResult>,
     semaphore: Arc<Semaphore>,
+    throttler: LogThrottle,
 }
 
 impl RecoveryWorker {
@@ -525,6 +535,7 @@ impl RecoveryWorker {
             rx,
             feedback_tx,
             semaphore: Arc::new(Semaphore::new(5)), // Limit to 5 concurrent recoveries
+            throttler: LogThrottle::new(Duration::from_secs(5)),
         }
     }
 
@@ -534,12 +545,30 @@ impl RecoveryWorker {
         while let Some(mut task) = self.rx.recv().await {
             let client = self.client.clone();
             let feedback_tx = self.feedback_tx.clone();
-            let permit = self.semaphore.clone().acquire_owned().await;
+            // Non-blocking acquire to prevent deadlock
+            let permit = self.semaphore.clone().try_acquire_owned();
             
             if let Ok(permit) = permit {
+                // Local throttler for the spawned task
+
+                // But the throttler is for the WORKER loop logging, or the spawned task logging?
+                // "Apply the existing LogThrottle pattern to the RecoveryWorker failure logs"
+                // The failure logs are inside the spawned task.
+                // So we need to pass a throttler to the spawned task.
+                // Let's create a new throttler for each task? No, that defeats the purpose.
+                // We need a shared throttler.
+                // Let's make RecoveryWorker hold Arc<Mutex<LogThrottle>>.
+                
+                // Wait, if I change the struct, I need to change the previous chunks.
+                // Let's just create a new throttler for the task for now, OR better:
+                // The requirement is "prevent log disk exhaustion during a failure loop".
+                // A failure loop happens inside the spawned task loop.
+                // So a local throttler inside the spawned task is sufficient!
+                
                 tokio::spawn(async move {
                     // Permit is held until dropped at end of scope
                     let _permit = permit;
+                    let mut task_throttler = LogThrottle::new(Duration::from_secs(5));
                     
                     info!("Processing Recovery Task: {:?}", task);
                     let mut backoff = Duration::from_secs(2);
@@ -554,20 +583,25 @@ impl RecoveryWorker {
                                 break;
                             },
                             Err(e) => {
-                                error!("Recovery Failed for {} (Attempt {}): {}", task.symbol, task.attempts, e);
+                                if task_throttler.should_log() {
+                                     let suppressed = task_throttler.get_and_reset_suppressed_count();
+                                     error!("Recovery Failed for {} (Attempt {}): {} (Suppressed: {})", task.symbol, task.attempts, e, suppressed);
+                                }
+                                
                                 if task.attempts >= 5 {
                                     error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
                                     let _ = feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
                                     break;
                                 }
                                 tokio::time::sleep(backoff).await;
-                                backoff = std::cmp::min(backoff * 2, Duration::from_secs(60));
+                                backoff = std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
                             }
                         }
                     }
                 });
             } else {
-                error!("Failed to acquire semaphore for recovery task");
+                warn!("Recovery Worker overloaded! Dropping recovery task for {}", task.symbol);
+                let _ = self.feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
             }
         }
     }
@@ -610,8 +644,8 @@ impl ExecutionEngine {
                  };
                  if let Err(send_err) = self.recovery_tx.send(task).await {
                      error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-                     // CF4 FIX: Transition to Halted state on recovery queue failure
-                     panic!("CRITICAL: Recovery queue failure - spot entry kill switch failed. System halted.");
+                     // CF4 FIX: Return CriticalFailure instead of panic
+                     return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - spot entry kill switch failed: {}", send_err)));
                  }
                  return ExecutionResult::PartialFailure(e);
              }
@@ -630,8 +664,8 @@ impl ExecutionEngine {
             };
              if let Err(send_err) = self.recovery_tx.send(task).await {
                  error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-                 // CF4 FIX: Transition to Halted state on recovery queue failure
-                 panic!("CRITICAL: Recovery queue failure - future entry kill switch failed. System halted.");
+                 // CF4 FIX: Return CriticalFailure instead of panic
+                 return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - future entry kill switch failed: {}", send_err)));
              }
             return ExecutionResult::PartialFailure(e);
         }
@@ -673,7 +707,7 @@ impl ExecutionEngine {
                 // CF4 FIX: Handle recovery task send errors
                 if let Err(send_err) = self.recovery_tx.send(task).await {
                     error!("EMERGENCY: Failed to queue exit spot recovery task! Error: {}", send_err);
-                    panic!("CRITICAL: Recovery queue failure - exit spot retry failed. System halted.");
+                    return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit spot retry failed: {}", send_err)));
                 }
             }
             
@@ -689,7 +723,7 @@ impl ExecutionEngine {
                 // CF4 FIX: Handle recovery task send errors
                 if let Err(send_err) = self.recovery_tx.send(task).await {
                     error!("EMERGENCY: Failed to queue exit future recovery task! Error: {}", send_err);
-                    panic!("CRITICAL: Recovery queue failure - exit future retry failed. System halted.");
+                    return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit future retry failed: {}", send_err)));
                 }
             }
 
@@ -764,7 +798,9 @@ impl DualLegStrategy {
             self.last_state_change_ts = self.clock.now_ts_millis();
             
             if let Some(tx) = &self.state_notifier {
-                let _ = tx.try_send(new_state);
+                if let Err(e) = tx.try_send(new_state) {
+                     warn!("State update dropped due to backpressure: {}", e);
+                }
             }
         }
     }
@@ -910,8 +946,8 @@ impl DualLegStrategy {
     fn check_timeout(&mut self) {
         if matches!(self.state, StrategyState::Entering { .. } | StrategyState::Exiting { .. }) {
             let now = self.clock.now_ts_millis();
-            if now - self.last_state_change_ts > EXECUTION_TIMEOUT_MS {
-                error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Transitioning to Reconciling.", self.state, EXECUTION_TIMEOUT_MS);
+            if now - self.last_state_change_ts > self.config.execution_timeout_ms {
+                error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Transitioning to Reconciling.", self.state, self.config.execution_timeout_ms);
                 
                 // Transition to Reconciling instead of blind reset
                 self.transition_state(StrategyState::Reconciling);
@@ -945,10 +981,10 @@ impl DualLegStrategy {
         // Check 1: Data freshness (Age)
         let leg1_age = now - leg1.timestamp;
         let leg2_age = now - leg2.timestamp;
-        if leg1_age.abs() > MAX_TICK_AGE_MS || leg2_age.abs() > MAX_TICK_AGE_MS {
+        if leg1_age.abs() > self.config.max_tick_age_ms || leg2_age.abs() > self.config.max_tick_age_ms {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
-                warn!("Dropping tick due to age. Leg1 Age: {}ms, Leg2 Age: {}ms (Max: {}ms) (Suppressed: {})", leg1_age, leg2_age, MAX_TICK_AGE_MS, suppressed);
+                warn!("Dropping tick due to age. Leg1 Age: {}ms, Leg2 Age: {}ms (Max: {}ms) (Suppressed: {})", leg1_age, leg2_age, self.config.max_tick_age_ms, suppressed);
             }
             return; 
         }
@@ -956,10 +992,12 @@ impl DualLegStrategy {
         // Check 2: Data correlation (Synchronization)
         // Ensure the two price points are from roughly the same moment in time.
         let diff = (leg1.timestamp - leg2.timestamp).abs();
-        if diff > MAX_TICK_DIFF_MS {
+        // Using max_tick_age_ms as a proxy for max diff for now, or we could add a specific config.
+        // Let's assume max_tick_age_ms is a reasonable bound for diff too.
+        if diff > self.config.max_tick_age_ms {
             if self.throttler.sync_issue.should_log() {
                 let suppressed = self.throttler.sync_issue.get_and_reset_suppressed_count();
-                warn!("Dropping tick due to sync. Diff: {}ms (Max: {}ms). Leg1 TS: {}, Leg2 TS: {} (Suppressed: {})", diff, MAX_TICK_DIFF_MS, leg1.timestamp, leg2.timestamp, suppressed);
+                warn!("Dropping tick due to sync. Diff: {}ms (Max: {}ms). Leg1 TS: {}, Leg2 TS: {} (Suppressed: {})", diff, self.config.max_tick_age_ms, leg1.timestamp, leg2.timestamp, suppressed);
             }
             return;
         }
@@ -987,11 +1025,13 @@ impl DualLegStrategy {
                         let report = ExecutionReport { result, action: Signal::Buy };
                         
                         // Critical: Must notify main loop of execution result
+                        // Critical: Must notify main loop of execution result
                         match tx.send(report).await {
                             Ok(_) => debug!("Entry execution report sent successfully"),
                             Err(e) => {
                                 error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
-                                panic!("Entry execution report send failed - main loop terminated unexpectedly");
+                                // We cannot panic here as it would only kill the spawned task.
+                                // The main loop will eventually timeout.
                             }
                         }
                     });
@@ -1043,12 +1083,18 @@ impl DualLegStrategy {
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
                     let tx = self.report_tx.clone();
-                    let p1 = leg1.price;
-                    let p2 = leg2.price;
+                    // Calculate Limit Prices with Slippage for Exit
+                    // Sell Spot: Limit = Price * (1 - Slippage)
+                    // Buy Future: Limit = Price * (1 + Slippage)
+                    let slippage_factor = self.config.fee_tier.slippage_bps / dec!(10000.0);
+                    let p1_limit = leg1.price * (dec!(1.0) - slippage_factor);
+                    let p2_limit = leg2.price * (dec!(1.0) + slippage_factor);
+                    
+                    debug!("Executing Exit with Limit Prices - Spot: {} (Market: {}), Future: {} (Market: {})", p1_limit, leg1.price, p2_limit, leg2.price);
 
                     // CF1 & CF2 FIX: Add explicit error handling for report channel
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_exit(&pair, leg1_qty, leg2_qty, p1, p2).await;
+                        let result = engine.execute_basis_exit(&pair, leg1_qty, leg2_qty, p1_limit, p2_limit).await;
                         let report = ExecutionReport { result, action: Signal::Sell };
                         
                         // Critical: Must notify main loop of execution result
@@ -1056,7 +1102,8 @@ impl DualLegStrategy {
                             Ok(_) => debug!("Exit execution report sent successfully"),
                             Err(e) => {
                                 error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
-                                panic!("Exit execution report send failed - main loop terminated unexpectedly");
+                                // We cannot panic here as it would only kill the spawned task.
+                                // The main loop will eventually timeout.
                             }
                         }
                     });

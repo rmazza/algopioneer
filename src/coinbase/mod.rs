@@ -53,7 +53,7 @@ impl CoinbaseClient {
     }
 
     /// Places an order.
-    pub async fn place_order(&self, product_id: &str, side: &str, size: rust_decimal::Decimal) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn place_order(&self, product_id: &str, side: &str, size: rust_decimal::Decimal, price: Option<rust_decimal::Decimal>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match self.mode {
             AppEnv::Live => {
                 println!("-- Live Mode: Placing order for {} {} of {} --", side, size, product_id);
@@ -66,7 +66,8 @@ impl CoinbaseClient {
                 sandbox::save_trade(&trade_details)
             },
             AppEnv::Paper => {
-                let msg = format!("-- PAPER TRADE: {} {} of {} --", side, size, product_id);
+                let price_str = price.map(|p| p.to_string()).unwrap_or_else(|| "MARKET".to_string());
+                let msg = format!("-- PAPER TRADE: {} {} of {} @ {} --", side, size, product_id, price_str);
                 println!("{}", msg);
                 
                 // Log to CSV
@@ -78,7 +79,7 @@ impl CoinbaseClient {
                     .append(true)
                     .open("paper_trades.csv")?;
                 
-                writeln!(file, "{},{},{},{}", Utc::now(), product_id, side, size)?;
+                writeln!(file, "{},{},{},{},{}", Utc::now(), product_id, side, size, price_str)?;
                 Ok(())
             }
         }

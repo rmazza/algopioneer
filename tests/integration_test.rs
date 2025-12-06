@@ -26,9 +26,9 @@ mock! {
 
 #[async_trait]
 impl Executor for MockExecutorImpl {
-    async fn execute_order(&self, symbol: &str, side: &str, quantity: Decimal) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Delegate to the mock expectation
-        self.execute_order_mock(symbol, side, quantity).await
+        self.execute_order_mock(symbol, &side.to_string(), quantity).await
     }
 }
 
@@ -107,12 +107,22 @@ async fn test_phoenix_recovery() {
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
     let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx);
     
+    let config = DualLegConfig {
+        spot_symbol: "BTC-USD".to_string(),
+        future_symbol: "BTC-USDT".to_string(),
+        order_size: dec!(0.1),
+        max_tick_age_ms: 2000,
+        execution_timeout_ms: 30000,
+        min_profit_threshold: dec!(1.0),
+        stop_loss_threshold: dec!(-10.0),
+        fee_tier: TransactionCostModel::new(dec!(5.0), dec!(10.0), dec!(1.0)),
+    };
+
     let mut strategy = DualLegStrategy::new(
         entry_manager,
         risk_monitor,
         execution_engine,
-        "BTC-USD".to_string(),
-        "BTC-USDT".to_string(),
+        config,
         recovery_rx,
         Box::new(clock.clone()),
     );
@@ -147,7 +157,7 @@ async fn test_phoenix_recovery() {
 
     // Step 2: Assert Strategy enters Entering state
     let state = state_rx.recv().await.expect("Failed to receive state");
-    assert_eq!(state, StrategyState::Entering, "Step 2: Should enter Entering state");
+    assert!(matches!(state, StrategyState::Entering { .. }), "Step 2: Should enter Entering state");
 
     // Step 3: Simulate "Hang"
     // Advance time by 31 seconds.
@@ -212,12 +222,22 @@ async fn test_pairs_trading_cycle() {
     let entry_manager = Box::new(PairsManager::new(5, 2.0, 0.1));
     let risk_monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
     
+    let config = DualLegConfig {
+        spot_symbol: "A".to_string(),
+        future_symbol: "B".to_string(),
+        order_size: dec!(1.0),
+        max_tick_age_ms: 2000,
+        execution_timeout_ms: 30000,
+        min_profit_threshold: dec!(0.1),
+        stop_loss_threshold: dec!(-5.0),
+        fee_tier: TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0)),
+    };
+
     let mut strategy = DualLegStrategy::new(
         entry_manager,
         risk_monitor,
         execution_engine,
-        "A".to_string(),
-        "B".to_string(),
+        config,
         _recovery_rx,
         Box::new(clock.clone()),
     );
@@ -248,13 +268,13 @@ async fn test_pairs_trading_cycle() {
     
     // Expect Entering -> InPosition
     let state = state_rx.recv().await.expect("No state (Entering)");
-    assert_eq!(state, StrategyState::Entering);
+    assert!(matches!(state, StrategyState::Entering { .. }));
     
     // Allow execution task to run
     tokio::time::sleep(Duration::from_millis(100)).await;
     
     let state = state_rx.recv().await.expect("No state (InPosition)");
-    assert_eq!(state, StrategyState::InPosition);
+    assert!(matches!(state, StrategyState::InPosition { .. }));
     
     // 3. Trigger Exit (Mean Reversion). Prices converge.
     leg1_tx.send(MarketData { symbol: "A".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
@@ -265,7 +285,7 @@ async fn test_pairs_trading_cycle() {
     
     // Expect Exiting -> Flat
     let state = state_rx.recv().await.expect("No state (Exiting)");
-    assert_eq!(state, StrategyState::Exiting);
+    assert!(matches!(state, StrategyState::Exiting { .. }));
     
     // Allow execution task to run
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -276,6 +296,8 @@ async fn test_pairs_trading_cycle() {
 
 #[tokio::test]
 async fn test_basis_trading_cycle() {
+    let _ = tracing_subscriber::fmt::try_init();
+    println!("Starting test_basis_trading_cycle");
     tokio::time::pause();
     let start_ts = 1_600_000_000_000;
     let clock = MockClock::new(start_ts);
@@ -314,12 +336,22 @@ async fn test_basis_trading_cycle() {
     let entry_manager = Box::new(BasisManager::new(dec!(10.0), dec!(2.0), cost_model));
     let risk_monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
     
+    let config = DualLegConfig {
+        spot_symbol: "BTC-USD".to_string(),
+        future_symbol: "BTC-USDT".to_string(),
+        order_size: dec!(0.1),
+        max_tick_age_ms: 2000,
+        execution_timeout_ms: 30000,
+        min_profit_threshold: dec!(1.0),
+        stop_loss_threshold: dec!(-10.0),
+        fee_tier: cost_model,
+    };
+
     let mut strategy = DualLegStrategy::new(
         entry_manager,
         risk_monitor,
         execution_engine,
-        "BTC-USD".to_string(),
-        "BTC-USDT".to_string(),
+        config,
         _recovery_rx,
         Box::new(clock.clone()),
     );
@@ -342,12 +374,12 @@ async fn test_basis_trading_cycle() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     
     let state = state_rx.recv().await.expect("No state (Entering)");
-    assert_eq!(state, StrategyState::Entering);
+    assert!(matches!(state, StrategyState::Entering { .. }));
     
     tokio::time::sleep(Duration::from_millis(100)).await;
     
     let state = state_rx.recv().await.expect("No state (InPosition)");
-    assert_eq!(state, StrategyState::InPosition);
+    assert!(matches!(state, StrategyState::InPosition { .. }));
     
     // 2. Trigger Exit. Spread < 2 bps.
     // Spot 100, Future 100.01. Spread = 1 bps.
@@ -357,7 +389,7 @@ async fn test_basis_trading_cycle() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     
     let state = state_rx.recv().await.expect("No state (Exiting)");
-    assert_eq!(state, StrategyState::Exiting);
+    assert!(matches!(state, StrategyState::Exiting { .. }));
     
     tokio::time::sleep(Duration::from_millis(100)).await;
     
@@ -400,7 +432,7 @@ async fn test_recovery_worker_retry() {
     // Send a task
     let task = RecoveryTask {
         symbol: "BTC-USD".to_string(),
-        action: "buy".to_string(),
+        action: OrderSide::Buy,
         quantity: dec!(1.0),
         reason: "Test".to_string(),
         attempts: 0,

@@ -7,7 +7,7 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode};
+use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode, DualLegConfig};
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -197,14 +197,14 @@ async fn run_trading(product_id: &str, duration: u64, env: AppEnv) -> Result<(),
                 Signal::Buy => {
                     println!("Buy signal received. Placing order.");
                     let size = Decimal::from_f64(ORDER_SIZE).unwrap();
-                    client.place_order(product_id, "buy", size).await.map_err(|e| e as Box<dyn std::error::Error>)?;
+                    client.place_order(product_id, "buy", size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
                     state.position_open = true;
                     state.save()?;
                 }
                 Signal::Sell => {
                     println!("Sell signal received. Placing order.");
                     let size = Decimal::from_f64(ORDER_SIZE).unwrap();
-                    client.place_order(product_id, "sell", size).await.map_err(|e| e as Box<dyn std::error::Error>)?;
+                    client.place_order(product_id, "sell", size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
                     state.position_open = false;
                     state.save()?;
                 }
@@ -286,7 +286,7 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
         "pairs" => {
             // Pairs Trading: Z-Score based
             // Window 20, Entry Z=2.0, Exit Z=0.1
-            let manager = Box::new(PairsManager::new(20, 2.0, 0.1));
+            let manager = Box::new(PairsManager::new(500, 4.0, 0.1));
             // Pairs is usually Dollar Neutral
             let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
             (manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>, monitor)
@@ -297,12 +297,22 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
         }
     };
 
+    let config = DualLegConfig {
+        spot_symbol: leg1_id.to_string(),
+        future_symbol: leg2_id.to_string(),
+        order_size: dec!(0.00001),
+        max_tick_age_ms: 2000,
+        execution_timeout_ms: 30000,
+        min_profit_threshold: dec!(0.005),
+        stop_loss_threshold: dec!(-0.05),
+        fee_tier: TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0)),
+    };
+
     let mut strategy = DualLegStrategy::new(
         entry_strategy,
         risk_monitor,
         execution_engine,
-        leg1_id.to_string(),
-        leg2_id.to_string(),
+        config,
         feedback_rx,
         Box::new(SystemClock),
     );
