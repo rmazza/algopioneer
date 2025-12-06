@@ -306,6 +306,7 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
         min_profit_threshold: dec!(0.005),
         stop_loss_threshold: dec!(-0.05),
         fee_tier: TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0)),
+        throttle_interval_secs: 5,
     };
 
     let mut strategy = DualLegStrategy::new(

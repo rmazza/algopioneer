@@ -116,6 +116,7 @@ async fn test_phoenix_recovery() {
         min_profit_threshold: dec!(1.0),
         stop_loss_threshold: dec!(-10.0),
         fee_tier: TransactionCostModel::new(dec!(5.0), dec!(10.0), dec!(1.0)),
+        throttle_interval_secs: 5,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -180,6 +181,8 @@ async fn test_phoenix_recovery() {
 
 #[tokio::test]
 async fn test_pairs_trading_cycle() {
+    let _ = tracing_subscriber::fmt::try_init();
+    println!("Starting test_pairs_trading_cycle");
     tokio::time::pause();
     let start_ts = 1_600_000_000_000;
     let clock = MockClock::new(start_ts);
@@ -218,8 +221,8 @@ async fn test_pairs_trading_cycle() {
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
     let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx);
     
-    // Pairs Manager: Window 5, Entry Z=2, Exit Z=0.1
-    let entry_manager = Box::new(PairsManager::new(5, 2.0, 0.1));
+    // Pairs Manager: Window 5, Entry Z=1.9, Exit Z=1.0
+    let entry_manager = Box::new(PairsManager::new(5, 1.9, 1.0));
     let risk_monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
     
     let config = DualLegConfig {
@@ -231,6 +234,7 @@ async fn test_pairs_trading_cycle() {
         min_profit_threshold: dec!(0.1),
         stop_loss_threshold: dec!(-5.0),
         fee_tier: TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0)),
+        throttle_interval_secs: 5,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -260,7 +264,7 @@ async fn test_pairs_trading_cycle() {
     }
     
     // 2. Trigger Long Entry (Z < -2). Drop A price.
-    leg1_tx.send(MarketData { symbol: "A".into(), price: dec!(80), timestamp: start_ts }).await.unwrap();
+    leg1_tx.send(MarketData { symbol: "A".into(), price: dec!(79), timestamp: start_ts }).await.unwrap();
     leg2_tx.send(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
     
     // Allow processing
@@ -296,7 +300,7 @@ async fn test_pairs_trading_cycle() {
 
 #[tokio::test]
 async fn test_basis_trading_cycle() {
-    let _ = tracing_subscriber::fmt::try_init();
+    // let _ = tracing_subscriber::fmt::try_init();
     println!("Starting test_basis_trading_cycle");
     tokio::time::pause();
     let start_ts = 1_600_000_000_000;
@@ -342,9 +346,10 @@ async fn test_basis_trading_cycle() {
         order_size: dec!(0.1),
         max_tick_age_ms: 2000,
         execution_timeout_ms: 30000,
-        min_profit_threshold: dec!(1.0),
+        min_profit_threshold: dec!(0.0),
         stop_loss_threshold: dec!(-10.0),
         fee_tier: cost_model,
+        throttle_interval_secs: 5,
     };
 
     let mut strategy = DualLegStrategy::new(

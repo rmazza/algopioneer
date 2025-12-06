@@ -264,6 +264,7 @@ pub struct DualLegConfig {
     pub min_profit_threshold: Decimal,
     pub stop_loss_threshold: Decimal,
     pub fee_tier: TransactionCostModel,
+    pub throttle_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -546,9 +547,16 @@ impl RecoveryWorker {
             let client = self.client.clone();
             let feedback_tx = self.feedback_tx.clone();
             // Non-blocking acquire to prevent deadlock
-            let permit = self.semaphore.clone().try_acquire_owned();
+            let permit = match self.semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    error!("CRITICAL: Recovery worker overloaded. Dropping task for {}.", task.symbol);
+                    let _ = self.feedback_tx.send(RecoveryResult::Failed(task.symbol)).await;
+                    continue;
+                }
+            };
             
-            if let Ok(permit) = permit {
+            // Local throttler for the spawned task
                 // Local throttler for the spawned task
 
                 // But the throttler is for the WORKER loop logging, or the spawned task logging?
@@ -599,10 +607,8 @@ impl RecoveryWorker {
                         }
                     }
                 });
-            } else {
-                warn!("Recovery Worker overloaded! Dropping recovery task for {}", task.symbol);
-                let _ = self.feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
-            }
+            // End of successful permit block
+
         }
     }
 }
@@ -620,7 +626,7 @@ impl ExecutionEngine {
     }
 
     #[instrument(skip(self))]
-    pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> ExecutionResult {
+    pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
         // Concurrently execute both legs to minimize leg risk
         let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Buy, quantity, Some(leg1_price));
         let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Sell, hedge_qty, Some(leg2_price));
@@ -645,11 +651,11 @@ impl ExecutionEngine {
                  if let Err(send_err) = self.recovery_tx.send(task).await {
                      error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
                      // CF4 FIX: Return CriticalFailure instead of panic
-                     return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - spot entry kill switch failed: {}", send_err)));
+                     return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - spot entry kill switch failed: {}", send_err)));
                  }
-                 return ExecutionResult::PartialFailure(e);
+                 return Ok(ExecutionResult::PartialFailure(e));
              }
-             return ExecutionResult::TotalFailure(e);
+             return Ok(ExecutionResult::TotalFailure(e));
         }
 
         if let Err(e) = future_res {
@@ -665,16 +671,16 @@ impl ExecutionEngine {
              if let Err(send_err) = self.recovery_tx.send(task).await {
                  error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
                  // CF4 FIX: Return CriticalFailure instead of panic
-                 return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - future entry kill switch failed: {}", send_err)));
+                 return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - future entry kill switch failed: {}", send_err)));
              }
-            return ExecutionResult::PartialFailure(e);
+            return Ok(ExecutionResult::PartialFailure(e));
         }
 
-        ExecutionResult::Success
+        Ok(ExecutionResult::Success)
     }
 
     #[instrument(skip(self))]
-    pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> ExecutionResult {
+    pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
          // Reverse of entry: Sell Spot, Buy Future
         let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Sell, quantity, Some(leg1_price));
         let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Buy, hedge_qty, Some(leg2_price));
@@ -685,7 +691,7 @@ impl ExecutionEngine {
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
         if spot_res.is_err() && future_res.is_err() {
-            return ExecutionResult::TotalFailure(ExecutionError::ExchangeError(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err())));
+            return Ok(ExecutionResult::TotalFailure(ExecutionError::ExchangeError(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err()))));
         }
 
         if spot_res.is_err() || future_res.is_err() {
@@ -707,7 +713,7 @@ impl ExecutionEngine {
                 // CF4 FIX: Handle recovery task send errors
                 if let Err(send_err) = self.recovery_tx.send(task).await {
                     error!("EMERGENCY: Failed to queue exit spot recovery task! Error: {}", send_err);
-                    return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit spot retry failed: {}", send_err)));
+                    return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit spot retry failed: {}", send_err)));
                 }
             }
             
@@ -723,14 +729,14 @@ impl ExecutionEngine {
                 // CF4 FIX: Handle recovery task send errors
                 if let Err(send_err) = self.recovery_tx.send(task).await {
                     error!("EMERGENCY: Failed to queue exit future recovery task! Error: {}", send_err);
-                    return ExecutionResult::TotalFailure(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit future retry failed: {}", send_err)));
+                    return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit future retry failed: {}", send_err)));
                 }
             }
 
-            return ExecutionResult::PartialFailure(ExecutionError::ExchangeError("Exit failed. Recovery tasks queued.".to_string()));
+            return Ok(ExecutionResult::PartialFailure(ExecutionError::ExchangeError("Exit failed. Recovery tasks queued.".to_string())));
         }
         
-        ExecutionResult::Success
+        Ok(ExecutionResult::Success)
     }
 }
 
@@ -741,7 +747,7 @@ pub struct DualLegStrategy {
     entry_manager: Box<dyn EntryStrategy>,
     risk_monitor: RiskMonitor,
     execution_engine: Arc<ExecutionEngine>,
-    pair: InstrumentPair,
+    pair: Arc<InstrumentPair>,
     state: StrategyState,
     last_state_change_ts: i64,
     report_tx: mpsc::Sender<ExecutionReport>,
@@ -751,6 +757,7 @@ pub struct DualLegStrategy {
     throttler: DualLegLogThrottler,
     pub state_notifier: Option<mpsc::Sender<StrategyState>>,
     config: DualLegConfig,
+    tasks: tokio::task::JoinSet<()>,
 }
 
 impl DualLegStrategy {
@@ -774,16 +781,17 @@ impl DualLegStrategy {
             entry_manager,
             risk_monitor,
             execution_engine: Arc::new(execution_engine),
-            pair,
+            pair: Arc::new(pair),
             state: StrategyState::Flat,
             last_state_change_ts: now,
             report_tx,
             report_rx,
             recovery_rx,
             clock,
-            throttler: DualLegLogThrottler::new(5), // 5 seconds default
+            throttler: DualLegLogThrottler::new(config.throttle_interval_secs),
             state_notifier: None,
             config,
+            tasks: tokio::task::JoinSet::new(),
         }
     }
 
@@ -812,6 +820,7 @@ impl DualLegStrategy {
 
         let mut latest_leg1: Option<MarketData> = None;
         let mut latest_leg2: Option<MarketData> = None;
+        let mut dirty = false;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
 
         loop {
@@ -821,9 +830,11 @@ impl DualLegStrategy {
                 }
                 Some(leg1_data) = leg1_rx.recv() => {
                     latest_leg1 = Some(leg1_data);
+                    dirty = true;
                 }
                 Some(leg2_data) = leg2_rx.recv() => {
                     latest_leg2 = Some(leg2_data);
+                    dirty = true;
                 }
                 Some(report) = self.report_rx.recv() => {
                     self.handle_execution_report(report);
@@ -831,11 +842,17 @@ impl DualLegStrategy {
                 Some(recovery_res) = self.recovery_rx.recv() => {
                     self.handle_recovery_result(recovery_res);
                 }
+                // Some(_res) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                //     // Reap finished tasks. We could handle panics here if needed.
+                // }
                 else => break, // Channels closed
             }
 
-            if let (Some(leg1), Some(leg2)) = (&latest_leg1, &latest_leg2) {
-                self.process_tick(leg1, leg2).await;
+            if dirty {
+                if let (Some(leg1), Some(leg2)) = (&latest_leg1, &latest_leg2) {
+                    self.process_tick(leg1, leg2).await;
+                }
+                dirty = false;
             }
         }
     }
@@ -869,6 +886,11 @@ impl DualLegStrategy {
             },
             ExecutionResult::TotalFailure(reason) => {
                 error!("Execution Failed completely: {}. Reverting state.", reason);
+                if let ExecutionError::CriticalFailure(_) = reason {
+                    error!("CRITICAL FAILURE DETECTED. Halting Strategy.");
+                    self.transition_state(StrategyState::Halted);
+                    return;
+                }
                 match report.action {
                     Signal::Buy => {
                          // Entry failed completely.
@@ -975,7 +997,6 @@ impl DualLegStrategy {
             }
             return;
         }
-
         let now = self.clock.now_ts_millis();
         
         // Check 1: Data freshness (Age)
@@ -1021,10 +1042,12 @@ impl DualLegStrategy {
 
                     // CF1 & CF2 FIX: Add explicit error handling for report channel
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2).await;
+                        let result = match engine.execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2).await {
+                            Ok(res) => res,
+                            Err(e) => ExecutionResult::TotalFailure(e),
+                        };
                         let report = ExecutionReport { result, action: Signal::Buy };
                         
-                        // Critical: Must notify main loop of execution result
                         // Critical: Must notify main loop of execution result
                         match tx.send(report).await {
                             Ok(_) => debug!("Entry execution report sent successfully"),
@@ -1094,7 +1117,10 @@ impl DualLegStrategy {
 
                     // CF1 & CF2 FIX: Add explicit error handling for report channel
                     tokio::spawn(async move {
-                        let result = engine.execute_basis_exit(&pair, leg1_qty, leg2_qty, p1_limit, p2_limit).await;
+                        let result = match engine.execute_basis_exit(&pair, leg1_qty, leg2_qty, p1_limit, p2_limit).await {
+                            Ok(res) => res,
+                            Err(e) => ExecutionResult::TotalFailure(e),
+                        };
                         let report = ExecutionReport { result, action: Signal::Sell };
                         
                         // Critical: Must notify main loop of execution result
