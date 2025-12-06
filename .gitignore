@@ -32,3 +32,4 @@ venv/
 # Coverage / tool output
 coverage/
 
+paper_trades.csv

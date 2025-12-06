@@ -1,5 +1,6 @@
 pub mod moving_average;
 pub mod dual_leg_trading;
+pub mod portfolio;
 
 use polars::prelude::*;
 

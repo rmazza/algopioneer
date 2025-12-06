@@ -1,5 +1,6 @@
 use algopioneer::coinbase::{CoinbaseClient, AppEnv};
 use algopioneer::coinbase::websocket::CoinbaseWebsocket;
+use cbadv::time::Granularity;
 use dotenv::dotenv;
 use polars::prelude::*;
 use std::fs::File;
@@ -7,7 +8,8 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode, DualLegConfig};
+use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode, DualLegConfig, MarketData};
+use algopioneer::strategy::portfolio::PortfolioManager;
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -87,6 +89,15 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         paper: bool,
     },
+    /// Run the Portfolio Manager
+    Portfolio {
+        /// Path to pairs configuration file
+        #[arg(long)]
+        config: String,
+        /// Run in paper trading mode
+        #[arg(long, default_value_t = false)]
+        paper: bool,
+    },
 }
 
 
@@ -120,6 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             run_dual_leg_trading(strategy, parts[0], parts[1], env).await?;
         }
+        Commands::Portfolio { config, paper } => {
+            let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
+            let mut manager = PortfolioManager::new(config, env);
+            manager.run().await?;
+        }
     }
 
     Ok(())
@@ -140,7 +156,7 @@ async fn run_trading(product_id: &str, duration: u64, env: AppEnv) -> Result<(),
     println!("Fetching historical data to warm up the strategy...");
     let end = Utc::now();
     let start = end - ChronoDuration::minutes((LONG_WINDOW * 5) as i64); // Fetch enough data
-    let initial_candles = client.get_product_candles(product_id, &start, &end).await?;
+    let initial_candles = client.get_product_candles(product_id, &start, &end, Granularity::OneMinute).await?;
 
     let mut times: Vec<i64> = initial_candles.iter().map(|c| c.start as i64).collect();
     let mut closes: Vec<f64> = initial_candles.iter().map(|c| c.close).collect();
@@ -170,7 +186,7 @@ async fn run_trading(product_id: &str, duration: u64, env: AppEnv) -> Result<(),
         // Fetch the latest candle
         let end = Utc::now();
         let start = end - ChronoDuration::minutes(1);
-        let latest_candles = client.get_product_candles(product_id, &start, &end).await?;
+        let latest_candles = client.get_product_candles(product_id, &start, &end, Granularity::OneMinute).await?;
 
         if let Some(latest_candle) = latest_candles.first() {
             // Append the latest candle
@@ -341,12 +357,13 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
     tokio::spawn(async move {
         while let Some(data) = ws_rx.recv().await {
             tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
-            if data.symbol == leg1_id_clone {
-                if let Err(_) = leg1_tx.send(data).await { break; }
-            } else if data.symbol == leg2_id_clone {
-                if let Err(_) = leg2_tx.send(data).await { break; }
+            let arc_data = Arc::new(data);
+            if arc_data.symbol == leg1_id_clone {
+                if let Err(_) = leg1_tx.send(arc_data.clone()).await { break; }
+            } else if arc_data.symbol == leg2_id_clone {
+                if let Err(_) = leg2_tx.send(arc_data.clone()).await { break; }
             } else {
-                tracing::warn!("Demux received unknown symbol: {}", data.symbol);
+                tracing::warn!("Demux received unknown symbol: {}", arc_data.symbol);
             }
         }
     });

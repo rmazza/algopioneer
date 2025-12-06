@@ -6,6 +6,7 @@ use cbadv::models::product::{Candle, ProductCandleQuery};
 use cbadv::time::Granularity;
 use chrono::{DateTime, Utc};
 
+#[derive(Clone, Copy)]
 pub enum AppEnv {
     Live,
     Sandbox,
@@ -91,6 +92,7 @@ impl CoinbaseClient {
         product_id: &str,
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
+        granularity: Granularity,
     ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
         let start_timestamp = start.timestamp() as u64;
         let end_timestamp = end.timestamp() as u64;
@@ -98,7 +100,7 @@ impl CoinbaseClient {
         let query = ProductCandleQuery {
             start: start_timestamp,
             end: end_timestamp,
-            granularity: Granularity::OneMinute,
+            granularity,
             limit: 300,
         };
 
@@ -109,4 +111,5 @@ impl CoinbaseClient {
             .await?;
         Ok(candles)
     }
+
 }

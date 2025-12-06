@@ -29,6 +29,7 @@ use tracing::{info, debug, error, instrument, warn};
 use tokio::sync::{mpsc, Semaphore, Mutex};
 use tokio::time::{Duration, Instant};
 use thiserror::Error;
+use serde::{Serialize, Deserialize};
 
 #[derive(Error, Debug)]
 pub enum DualLegError {
@@ -161,7 +162,7 @@ impl DualLegLogThrottler {
 
 // --- Financial Models ---
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TransactionCostModel {
     pub maker_fee_bps: Decimal,
     pub taker_fee_bps: Decimal,
@@ -254,7 +255,7 @@ impl Spread {
 
 // --- State Management ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DualLegConfig {
     pub spot_symbol: String,
     pub future_symbol: String,
@@ -815,11 +816,11 @@ impl DualLegStrategy {
 
     /// Runs the strategy loop.
     #[instrument(skip(self, leg1_rx, leg2_rx), name = "strategy_loop")]
-    pub async fn run(&mut self, mut leg1_rx: tokio::sync::mpsc::Receiver<MarketData>, mut leg2_rx: tokio::sync::mpsc::Receiver<MarketData>) {
+    pub async fn run(&mut self, mut leg1_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>, mut leg2_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>) {
         info!("Starting Dual-Leg Strategy for {}/{}", self.pair.spot_symbol, self.pair.future_symbol);
 
-        let mut latest_leg1: Option<MarketData> = None;
-        let mut latest_leg2: Option<MarketData> = None;
+        let mut latest_leg1: Option<Arc<MarketData>> = None;
+        let mut latest_leg2: Option<Arc<MarketData>> = None;
         let mut dirty = false;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
 

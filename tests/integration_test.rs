@@ -133,12 +133,12 @@ async fn test_phoenix_recovery() {
     strategy.set_observer(state_tx);
 
     // Channels for Market Data
-    let (spot_tx, spot_rx) = mpsc::channel(10);
-    let (future_tx, future_rx) = mpsc::channel(10);
+    let (leg1_tx, leg1_rx) = mpsc::channel::<Arc<MarketData>>(10);
+    let (leg2_tx, leg2_rx) = mpsc::channel::<Arc<MarketData>>(10);
     
     // Spawn Strategy
     tokio::spawn(async move {
-        strategy.run(spot_rx, future_rx).await;
+        strategy.run(leg1_rx, leg2_rx).await;
     });
 
     // Step 1: Send MarketData tick that triggers Buy
@@ -153,8 +153,8 @@ async fn test_phoenix_recovery() {
         timestamp: start_ts,
     };
 
-    spot_tx.send(spot_tick).await.unwrap();
-    future_tx.send(future_tick).await.unwrap();
+    leg1_tx.send(Arc::new(spot_tick)).await.unwrap();
+    leg2_tx.send(Arc::new(future_tick)).await.unwrap();
 
     // Step 2: Assert Strategy enters Entering state
     let state = state_rx.recv().await.expect("Failed to receive state");
@@ -249,8 +249,8 @@ async fn test_pairs_trading_cycle() {
     let (state_tx, mut state_rx) = mpsc::channel(10);
     strategy.set_observer(state_tx);
     
-    let (leg1_tx, leg1_rx) = mpsc::channel(10);
-    let (leg2_tx, leg2_rx) = mpsc::channel(10);
+    let (leg1_tx, leg1_rx) = mpsc::channel::<Arc<MarketData>>(10);
+    let (leg2_tx, leg2_rx) = mpsc::channel::<Arc<MarketData>>(10);
     
     tokio::spawn(async move {
         strategy.run(leg1_rx, leg2_rx).await;
@@ -258,14 +258,14 @@ async fn test_pairs_trading_cycle() {
     
     // 1. Warm up window with stable spread (0)
     for _ in 0..5 {
-        leg1_tx.send(MarketData { symbol: "A".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
-        leg2_tx.send(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
+        leg1_tx.send(Arc::new(MarketData { symbol: "A".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
+        leg2_tx.send(Arc::new(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
         tokio::task::yield_now().await;
     }
     
     // 2. Trigger Long Entry (Z < -2). Drop A price.
-    leg1_tx.send(MarketData { symbol: "A".into(), price: dec!(79), timestamp: start_ts }).await.unwrap();
-    leg2_tx.send(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
+    leg1_tx.send(Arc::new(MarketData { symbol: "A".into(), price: dec!(79), timestamp: start_ts })).await.unwrap();
+    leg2_tx.send(Arc::new(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
     
     // Allow processing
     tokio::time::sleep(Duration::from_millis(10)).await; 
@@ -281,8 +281,8 @@ async fn test_pairs_trading_cycle() {
     assert!(matches!(state, StrategyState::InPosition { .. }));
     
     // 3. Trigger Exit (Mean Reversion). Prices converge.
-    leg1_tx.send(MarketData { symbol: "A".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
-    leg2_tx.send(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
+    leg1_tx.send(Arc::new(MarketData { symbol: "A".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
+    leg2_tx.send(Arc::new(MarketData { symbol: "B".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
     
     // Allow processing
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -364,8 +364,8 @@ async fn test_basis_trading_cycle() {
     let (state_tx, mut state_rx) = mpsc::channel(10);
     strategy.set_observer(state_tx);
     
-    let (leg1_tx, leg1_rx) = mpsc::channel(10);
-    let (leg2_tx, leg2_rx) = mpsc::channel(10);
+    let (leg1_tx, leg1_rx) = mpsc::channel::<Arc<MarketData>>(10);
+    let (leg2_tx, leg2_rx) = mpsc::channel::<Arc<MarketData>>(10);
     
     tokio::spawn(async move {
         strategy.run(leg1_rx, leg2_rx).await;
@@ -373,8 +373,8 @@ async fn test_basis_trading_cycle() {
     
     // 1. Trigger Entry. Spread > 10 bps.
     // Spot 100, Future 100.2. Spread = 20 bps.
-    leg1_tx.send(MarketData { symbol: "BTC-USD".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
-    leg2_tx.send(MarketData { symbol: "BTC-USDT".into(), price: dec!(100.2), timestamp: start_ts }).await.unwrap();
+    leg1_tx.send(Arc::new(MarketData { symbol: "BTC-USD".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
+    leg2_tx.send(Arc::new(MarketData { symbol: "BTC-USDT".into(), price: dec!(100.2), timestamp: start_ts })).await.unwrap();
     
     tokio::time::sleep(Duration::from_millis(10)).await;
     
@@ -388,8 +388,8 @@ async fn test_basis_trading_cycle() {
     
     // 2. Trigger Exit. Spread < 2 bps.
     // Spot 100, Future 100.01. Spread = 1 bps.
-    leg1_tx.send(MarketData { symbol: "BTC-USD".into(), price: dec!(100), timestamp: start_ts }).await.unwrap();
-    leg2_tx.send(MarketData { symbol: "BTC-USDT".into(), price: dec!(100.01), timestamp: start_ts }).await.unwrap();
+    leg1_tx.send(Arc::new(MarketData { symbol: "BTC-USD".into(), price: dec!(100), timestamp: start_ts })).await.unwrap();
+    leg2_tx.send(Arc::new(MarketData { symbol: "BTC-USDT".into(), price: dec!(100.01), timestamp: start_ts })).await.unwrap();
     
     tokio::time::sleep(Duration::from_millis(10)).await;
     
