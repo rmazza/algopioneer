@@ -1,20 +1,35 @@
 use crate::coinbase::{CoinbaseClient, AppEnv};
 use crate::coinbase::websocket::CoinbaseWebsocket;
-use crate::strategy::dual_leg_trading::{
     DualLegStrategy, DualLegConfig, ExecutionEngine, RecoveryWorker, 
-    SystemClock, TransactionCostModel, BasisManager, PairsManager, 
+    SystemClock, PairsManager, 
     RiskMonitor, InstrumentType, HedgeMode, MarketData
 };
-use crate::strategy::Signal;
-use tokio::sync::{mpsc, broadcast};
+
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{info, error, warn, debug};
-use rust_decimal::Decimal;
+use tracing::{info, error, debug};
+
 use rust_decimal_macros::dec;
 use std::fs::File;
 use std::io::BufReader;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioPairConfig {
+    #[serde(flatten)]
+    pub dual_leg_config: DualLegConfig,
+    pub window_size: usize,
+    pub entry_z_score: f64,
+    pub exit_z_score: f64,
+}
+
+impl PortfolioPairConfig {
+    pub fn pair_id(&self) -> String {
+        format!("{}-{}", self.dual_leg_config.spot_symbol, self.dual_leg_config.future_symbol)
+    }
+}
 
 pub struct PortfolioManager {
     config_path: String,
@@ -35,7 +50,7 @@ impl PortfolioManager {
         // 1. Load Configuration
         let file = File::open(&self.config_path)?;
         let reader = BufReader::new(file);
-        let config_list: Vec<DualLegConfig> = serde_json::from_reader(reader)?;
+        let config_list: Vec<PortfolioPairConfig> = serde_json::from_reader(reader)?;
 
         if config_list.is_empty() {
             return Err("No pairs found in configuration.".into());
@@ -44,10 +59,10 @@ impl PortfolioManager {
         info!("Loaded {} pairs from config.", config_list.len());
 
         // Store configs for restart capability
-        let mut config_map: HashMap<String, DualLegConfig> = HashMap::new();
-        for cfg in &config_list {
-            let pair_id = format!("{}-{}", cfg.spot_symbol, cfg.future_symbol);
-            config_map.insert(pair_id, cfg.clone());
+        let mut config_map: HashMap<String, Arc<PortfolioPairConfig>> = HashMap::new();
+        for cfg in config_list {
+            let pair_id = cfg.pair_id();
+            config_map.insert(pair_id, Arc::new(cfg));
         }
 
         // 2. Initialize Shared Resources
@@ -62,19 +77,20 @@ impl PortfolioManager {
         let mut symbol_map: HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>> = HashMap::new();
         let mut symbols_to_subscribe: Vec<String> = Vec::new();
 
-        // Helper closure to spawn a strategy
-        // We can't easily use a closure that borrows `join_set` and `symbol_map` mutably 
-        // if we call it in a loop. So we inline the logic or use a macro.
-        // But for the initial loop, it's fine.
-        
-        for config in config_list {
-            let pair_id = format!("{}-{}", config.spot_symbol, config.future_symbol);
+        for config in config_map.values() {
+            // Register symbols first
+            if !symbols_to_subscribe.contains(&config.dual_leg_config.spot_symbol) {
+                symbols_to_subscribe.push(config.dual_leg_config.spot_symbol.clone());
+            }
+            if !symbols_to_subscribe.contains(&config.dual_leg_config.future_symbol) {
+                symbols_to_subscribe.push(config.dual_leg_config.future_symbol.clone());
+            }
+
             Self::spawn_strategy(
                 &mut join_set, 
                 &mut symbol_map, 
-                &mut symbols_to_subscribe, 
                 client.clone(), 
-                config
+                config.clone()
             ).await;
         }
 
@@ -94,17 +110,26 @@ impl PortfolioManager {
         loop {
             tokio::select! {
                 // Handle WebSocket Ticks
-                Some(data) = ws_rx.recv() => {
-                    let arc_data = Arc::new(data);
-                    if let Some(senders) = symbol_map.get(&arc_data.symbol) {
-                        // We need to iterate and send. 
-                        // If send fails (channel closed), it means actor died. 
-                        // We could clean up here, but `join_next` handles the death event.
-                        for (sender, _pair_id) in senders {
-                            if let Err(e) = sender.send(arc_data.clone()).await {
-                                // Log debug, but rely on join_set to handle the crash
-                                debug!("Failed to route tick to strategy: {}", e);
+                // Handle WebSocket Ticks
+                res = ws_rx.recv() => {
+                    match res {
+                        Some(data) => {
+                            let arc_data = Arc::new(data);
+                            if let Some(senders) = symbol_map.get(&arc_data.symbol) {
+                                // We need to iterate and send. 
+                                // If send fails (channel closed), it means actor died. 
+                                // We could clean up here, but `join_next` handles the death event.
+                                for (sender, _pair_id) in senders {
+                                    if let Err(e) = sender.send(arc_data.clone()).await {
+                                        // Log debug, but rely on join_set to handle the crash
+                                        debug!("Failed to route tick to strategy: {}", e);
+                                    }
+                                }
                             }
+                        }
+                        None => {
+                            error!("CRITICAL: WebSocket channel closed. Connection lost.");
+                            return Err("WebSocket connection lost".into());
                         }
                     }
                 }
@@ -126,11 +151,13 @@ impl PortfolioManager {
                                 // Add a small backoff to prevent tight loop crashing
                                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                                 
-                                let mut dummy_subs = Vec::new(); // We don't need to resubscribe to WS, connection is open
+                                // 3. Respawn
+                                // Add a small backoff to prevent tight loop crashing
+                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                
                                 Self::spawn_strategy(
                                     &mut join_set, 
                                     &mut symbol_map, 
-                                    &mut dummy_subs, 
                                     client.clone(), 
                                     config.clone()
                                 ).await;
@@ -156,11 +183,10 @@ impl PortfolioManager {
     async fn spawn_strategy(
         join_set: &mut JoinSet<String>,
         symbol_map: &mut HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
-        symbols_to_subscribe: &mut Vec<String>,
         client: Arc<CoinbaseClient>,
-        config: DualLegConfig
+        config: Arc<PortfolioPairConfig>
     ) {
-        let pair_id = format!("{}-{}", config.spot_symbol, config.future_symbol);
+        let pair_id = config.pair_id();
         info!("Initializing strategy for {}", pair_id);
 
         // Create Channels
@@ -168,15 +194,8 @@ impl PortfolioManager {
         let (leg2_tx, leg2_rx) = mpsc::channel(100);
         
         // Map symbols to channels (1-to-N)
-        symbol_map.entry(config.spot_symbol.clone()).or_default().push((leg1_tx, pair_id.clone()));
-        symbol_map.entry(config.future_symbol.clone()).or_default().push((leg2_tx, pair_id.clone()));
-        
-        if !symbols_to_subscribe.contains(&config.spot_symbol) {
-            symbols_to_subscribe.push(config.spot_symbol.clone());
-        }
-        if !symbols_to_subscribe.contains(&config.future_symbol) {
-            symbols_to_subscribe.push(config.future_symbol.clone());
-        }
+        symbol_map.entry(config.dual_leg_config.spot_symbol.clone()).or_default().push((leg1_tx, pair_id.clone()));
+        symbol_map.entry(config.dual_leg_config.future_symbol.clone()).or_default().push((leg2_tx, pair_id.clone()));
 
         // Setup Strategy Components
         let (recovery_tx, recovery_rx) = mpsc::channel(100);
@@ -190,14 +209,19 @@ impl PortfolioManager {
         let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx);
 
         // Strategy Logic (Pairs Trading for Portfolio)
-        let manager = Box::new(PairsManager::new(20, 2.0, 0.0));
+        // Use dynamic parameters from config
+        let manager = Box::new(PairsManager::new(
+            config.window_size, 
+            config.entry_z_score, 
+            config.exit_z_score
+        ));
         let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
 
         let mut strategy = DualLegStrategy::new(
             manager,
             monitor,
             execution_engine,
-            config.clone(),
+            config.dual_leg_config.clone(),
             feedback_rx,
             Box::new(SystemClock),
         );
