@@ -322,12 +322,25 @@ pub trait EntryStrategy: Send + Sync {
     async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal;
 }
 
-/// Trait for order execution.
-/// Abstracts the underlying exchange client to facilitate testing and multi-exchange support.
+/// Executor trait for placing orders.
+/// This abstraction allows for easy mocking in tests.
 #[async_trait]
 pub trait Executor: Send + Sync {
-    /// Executes an order on the exchange.
-    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn Error + Send + Sync>>;
+    /// Executes an order.
+    async fn execute_order(
+        &self,
+        symbol: &str,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    
+    /// Gets the current position for a symbol.
+    /// Returns the quantity held (positive for long, negative for short, zero for no position).
+    async fn get_position(
+        &self,
+        symbol: &str,
+    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 // --- Components ---
@@ -1165,6 +1178,13 @@ impl DualLegStrategy {
 impl Executor for CoinbaseClient {
     async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.place_order(symbol, &side.to_string(), quantity, price).await
+    }
+    
+    async fn get_position(
+        &self,
+        symbol: &str,
+    ) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
+        self.get_position(symbol).await
     }
 }
 

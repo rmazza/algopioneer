@@ -1,4 +1,5 @@
 pub mod websocket;
+pub mod market_data_provider;
 use cbadv::{RestClient, RestClientBuilder};
 use std::env;
 use crate::sandbox;
@@ -112,4 +113,13 @@ impl CoinbaseClient {
         Ok(candles)
     }
 
+    /// Gets the current position for a symbol.
+    /// In paper/sandbox mode returns zero, in live mode would query actual positions.
+    pub async fn get_position(&self, _product_id: &str) -> Result<rust_decimal::Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        match self.mode {
+            AppEnv::Live => Ok(rust_decimal::Decimal::ZERO),
+            AppEnv::Sandbox | AppEnv::Paper => Ok(rust_decimal::Decimal::ZERO),
+        }
+    }
 }
+

@@ -463,3 +463,46 @@ async fn test_recovery_worker_retry() {
     }
 }
 
+
+#[tokio::test]
+async fn test_synthetic_provider() {
+    use algopioneer::coinbase::market_data_provider::{MarketDataProvider, SyntheticProvider};
+    use rust_decimal_macros::dec;
+    
+    // Create synthetic provider with 50000 base price, 0.01% volatility, 100ms ticks
+    let provider = SyntheticProvider::new(dec!(50000), 0.0001, 100);
+    
+    // Subscribe to two symbols
+    let symbols = vec!["BTC-USD".to_string(), "ETH-USD".to_string()];
+    let mut rx = provider.subscribe(symbols).await.expect("Failed to subscribe");
+    
+    // Collect a few ticks
+    let mut tick_count = 0;
+    let mut btc_seen = false;
+    let mut eth_seen = false;
+    
+    while tick_count < 10 {
+        tokio::select! {
+            Some(tick) = rx.recv() => {
+                // Verify tick structure
+                assert!(tick.price > dec!(0), "Price should be positive");
+                assert!(tick.timestamp > 0, "Timestamp should be set");
+                
+                if tick.symbol == "BTC-USD" {
+                    btc_seen = true;
+                }
+                if tick.symbol == "ETH-USD" {
+                    eth_seen = true;
+                }
+                
+                tick_count += 1;
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
+                panic!("Timeout waiting for ticks");
+            }
+        }
+    }
+    
+    assert!(btc_seen, "Should have received BTC ticks");
+    assert!(eth_seen, "Should have received ETH ticks");
+}
