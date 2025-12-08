@@ -4,3 +4,4 @@ pub mod health;
 pub mod observability;
 pub mod backtest;
 pub mod sandbox;
+pub mod resilience;

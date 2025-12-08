@@ -3,10 +3,8 @@ use algopioneer::strategy::dual_leg_trading::DualLegConfig;
 use algopioneer::strategy::dual_leg_trading::TransactionCostModel;
 use cbadv::time::Granularity;
 use chrono::{Utc, Duration};
-use polars::prelude::*;
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
+// use serde::Serialize; // Removed unused import
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -17,7 +15,7 @@ struct PairStats {
     symbol_a: String,
     symbol_b: String,
     correlation: f64,
-    z_score_std: f64,
+    _z_score_std: f64,
     mean_reversion_half_life: f64,
 }
 
@@ -105,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         symbol_a: sym_a.clone(),
                         symbol_b: sym_b.clone(),
                         correlation: corr,
-                        z_score_std,
+                        _z_score_std: z_score_std,
                         mean_reversion_half_life: half_life,
                     });
                 }
@@ -125,8 +123,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Selected: {} - {} (Corr: {:.2}, Half-Life: {:.1}h)", pair.symbol_a, pair.symbol_b, pair.correlation, pair.mean_reversion_half_life);
         
         // Estimate parameters based on volatility
-        let entry_z = 2.0;
-        let exit_z = 0.0; // Mean reversion target
+        let _entry_z = 2.0;
+        let _exit_z = 0.0; // Mean reversion target
         
         let config = DualLegConfig {
             spot_symbol: pair.symbol_a.clone(),

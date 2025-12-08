@@ -135,7 +135,7 @@ pub struct PortfolioManager {
     env: AppEnv,
     ws_task_handle: Option<tokio::task::JoinHandle<()>>,
     ws_cancel_token: CancellationToken,
-    pnl: PortfolioPnL,
+    _pnl: PortfolioPnL,
 }
 
 impl PortfolioManager {
@@ -145,7 +145,7 @@ impl PortfolioManager {
             env,
             ws_task_handle: None,
             ws_cancel_token: CancellationToken::new(),
-            pnl: PortfolioPnL::new(),
+            _pnl: PortfolioPnL::new(),
         }
     }
 
@@ -391,7 +391,7 @@ impl PortfolioManager {
             recovery_worker.run().await;
         });
 
-        let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx);
+        let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx, 5, 60);
 
         // Strategy Logic (Pairs Trading for Portfolio)
         // Use dynamic parameters from config

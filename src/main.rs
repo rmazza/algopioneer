@@ -8,7 +8,7 @@ use clap::Parser;
 use tokio::time::Duration;
 use chrono::{Utc, Duration as ChronoDuration};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode, DualLegConfig, MarketData};
+use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode, DualLegConfig};
 use algopioneer::strategy::portfolio::PortfolioManager;
 use algopioneer::strategy::Signal;
 use std::sync::Arc;
@@ -289,7 +289,7 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
         recovery_worker.run().await;
     });
 
-    let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx);
+    let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx, 5, 60);
 
     // Dependency Injection based on Strategy Type
     let (entry_strategy, risk_monitor) = match strategy_type {

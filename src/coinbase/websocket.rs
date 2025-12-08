@@ -120,7 +120,7 @@ impl CoinbaseWebsocket {
 
             // Process messages
             let mut heartbeat_interval = interval(Duration::from_secs(10));
-            let mut should_reconnect = false;
+            let should_reconnect;
 
             loop {
                 tokio::select! {

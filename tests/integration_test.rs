@@ -26,9 +26,13 @@ mock! {
 
 #[async_trait]
 impl Executor for MockExecutorImpl {
-    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, _price: Option<Decimal>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Delegate to the mock expectation
         self.execute_order_mock(symbol, &side.to_string(), quantity).await
+    }
+    
+    async fn get_position(&self, _symbol: &str) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Decimal::ZERO)
     }
 }
 
@@ -105,7 +109,7 @@ async fn test_phoenix_recovery() {
     let risk_monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
     
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
-    let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx);
+    let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx, 5, 60);
     
     let config = DualLegConfig {
         spot_symbol: "BTC-USD".to_string(),
@@ -217,9 +221,9 @@ async fn test_pairs_trading_cycle() {
         .returning(|_, _, _| Box::pin(async { Ok(()) }));
 
     let mock_executor = Arc::new(mock_executor);
-    let (recovery_tx, _recovery_rx) = mpsc::channel(10);
+    let (_recovery_tx, _recovery_rx) = mpsc::channel(10);
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
-    let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx);
+    let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx, 5, 60);
     
     // Pairs Manager: Window 5, Entry Z=1.9, Exit Z=1.0
     let entry_manager = Box::new(PairsManager::new(5, 1.9, 1.0));
@@ -331,9 +335,9 @@ async fn test_basis_trading_cycle() {
         .returning(|_, _, _| Box::pin(async { Ok(()) }));
 
     let mock_executor = Arc::new(mock_executor);
-    let (recovery_tx, _recovery_rx) = mpsc::channel(10);
+    let (_recovery_tx, _recovery_rx) = mpsc::channel(10);
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
-    let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx);
+    let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx, 5, 60);
     
     // Basis Manager: Entry 10 bps, Exit 2 bps.
     let cost_model = TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0));
