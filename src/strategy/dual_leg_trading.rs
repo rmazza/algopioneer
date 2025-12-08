@@ -276,6 +276,74 @@ impl Spread {
 
 // --- State Management ---
 
+// AS9: ExitPolicy trait for flexible exit conditions
+#[async_trait]
+pub trait ExitPolicy: Send + Sync {
+    /// Returns true if the position should be exited
+    async fn should_exit(
+        &self,
+        entry_price: Decimal,
+        current_price: Decimal,
+        pnl: Decimal,
+    ) -> bool;
+}
+
+/// Exit when minimum profit threshold is met
+pub struct MinimumProfitPolicy {
+    min_profit_bps: Decimal,
+}
+
+impl MinimumProfitPolicy {
+    pub fn new(min_profit_bps: Decimal) -> Self {
+        Self { min_profit_bps }
+    }
+}
+
+#[async_trait]
+impl ExitPolicy for MinimumProfitPolicy {
+    async fn should_exit(
+        &self,
+        entry_price: Decimal,
+        current_price: Decimal,
+        _pnl: Decimal,
+    ) -> bool {
+        if entry_price.is_zero() {
+            return false;
+        }
+        
+        let price_change_bps = ((current_price - entry_price) / entry_price) * dec!(10000.0);
+        price_change_bps >= self.min_profit_bps
+    }
+}
+
+/// Exit when stop loss threshold is hit
+pub struct StopLossPolicy {
+    max_loss_bps: Decimal,
+}
+
+impl StopLossPolicy {
+    pub fn new(max_loss_bps: Decimal) -> Self {
+        Self { max_loss_bps }
+    }
+}
+
+#[async_trait]
+impl ExitPolicy for StopLossPolicy {
+    async fn should_exit(
+        &self,
+        entry_price: Decimal,
+        current_price: Decimal,
+        _pnl: Decimal,
+    ) -> bool {
+        if entry_price.is_zero() {
+            return false;
+        }
+        
+        let price_change_bps = ((current_price - entry_price) / entry_price) * dec!(10000.0);
+        price_change_bps.abs() >= self.max_loss_bps && price_change_bps < Decimal::ZERO
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DualLegConfig {
     pub spot_symbol: String,
