@@ -227,6 +227,9 @@ async fn run_trading(product_id: &str, duration: u64, env: AppEnv) -> Result<(),
                 Signal::Hold => {
                     println!("Hold signal received. No action taken.");
                 }
+                Signal::Exit => {
+                    println!("Exit signal received (unexpected for MA). Treating as Hold.");
+                }
             }
         } else {
             eprintln!("Warning: No data received for this interval.");

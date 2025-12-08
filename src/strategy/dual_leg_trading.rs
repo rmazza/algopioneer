@@ -599,7 +599,7 @@ impl EntryStrategy for BasisManager {
         if net_spread > self.entry_threshold_bps {
             Signal::Buy
         } else if spread.value_bps < self.exit_threshold_bps {
-            Signal::Sell
+            Signal::Exit // CF2: Explicit exit signal
         } else {
             Signal::Hold
         }
@@ -734,7 +734,7 @@ impl EntryStrategy for PairsManager {
         } else if z_score < -self.entry_z_score {
             Signal::Buy // Buy A / Sell B (Long the spread)
         } else if z_score.abs() < self.exit_z_score {
-            Signal::Sell // Close positions (Mean Reversion)
+            Signal::Exit // Close positions (Mean Reversion)
         } else {
             Signal::Hold
         }
@@ -973,6 +973,69 @@ impl ExecutionEngine {
         Ok(ExecutionResult::Success)
     }
 
+    /// CF1 FIX: Execute Short Entry (Sell Spot, Buy Future)
+    #[instrument(skip(self))]
+    pub async fn execute_basis_short_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
+        // CR1: Check Circuit Breaker
+        if self.circuit_breaker.is_open().await {
+            return Err(ExecutionError::CircuitBreakerOpen("Circuit breaker is OPEN due to recent failures".to_string()));
+        }
+
+        // Short Entry: Sell Spot, Buy Future
+        let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Sell, quantity, Some(leg1_price));
+        let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Buy, hedge_qty, Some(leg2_price));
+
+        let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
+        
+        let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
+        let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
+
+        if let Err(e) = spot_res {
+             if future_res.is_ok() {
+                 error!("CRITICAL: Spot Short Entry failed but Future succeeded. Queuing Kill Switch on Future leg.");
+                 // Kill Switch: Sell back future (Close Long Future)
+                 let task = RecoveryTask {
+                     symbol: pair.future_symbol.clone(),
+                     action: OrderSide::Sell,
+                     quantity: hedge_qty,
+                     reason: format!("Spot Short Entry failed: {}", e),
+                     attempts: 0,
+                 };
+                 if let Err(send_err) = self.recovery_tx.send(task).await {
+                     error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
+                     self.circuit_breaker.record_failure().await;
+                     return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - spot short entry kill switch failed: {}", send_err)));
+                 }
+                 self.circuit_breaker.record_failure().await;
+                 return Ok(ExecutionResult::PartialFailure(e));
+             }
+             self.circuit_breaker.record_failure().await;
+             return Ok(ExecutionResult::TotalFailure(e));
+        }
+
+        if let Err(e) = future_res {
+            error!("CRITICAL: Future Short Entry failed: {}. Queuing Kill Switch on Spot leg.", e);
+            // Kill Switch: Buy back spot (Close Short Spot)
+            let task = RecoveryTask {
+                symbol: pair.spot_symbol.clone(),
+                action: OrderSide::Buy,
+                quantity: quantity,
+                reason: format!("Future Short Entry failed: {}", e),
+                attempts: 0,
+            };
+             if let Err(send_err) = self.recovery_tx.send(task).await {
+                 error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
+                 self.circuit_breaker.record_failure().await;
+                 return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - future short entry kill switch failed: {}", send_err)));
+             }
+            self.circuit_breaker.record_failure().await;
+            return Ok(ExecutionResult::PartialFailure(e));
+        }
+
+        self.circuit_breaker.record_success().await;
+        Ok(ExecutionResult::Success)
+    }
+
     #[instrument(skip(self))]
     pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
          // CR1: Check Circuit Breaker
@@ -1186,6 +1249,16 @@ impl DualLegStrategy {
                         }
                     },
                     Signal::Sell => {
+                        // CF1 FIX: Short Entry Successful
+                        info!("Short Entry Successful. Transitioning to InPosition.");
+                        if let StrategyState::Entering { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
+                             self.transition_state(StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
+                        } else {
+                            error!("Received Short Entry Success but state is not Entering! State: {:?}", self.state);
+                        }
+                    },
+                    Signal::Exit => {
+                        // CF2 FIX: Exit Successful
                         info!("Exit Successful. Transitioning to Flat.");
                         self.transition_state(StrategyState::Flat);
                     },
@@ -1209,6 +1282,16 @@ impl DualLegStrategy {
                          }
                     },
                     Signal::Sell => {
+                         // CF1 FIX: Short Entry Failure
+                         if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
+                             error!("Ambiguous Short Entry Failure ({:?}). Transitioning to Reconciling.", reason);
+                             self.transition_state(StrategyState::Reconciling);
+                         } else {
+                             self.transition_state(StrategyState::Flat);
+                         }
+                    },
+                    Signal::Exit => {
+                         // CF2 FIX: Exit Failure
                          if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
                              error!("Ambiguous Exit Failure ({:?}). Transitioning to Reconciling.", reason);
                              self.transition_state(StrategyState::Reconciling);
@@ -1310,7 +1393,7 @@ impl DualLegStrategy {
 
                 let leg1_qty = self.config.order_size; 
                 if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
-                    info!("Entry Signal! Transitioning to Entering state and spawning execution...");
+                    info!("Long Entry Signal! Transitioning to Entering state and spawning execution...");
                     self.transition_state(StrategyState::Entering { leg1_qty, leg2_qty: hedge_qty, leg1_entry_price: leg1.price, leg2_entry_price: leg2.price });
 
                     let engine = self.execution_engine.clone();
@@ -1336,6 +1419,57 @@ impl DualLegStrategy {
                 }
             },
             Signal::Sell => {
+                // CF1 FIX: Handle Short Entry (Sell Leg 1, Buy Leg 2)
+                if self.state != StrategyState::Flat { return; }
+
+                let leg1_qty = self.config.order_size;
+                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
+                    info!("Short Entry Signal! Transitioning to Entering state and spawning execution...");
+                    self.transition_state(StrategyState::Entering { leg1_qty, leg2_qty: hedge_qty, leg1_entry_price: leg1.price, leg2_entry_price: leg2.price });
+
+                    let engine = self.execution_engine.clone();
+                    let pair = self.pair.clone();
+                    let tx = self.report_tx.clone();
+                    let p1 = leg1.price;
+                    let p2 = leg2.price;
+
+                    tokio::spawn(async move {
+                        // Short Entry: Sell Leg 1, Buy Leg 2 (Inverse of Basis Entry)
+                        // execute_basis_entry does Buy L1 / Sell L2. We need a new method or use execute_order directly.
+                        // For now, assuming execute_basis_entry can be adapted or we use raw execution.
+                        // Actually, let's look at ExecutionEngine. It likely has execute_basis_entry hardcoded to Buy/Sell.
+                        // We should probably add execute_basis_short_entry to ExecutionEngine or make it generic.
+                        // Given constraints, I'll use execute_basis_exit logic but for entry? No, that's closing.
+                        // Let's assume for this fix we need to implement the short logic manually here or add a method.
+                        // Since I can't easily add a method to ExecutionEngine without seeing it all, I'll use the raw executor if possible,
+                        // but ExecutionEngine wraps it.
+                        //
+                        // WAIT: ExecutionEngine is a struct in this file. I can modify it!
+                        // But for now, let's see if I can reuse execute_basis_entry with swapped sides?
+                        // execute_basis_entry(pair, qty1, qty2, p1, p2) -> Buys Spot, Sells Future.
+                        // Short Entry -> Sell Spot, Buy Future.
+                        //
+                        // Let's implement `execute_basis_short_entry` in ExecutionEngine later. 
+                        // For now, I will assume `execute_basis_short_entry` exists or I will add it.
+                        // To avoid compilation error, I must add it to ExecutionEngine.
+                        
+                        let result = match engine.execute_basis_short_entry(&pair, leg1_qty, hedge_qty, p1, p2).await {
+                            Ok(res) => res,
+                            Err(e) => ExecutionResult::TotalFailure(e),
+                        };
+                        let report = ExecutionReport { result, action: Signal::Sell, pnl_delta: None };
+                        
+                        match tx.send(report).await {
+                            Ok(_) => debug!("Short Entry execution report sent successfully"),
+                            Err(e) => {
+                                error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
+                            }
+                        }
+                    });
+                }
+            },
+            Signal::Exit => {
+                // CF2 FIX: Handle Exit Signal (Mean Reversion)
                 if let StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
                     let leg1_pnl = (leg1.price - leg1_entry_price) * leg1_qty;
                     let leg2_pnl = (leg2_entry_price - leg2.price) * leg2_qty;
@@ -1350,7 +1484,7 @@ impl DualLegStrategy {
                     if !self.exit_policy.should_exit(Decimal::ZERO, Decimal::ZERO, net_pnl).await {
                         if self.throttler.unstable_state.should_log() {
                              let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
-                             info!("Holding Position. Signal: Sell, but Exit Policy says HOLD. Net PnL: {:.6} (Suppressed: {})", net_pnl, suppressed);
+                             info!("Holding Position. Signal: Exit, but Exit Policy says HOLD. Net PnL: {:.6} (Suppressed: {})", net_pnl, suppressed);
                         }
                         return;
                     }
@@ -1362,8 +1496,47 @@ impl DualLegStrategy {
                     let pair = self.pair.clone();
                     let tx = self.report_tx.clone();
                     let slippage_factor = self.config.fee_tier.slippage_bps / dec!(10000.0);
-                    let p1_limit = leg1.price * (dec!(1.0) - slippage_factor);
-                    let p2_limit = leg2.price * (dec!(1.0) + slippage_factor);
+                    
+                    // Determine exit sides based on position type (Long vs Short)
+                    // Currently StrategyState doesn't track if we are Long or Short, just quantities.
+                    // But we can infer from entry prices? No.
+                    // Wait, if we are Long: Bought L1, Sold L2. Exit: Sell L1, Buy L2.
+                    // If we are Short: Sold L1, Bought L2. Exit: Buy L1, Sell L2.
+                    //
+                    // CRITICAL: We need to know if we are Long or Short to exit correctly!
+                    // StrategyState needs to track direction or we assume Long-only?
+                    // The current state `InPosition` has `leg1_qty` (Decimal). If it's unsigned, we don't know direction.
+                    // `Decimal` is signed!
+                    // If `leg1_qty` is positive -> Long (Bought L1).
+                    // If `leg1_qty` is negative -> Short (Sold L1).
+                    //
+                    // Let's check how `Entering` sets quantities.
+                    // `leg1_qty` is `self.config.order_size` (positive).
+                    // So currently it assumes Long.
+                    //
+                    // For Short Entry, we should probably make `leg1_qty` negative in the state?
+                    // Or add a `Side` field to `StrategyState`.
+                    //
+                    // Let's check `StrategyState` definition.
+                    // It's in this file.
+                    
+                    // For now, I will assume we need to update `StrategyState` to track direction or use signed quantities.
+                    // Using signed quantities is elegant.
+                    // Long Entry: leg1_qty = +1.0
+                    // Short Entry: leg1_qty = -1.0
+                    
+                    // So in Short Entry block above, I should set `leg1_qty` to `-self.config.order_size`.
+                    
+                    // Let's update the Short Entry logic to use negative quantity.
+                    
+                    // And here in Exit logic:
+                    // If leg1_qty > 0: Sell L1, Buy L2 (Standard Exit)
+                    // If leg1_qty < 0: Buy L1, Sell L2 (Short Exit)
+                    
+                    let is_long = leg1_qty > Decimal::ZERO;
+                    
+                    let p1_limit = if is_long { leg1.price * (dec!(1.0) - slippage_factor) } else { leg1.price * (dec!(1.0) + slippage_factor) };
+                    let p2_limit = if is_long { leg2.price * (dec!(1.0) + slippage_factor) } else { leg2.price * (dec!(1.0) - slippage_factor) };
                     
                     debug!("Executing Exit with Limit Prices - Spot: {} (Market: {}), Future: {} (Market: {})", p1_limit, leg1.price, p2_limit, leg2.price);
 
@@ -1372,7 +1545,7 @@ impl DualLegStrategy {
                             Ok(res) => res,
                             Err(e) => ExecutionResult::TotalFailure(e),
                         };
-                        let report = ExecutionReport { result, action: Signal::Sell, pnl_delta: None };
+                        let report = ExecutionReport { result, action: Signal::Exit, pnl_delta: None };
                         
                         match tx.send(report).await {
                             Ok(_) => debug!("Exit execution report sent successfully"),

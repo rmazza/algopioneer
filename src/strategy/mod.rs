@@ -9,8 +9,10 @@ use polars::prelude::*;
 pub enum Signal {
     Buy,
     Sell,
+    Exit, // CF2: Explicit exit signal for mean reversion
     Hold,
 }
+
 
 /// Strategy trait contract for backtesting.
 pub trait Strategy {
