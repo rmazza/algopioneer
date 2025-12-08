@@ -301,6 +301,7 @@ pub enum ExecutionResult {
 pub struct ExecutionReport {
     pub result: ExecutionResult,
     pub action: Signal, // Buy (Entry) or Sell (Exit)
+    pub pnl_delta: Option<Decimal>, // PnL change from this execution (for exits)
 }
 
 #[derive(Debug, Clone)]
@@ -1080,7 +1081,7 @@ impl DualLegStrategy {
                             Ok(res) => res,
                             Err(e) => ExecutionResult::TotalFailure(e),
                         };
-                        let report = ExecutionReport { result, action: Signal::Buy };
+                        let report = ExecutionReport { result, action: Signal::Buy, pnl_delta: None };
                         
                         // Critical: Must notify main loop of execution result
                         match tx.send(report).await {
@@ -1155,7 +1156,7 @@ impl DualLegStrategy {
                             Ok(res) => res,
                             Err(e) => ExecutionResult::TotalFailure(e),
                         };
-                        let report = ExecutionReport { result, action: Signal::Sell };
+                        let report = ExecutionReport { result, action: Signal::Sell, pnl_delta: None };
                         
                         // Critical: Must notify main loop of execution result
                         match tx.send(report).await {

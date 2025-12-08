@@ -8,10 +8,13 @@ use crate::strategy::dual_leg_trading::{
 
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use rust_decimal::Decimal;
+use std::collections::HashMap;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use tokio::sync::Mutex;
 use tracing::{info, error, debug, warn};
 
 use rust_decimal_macros::dec;
@@ -77,6 +80,42 @@ pub struct PortfolioPairConfig {
     pub exit_z_score: f64,
 }
 
+
+/// Portfolio-level PnL tracking for risk monitoring
+pub struct PortfolioPnL {
+    total_pnl: Arc<Mutex<Decimal>>,
+    strategy_pnls: Arc<Mutex<HashMap<String, Decimal>>>,
+}
+
+impl PortfolioPnL {
+    pub fn new() -> Self {
+        Self {
+            total_pnl: Arc::new(Mutex::new(Decimal::ZERO)),
+            strategy_pnls: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    pub async fn update_pnl(&self, strategy_id: &str, pnl_delta: Decimal) {
+        let mut total = self.total_pnl.lock().await;
+        *total += pnl_delta;
+        
+        let mut by_strategy = self.strategy_pnls.lock().await;
+        *by_strategy.entry(strategy_id.to_string())
+            .or_insert(Decimal::ZERO) += pnl_delta;
+    }
+    
+    pub async fn get_total_pnl(&self) -> Decimal {
+        *self.total_pnl.lock().await
+    }
+    
+    pub async fn get_strategy_pnl(&self, strategy_id: &str) -> Decimal {
+        self.strategy_pnls.lock().await
+            .get(strategy_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
+    }
+}
+
 impl PortfolioPairConfig {
     pub fn pair_id(&self) -> String {
         format!("{}-{}", self.dual_leg_config.spot_symbol, self.dual_leg_config.future_symbol)
@@ -88,6 +127,7 @@ pub struct PortfolioManager {
     env: AppEnv,
     ws_task_handle: Option<tokio::task::JoinHandle<()>>,
     ws_cancel_token: CancellationToken,
+    pnl: PortfolioPnL,
 }
 
 impl PortfolioManager {
@@ -97,6 +137,7 @@ impl PortfolioManager {
             env,
             ws_task_handle: None,
             ws_cancel_token: CancellationToken::new(),
+            pnl: PortfolioPnL::new(),
         }
     }
 
