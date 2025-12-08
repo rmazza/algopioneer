@@ -92,6 +92,12 @@ impl std::fmt::Display for OrderSide {
 
 const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
 
+// CF3: Precision Safety Constants
+// Conservative bounds for f64 price ratio conversions to prevent precision loss
+// in statistical arbitrage calculations. Ratios outside these bounds will be rejected.
+const MAX_SAFE_PRICE_RATIO: f64 = 1e12; // Conservative limit for f64 precision
+const MIN_SAFE_PRICE_RATIO: f64 = 1e-12; // Reciprocal of max for symmetry
+
 // --- Logging Utilities ---
 
 /// A lightweight rate limiter for logging to prevent log storms.
@@ -406,11 +412,25 @@ impl EntryStrategy for PairsManager {
                     warn!("PRECISION WARNING: Infinite or NaN prices detected. P1: {}, P2: {}", v1, v2);
                     return Signal::Hold;
                 }
-                // Validate precision loss tolerance
+                
+                // CF3 FIX: Enforce hard limits on price ratios to prevent precision loss
                 let ratio = v1 / v2;
-                if ratio > 1e15 || ratio < 1e-15 {
-                    warn!("PRECISION WARNING: Extreme price ratio {:.2e}. F64 precision loss may affect Z-score.", ratio);
+                if ratio > MAX_SAFE_PRICE_RATIO || ratio < MIN_SAFE_PRICE_RATIO {
+                    error!(
+                        "PRECISION ERROR: Price ratio {:.2e} exceeds safe f64 bounds [{:.2e}, {:.2e}]. Rejecting signal to prevent precision loss.",
+                        ratio, MIN_SAFE_PRICE_RATIO, MAX_SAFE_PRICE_RATIO
+                    );
+                    return Signal::Hold; // Hard rejection - do not trade on degraded precision
                 }
+                
+                // Log warning for ratios approaching the limit (within 2 orders of magnitude)
+                if ratio > MAX_SAFE_PRICE_RATIO / 100.0 || ratio < MIN_SAFE_PRICE_RATIO * 100.0 {
+                    warn!(
+                        "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation.",
+                        ratio
+                    );
+                }
+                
                 (v1, v2)
             },
             _ => {

@@ -9,6 +9,7 @@ use crate::strategy::dual_leg_trading::{
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, error, debug, warn};
@@ -23,6 +24,49 @@ const WS_CHANNEL_BUFFER: usize = 1000; // ~1 sec of ticks at 1000 ticks/sec
 const STRATEGY_CHANNEL_BUFFER: usize = 100; // ~100ms buffer per leg
 const RECOVERY_CHANNEL_BUFFER: usize = 100;
 const FEEDBACK_CHANNEL_BUFFER: usize = 100;
+
+// --- Strategy Actor Wrapper ---
+
+/// Wrapper for DualLegStrategy that ensures pair_id is always returned,
+/// even if the strategy panics. This enables the supervisor to restart crashed strategies.
+struct StrategyActor {
+    pair_id: String,
+    strategy: DualLegStrategy,
+}
+
+impl StrategyActor {
+    fn new(pair_id: String, strategy: DualLegStrategy) -> Self {
+        Self { pair_id, strategy }
+    }
+
+    /// Runs the strategy and always returns the pair_id, even on panic.
+    /// This method uses AssertUnwindSafe to catch panics and ensure clean recovery.
+    async fn run_with_id(
+        mut self,
+        leg1_rx: mpsc::Receiver<Arc<MarketData>>,
+        leg2_rx: mpsc::Receiver<Arc<MarketData>>,
+    ) -> String {
+        // Catch panics to ensure pair_id is always returned
+        let result = std::panic::AssertUnwindSafe(async {
+            self.strategy.run(leg1_rx, leg2_rx).await;
+        });
+        
+        match futures_util::future::FutureExt::catch_unwind(result).await {
+            Ok(_) => {
+                debug!(pair_id = %self.pair_id, "Strategy exited cleanly");
+            }
+            Err(panic_info) => {
+                error!(
+                    pair_id = %self.pair_id,
+                    "Strategy panicked: {:?}",
+                    panic_info
+                );
+            }
+        }
+        
+        self.pair_id // Always return pair_id for supervisor restart logic
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioPairConfig {
@@ -43,6 +87,7 @@ pub struct PortfolioManager {
     config_path: String,
     env: AppEnv,
     ws_task_handle: Option<tokio::task::JoinHandle<()>>,
+    ws_cancel_token: CancellationToken,
 }
 
 impl PortfolioManager {
@@ -51,6 +96,7 @@ impl PortfolioManager {
             config_path: config_path.to_string(),
             env,
             ws_task_handle: None,
+            ws_cancel_token: CancellationToken::new(),
         }
     }
 
@@ -111,9 +157,17 @@ impl PortfolioManager {
         let (ws_tx, mut ws_rx) = mpsc::channel(WS_CHANNEL_BUFFER); 
 
         let symbols_clone = symbols_to_subscribe.clone();
+        let cancel_token = self.ws_cancel_token.clone();
         let ws_handle = tokio::spawn(async move {
-            if let Err(e) = ws_client.connect_and_subscribe(symbols_clone, ws_tx).await {
-                error!("WebSocket Error: {}", e);
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    debug!("WebSocket task received cancellation signal, shutting down gracefully");
+                }
+                result = ws_client.connect_and_subscribe(symbols_clone, ws_tx) => {
+                    if let Err(e) = result {
+                        error!("WebSocket Error: {}", e);
+                    }
+                }
             }
         });
         self.ws_task_handle = Some(ws_handle);
@@ -161,16 +215,31 @@ impl PortfolioManager {
                                     Ok(new_ws_client) => {
                                         let (new_ws_tx, new_ws_rx) = mpsc::channel(WS_CHANNEL_BUFFER);
                                         
-                                        // NI1 Fix: Abort old WebSocket task before spawning new one
+                                        // CF1 FIX: Use CancellationToken for graceful shutdown
                                         if let Some(old_handle) = self.ws_task_handle.take() {
-                                            old_handle.abort();
-                                            debug!("Aborted old WebSocket task before reconnection");
+                                            // Signal old task to stop
+                                            self.ws_cancel_token.cancel();
+                                            debug!("Sent cancellation signal to old WebSocket task");
+                                            
+                                            // Wait for clean shutdown (with timeout)
+                                            let _ = tokio::time::timeout(Duration::from_secs(2), old_handle).await;
+                                            
+                                            // Create new token for new task
+                                            self.ws_cancel_token = CancellationToken::new();
                                         }
                                         
+                                        let cancel_token = self.ws_cancel_token.clone();
                                         let symbols_clone = symbols_to_subscribe.clone();
                                         let new_handle = tokio::spawn(async move {
-                                            if let Err(e) = new_ws_client.connect_and_subscribe(symbols_clone, new_ws_tx).await {
-                                                error!("WebSocket reconnection error: {}", e);
+                                            tokio::select! {
+                                                _ = cancel_token.cancelled() => {
+                                                    debug!("Reconnected WebSocket task received cancellation during startup");
+                                                }
+                                                result = new_ws_client.connect_and_subscribe(symbols_clone, new_ws_tx) => {
+                                                    if let Err(e) = result {
+                                                        error!("WebSocket reconnection error: {}", e);
+                                                    }
+                                                }
                                             }
                                         });
                                         self.ws_task_handle = Some(new_handle);
@@ -218,9 +287,12 @@ impl PortfolioManager {
                             }
                         }
                         Err(e) => {
-                            // CF3: Handle panic case - we can't identify which strategy crashed
-                            // without additional tracking. Log detailed error for manual intervention.
+                            // CF2 FIX: With StrategyActor wrapper, panics should never reach here
+                            // because the wrapper catches them and returns pair_id.
+                            // This branch now only handles task cancellation or abort.
                             let error_type = if e.is_panic() {
+                                // Should not happen with StrategyActor, but log if it does
+                                error!("UNEXPECTED: Panic escaped StrategyActor wrapper! This is a bug.");
                                 "panicked"
                             } else if e.is_cancelled() {
                                 "cancelled"
@@ -231,13 +303,12 @@ impl PortfolioManager {
                             error!(
                                 error_type = error_type,
                                 error = %e,
-                                "CRITICAL: Strategy task {} but pair_id unknown. Cannot auto-restart.",
+                                "Strategy task {} (likely due to explicit cancellation).",
                                 error_type
                             );
-                            error!("Hint: Check symbol_map for stale channels or review logs for last strategy activity");
                             
-                            // In production, this should trigger alerts for manual intervention
-                            // since we cannot safely restart without knowing which strategy failed
+                            // Task cancellation is expected during shutdown, so this is less critical
+                            warn!("Strategy terminated without returning pair_id. If this happens during normal operation, investigate.");
                         }
                     }
                 }
@@ -282,7 +353,7 @@ impl PortfolioManager {
         ));
         let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
 
-        let mut strategy = DualLegStrategy::new(
+        let strategy = DualLegStrategy::new(
             manager,
             monitor,
             execution_engine,
@@ -291,10 +362,10 @@ impl PortfolioManager {
             Box::new(SystemClock),
         );
 
-        let pid_clone = pair_id.clone();
+        // CF2 FIX: Wrap strategy in StrategyActor to ensure pair_id is always returned
+        let actor = StrategyActor::new(pair_id.clone(), strategy);
         join_set.spawn(async move {
-            strategy.run(leg1_rx, leg2_rx).await;
-            pid_clone // Return ID on exit
+            actor.run_with_id(leg1_rx, leg2_rx).await
         });
     }
 }
