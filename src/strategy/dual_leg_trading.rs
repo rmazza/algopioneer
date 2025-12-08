@@ -539,7 +539,7 @@ impl EntryStrategy for PairsManager {
         let spread = p1.ln() - p2.ln();
         
         let z_score = {
-            let mut history = self.spread_history.lock().await;
+            let mut history = self.spread_history.write().await;
             history.push_back(spread);
             if history.len() > self.window_size {
                 history.pop_front();
@@ -799,35 +799,35 @@ impl CircuitBreaker {
     }
     
     pub async fn get_state(&self) -> CircuitState {
-        *self.state.lock().await
+        *self.state.write().await
     }
     
     pub async fn record_success(&self) {
-        *self.state.lock().await = CircuitState::Closed;
-        *self.failure_count.lock().await = 0;
+        *self.state.write().await = CircuitState::Closed;
+        *self.failure_count.write().await = 0;
     }
     
     pub async fn record_failure(&self) {
-        let mut count = self.failure_count.lock().await;
+        let mut count = self.failure_count.write().await;
         *count += 1;
-        *self.last_failure_time.lock().await = Some(Instant::now());
+        *self.last_failure_time.write().await = Some(Instant::now());
         
         if *count >= self.failure_threshold {
-            *self.state.lock().await = CircuitState::Open;
+            *self.state.write().await = CircuitState::Open;
             warn!("Circuit breaker tripped to OPEN after {} failures", count);
         }
     }
     
     pub async fn is_open(&self) -> bool {
-        let state = *self.state.lock().await;
+        let state = *self.state.write().await;
         
         if state == CircuitState::Open {
             // Check if timeout has passed
-            if let Some(last_failure) = *self.last_failure_time.lock().await {
+            if let Some(last_failure) = *self.last_failure_time.write().await {
                 if last_failure.elapsed() > self.timeout {
                     // Transition to HalfOpen
-                    *self.state.lock().await = CircuitState::HalfOpen;
-                    *self.failure_count.lock().await = 0;
+                    *self.state.write().await = CircuitState::HalfOpen;
+                    *self.failure_count.write().await = 0;
                     return false;
                 }
             }
@@ -1393,7 +1393,7 @@ mod tests {
     use super::*;
     use tokio::time::Duration;
 use tokio::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
     #[test]
     fn test_log_throttle() {
