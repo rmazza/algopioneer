@@ -703,7 +703,72 @@ impl RecoveryWorker {
 }
 
 /// Handles order execution logic.
-#[derive(Clone)]
+// AS8: Circuit Breaker Pattern for execution failures
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,     // Normal operation
+    Open,       // Blocking requests due to failures
+    HalfOpen,   // Testing if system recovered
+}
+
+pub struct CircuitBreaker {
+    state: Arc<Mutex<CircuitState>>,
+    failure_count: Arc<Mutex<u32>>,
+    failure_threshold: u32,
+    timeout: Duration,
+    last_failure_time: Arc<Mutex<Option<Instant>>>,
+}
+
+impl CircuitBreaker {
+    pub fn new(failure_threshold: u32, timeout: Duration) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CircuitState::Closed)),
+            failure_count: Arc::new(Mutex::new(0)),
+            failure_threshold,
+            timeout,
+            last_failure_time: Arc::new(Mutex::new(None)),
+        }
+    }
+    
+    pub async fn get_state(&self) -> CircuitState {
+        *self.state.lock().await
+    }
+    
+    pub async fn record_success(&self) {
+        *self.state.lock().await = CircuitState::Closed;
+        *self.failure_count.lock().await = 0;
+    }
+    
+    pub async fn record_failure(&self) {
+        let mut count = self.failure_count.lock().await;
+        *count += 1;
+        *self.last_failure_time.lock().await = Some(Instant::now());
+        
+        if *count >= self.failure_threshold {
+            *self.state.lock().await = CircuitState::Open;
+            warn!("Circuit breaker tripped to OPEN after {} failures", count);
+        }
+    }
+    
+    pub async fn is_open(&self) -> bool {
+        let state = *self.state.lock().await;
+        
+        if state == CircuitState::Open {
+            // Check if timeout has passed
+            if let Some(last_failure) = *self.last_failure_time.lock().await {
+                if last_failure.elapsed() > self.timeout {
+                    // Transition to HalfOpen
+                    *self.state.lock().await = CircuitState::HalfOpen;
+                    *self.failure_count.lock().await = 0;
+                    return false;
+                }
+            }
+            return true;
+        }
+        false
+    }
+}
+
 pub struct ExecutionEngine {
     client: Arc<dyn Executor>,
     recovery_tx: mpsc::Sender<RecoveryTask>,
@@ -1259,6 +1324,8 @@ impl Drop for DualLegStrategy {
 mod tests {
     use super::*;
     use tokio::time::Duration;
+use tokio::time::Instant;
+use tokio::sync::Mutex;
 
     #[test]
     fn test_log_throttle() {
