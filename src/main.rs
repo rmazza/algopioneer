@@ -294,7 +294,7 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
     let (entry_strategy, risk_monitor) = match strategy_type {
         "basis" => {
             // Initialize Cost Model (e.g., 10 bps maker, 20 bps taker, 5 bps slippage)
-            let cost_model = TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0));
+            let cost_model = TransactionCostModel::default();
             let manager = Box::new(BasisManager::new(dec!(10.0), dec!(2.0), cost_model)); // 10 bps entry, 2 bps exit
             let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
             (manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>, monitor)
@@ -321,7 +321,7 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
         execution_timeout_ms: 30000,
         min_profit_threshold: dec!(0.005),
         stop_loss_threshold: dec!(-0.05),
-        fee_tier: TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0)),
+        fee_tier: TransactionCostModel::default(),
         throttle_interval_secs: 5,
     };
 

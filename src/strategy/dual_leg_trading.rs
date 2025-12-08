@@ -193,6 +193,17 @@ impl TransactionCostModel {
     }
 }
 
+// AS5: Default transaction costs for consistency across codebase
+impl Default for TransactionCostModel {
+    fn default() -> Self {
+        Self::new(
+            dec!(10.0), // Maker fee: 10 basis points
+            dec!(20.0), // Taker fee: 20 basis points
+            dec!(5.0),  // Slippage: 5 basis points
+        )
+    }
+}
+
 // --- Time Abstraction ---
 
 pub trait Clock: Send + Sync + std::fmt::Debug {
@@ -218,6 +229,8 @@ impl Clock for SystemClock {
 pub struct MarketData {
     /// The trading symbol (e.g., "BTC-USD").
     pub symbol: String,
+    /// Optional instrument identifier for multi-exchange support (e.g., "coinbase", "binance").
+    pub instrument_id: Option<String>,
     /// The current price.
     pub price: Decimal,
     /// The timestamp of the update.
@@ -229,6 +242,8 @@ pub struct MarketData {
 pub struct Position {
     /// The trading symbol.
     pub symbol: String,
+    /// Optional instrument identifier for multi-exchange support (e.g., "coinbase", "binance").
+    pub instrument_id: Option<String>,
     /// The quantity held (positive for long, negative for short).
     pub quantity: Decimal,
     /// The average entry price.
@@ -556,6 +571,45 @@ impl RiskMonitor {
 }
 
 /// Worker that processes recovery tasks (failed legs).
+// AS3: Priority system for recovery tasks
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskPriority {
+    Critical = 0,  // Kill switches (highest priority)
+    High = 1,      // Large positions
+    Normal = 2,    // Regular retries
+}
+
+/// Wrapper for RecoveryTask with priority for queue ordering
+#[derive(Debug, Clone)]
+struct PrioritizedRecoveryTask {
+    priority: TaskPriority,
+    task: RecoveryTask,
+    queued_at: tokio::time::Instant,
+}
+
+impl PartialEq for PrioritizedRecoveryTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.queued_at == other.queued_at
+    }
+}
+
+impl Eq for PrioritizedRecoveryTask {}
+
+impl PartialOrd for PrioritizedRecoveryTask {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PrioritizedRecoveryTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Priority first (lower number = higher priority)
+        // Then FIFO within same priority (reverse queued_at for min-heap behavior)
+        self.priority.cmp(&other.priority)
+            .then_with(|| other.queued_at.cmp(&self.queued_at))
+    }
+}
+
 pub struct RecoveryWorker {
     client: Arc<dyn Executor>,
     rx: mpsc::Receiver<RecoveryTask>,
@@ -1236,8 +1290,8 @@ mod tests {
             let p1 = Decimal::from_f64(s.exp()).unwrap();
             let p2 = dec!(1.0);
             let _ = manager.analyze(
-                &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
-                &MarketData { symbol: "B".into(), price: p2, timestamp: 0 }
+                &MarketData { symbol: "A".into(), price: p1, instrument_id: None, timestamp: 0 },
+                &MarketData { symbol: "B".into(), price: p2, instrument_id: None, timestamp: 0 }
             ).await;
         }
 
@@ -1254,8 +1308,8 @@ mod tests {
         // Fill with 0s
         for _ in 0..5 {
              let _ = manager.analyze(
-                &MarketData { symbol: "A".into(), price: dec!(1.0), timestamp: 0 },
-                &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+                &MarketData { symbol: "A".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 },
+                &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
             ).await;
         }
         
@@ -1266,8 +1320,8 @@ mod tests {
         // Spread = -3.0.
         let p1 = Decimal::from_f64((-3.0f64).exp()).unwrap();
         let _signal = manager.analyze(
-            &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
-            &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+            &MarketData { symbol: "A".into(), price: p1, instrument_id: None, timestamp: 0 },
+            &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
         ).await;
         
         // Current window: [0, 0, 0, 0, -3]. Mean = -0.6. Var = (4*0.36 + 1*5.76)/5 = (1.44 + 5.76)/5 = 1.44. Std = 1.2
@@ -1277,8 +1331,8 @@ mod tests {
         // Let's try -4.0
         let p1 = Decimal::from_f64((-4.0f64).exp()).unwrap();
         let _signal = manager.analyze(
-            &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
-            &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+            &MarketData { symbol: "A".into(), price: p1, instrument_id: None, timestamp: 0 },
+            &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
         ).await;
         
         // Window: [0, 0, 0, -3, -4]. Mean = -1.4. 
@@ -1289,8 +1343,8 @@ mod tests {
         let manager = PairsManager::new(10, 2.0, 0.1);
         for _ in 0..10 {
              let _ = manager.analyze(
-                &MarketData { symbol: "A".into(), price: dec!(1.0), timestamp: 0 },
-                &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+                &MarketData { symbol: "A".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 },
+                &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
             ).await;
         }
         // Spread 0, Mean 0, Std 0.
@@ -1298,8 +1352,8 @@ mod tests {
         // Sudden drop to -10.
         let p1 = Decimal::from_f64((-10.0f64).exp()).unwrap();
         let signal = manager.analyze(
-            &MarketData { symbol: "A".into(), price: p1, timestamp: 0 },
-            &MarketData { symbol: "B".into(), price: dec!(1.0), timestamp: 0 }
+            &MarketData { symbol: "A".into(), price: p1, instrument_id: None, timestamp: 0 },
+            &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
         ).await;
         
         assert_eq!(signal, Signal::Buy);
@@ -1361,24 +1415,24 @@ mod tests {
         // Spot 100, Future 100.2. Spread = 0.2/100 = 20 bps.
         // Net = 20. > 10. -> Buy.
         let signal = manager.analyze(
-            &MarketData { symbol: "S".into(), price: dec!(100.0), timestamp: 0 },
-            &MarketData { symbol: "F".into(), price: dec!(100.2), timestamp: 0 }
+            &MarketData { symbol: "S".into(), price: dec!(100.0), instrument_id: None, timestamp: 0 },
+            &MarketData { symbol: "F".into(), price: dec!(100.2), instrument_id: None, timestamp: 0 }
         ).await;
         assert_eq!(signal, Signal::Buy);
         
         // Spot 100, Future 100.01. Spread = 1 bps.
         // < 2. -> Sell.
         let signal = manager.analyze(
-            &MarketData { symbol: "S".into(), price: dec!(100.0), timestamp: 0 },
-            &MarketData { symbol: "F".into(), price: dec!(100.01), timestamp: 0 }
+            &MarketData { symbol: "S".into(), price: dec!(100.0), instrument_id: None, timestamp: 0 },
+            &MarketData { symbol: "F".into(), price: dec!(100.01), instrument_id: None, timestamp: 0 }
         ).await;
         assert_eq!(signal, Signal::Sell);
         
         // Spot 100, Future 100.05. Spread = 5 bps.
         // Between 2 and 10. -> Hold.
         let signal = manager.analyze(
-            &MarketData { symbol: "S".into(), price: dec!(100.0), timestamp: 0 },
-            &MarketData { symbol: "F".into(), price: dec!(100.05), timestamp: 0 }
+            &MarketData { symbol: "S".into(), price: dec!(100.0), instrument_id: None, timestamp: 0 },
+            &MarketData { symbol: "F".into(), price: dec!(100.05), instrument_id: None, timestamp: 0 }
         ).await;
         assert_eq!(signal, Signal::Hold);
     }

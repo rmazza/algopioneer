@@ -105,8 +105,8 @@ async fn run_simulation(
         let p_a = Decimal::from_f64_retain(prices_a[i]).unwrap();
         let p_b = Decimal::from_f64_retain(prices_b[i]).unwrap();
         
-        let leg1 = MarketData { symbol: "A".into(), price: p_a, timestamp: dates[i] };
-        let leg2 = MarketData { symbol: "B".into(), price: p_b, timestamp: dates[i] };
+        let leg1 = MarketData { symbol: "A".into(), price: p_a, instrument_id: None, timestamp: dates[i] };
+        let leg2 = MarketData { symbol: "B".into(), price: p_b, instrument_id: None, timestamp: dates[i] };
 
         // Get Signal from the "Brain"
         let signal = manager.analyze(&leg1, &leg2).await;

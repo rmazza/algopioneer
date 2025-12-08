@@ -120,7 +120,7 @@ impl MarketDataProvider for SyntheticProvider {
                     
                     let tick = MarketData {
                         symbol: symbol.clone(),
-                        price: new_price,
+                        price: new_price, instrument_id: None,
                         timestamp: chrono::Utc::now().timestamp_millis(),
                     };
                     

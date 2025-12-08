@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             execution_timeout_ms: 30000,
             min_profit_threshold: dec!(0.001), // 0.1%
             stop_loss_threshold: dec!(-0.02), // 2%
-            fee_tier: TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0)),
+            fee_tier: TransactionCostModel::default(),
             throttle_interval_secs: 5,
         };
         portfolio_config.push(config);
