@@ -376,6 +376,7 @@ impl std::fmt::Display for StrategyState {
             StrategyState::InPosition { .. } => write!(f, "InPosition"),
             StrategyState::Exiting { .. } => write!(f, "Exiting"),
             StrategyState::Halted => write!(f, "Halted"),
+            StrategyState::Reconciling => write!(f, "Reconciling"),
         }
     }
 }
