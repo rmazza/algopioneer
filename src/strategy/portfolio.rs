@@ -131,7 +131,78 @@ impl PortfolioPairConfig {
     pub fn pair_id(&self) -> String {
         format!("{}-{}", self.dual_leg_config.spot_symbol, self.dual_leg_config.future_symbol)
     }
+    
+    /// AS2: Validates the configuration at startup to catch errors early.
+    /// Returns Ok(()) if valid, or an error message describing the issue.
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate Z-score thresholds
+        if self.entry_z_score <= 0.0 {
+            return Err(format!(
+                "entry_z_score must be positive, got: {}",
+                self.entry_z_score
+            ));
+        }
+        if self.exit_z_score < 0.0 {
+            return Err(format!(
+                "exit_z_score cannot be negative, got: {}",
+                self.exit_z_score
+            ));
+        }
+        if self.exit_z_score >= self.entry_z_score {
+            return Err(format!(
+                "exit_z_score ({}) must be less than entry_z_score ({})",
+                self.exit_z_score, self.entry_z_score
+            ));
+        }
+        
+        // Validate window size
+        if self.window_size == 0 {
+            return Err("window_size must be greater than 0".to_string());
+        }
+        if self.window_size < 10 {
+            warn!("window_size {} is very small, consider using at least 10 for statistical significance", self.window_size);
+        }
+        
+        // Validate order size
+        if self.dual_leg_config.order_size <= Decimal::ZERO {
+            return Err(format!(
+                "order_size must be positive, got: {}",
+                self.dual_leg_config.order_size
+            ));
+        }
+        
+        // Validate symbols are non-empty
+        if self.dual_leg_config.spot_symbol.is_empty() {
+            return Err("spot_symbol cannot be empty".to_string());
+        }
+        if self.dual_leg_config.future_symbol.is_empty() {
+            return Err("future_symbol cannot be empty".to_string());
+        }
+        if self.dual_leg_config.spot_symbol == self.dual_leg_config.future_symbol {
+            return Err(format!(
+                "spot_symbol and future_symbol cannot be the same: {}",
+                self.dual_leg_config.spot_symbol
+            ));
+        }
+        
+        // Validate timeout values
+        if self.dual_leg_config.max_tick_age_ms <= 0 {
+            return Err(format!(
+                "max_tick_age_ms must be positive, got: {}",
+                self.dual_leg_config.max_tick_age_ms
+            ));
+        }
+        if self.dual_leg_config.execution_timeout_ms <= 0 {
+            return Err(format!(
+                "execution_timeout_ms must be positive, got: {}",
+                self.dual_leg_config.execution_timeout_ms
+            ));
+        }
+        
+        Ok(())
+    }
 }
+
 
 pub struct PortfolioManager {
     config_path: String,
@@ -164,7 +235,15 @@ impl PortfolioManager {
             return Err("No pairs found in configuration.".into());
         }
 
-        info!("Loaded {} pairs from config.", config_list.len());
+        // AS2: Validate all configurations at startup
+        for (idx, config) in config_list.iter().enumerate() {
+            if let Err(e) = config.validate() {
+                return Err(format!("Invalid configuration for pair #{} ({}): {}", idx + 1, config.pair_id(), e).into());
+            }
+        }
+
+        info!("Loaded and validated {} pairs from config.", config_list.len());
+
 
         // Store configs for restart capability
         let config_map: HashMap<String, Arc<PortfolioPairConfig>> = config_list

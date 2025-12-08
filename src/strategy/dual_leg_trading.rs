@@ -88,10 +88,7 @@ impl std::fmt::Display for OrderSide {
     }
 }
 
-// Constants removed in favor of Config
-// const MAX_TICK_AGE_MS: i64 = 2000;
-// const MAX_TICK_DIFF_MS: i64 = 2000;
-// const EXECUTION_TIMEOUT_MS: i64 = 30000;
+
 
 const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
 
@@ -837,24 +834,20 @@ impl RecoveryWorker {
             let client = self.client.clone();
             let feedback_tx = self.feedback_tx.clone();
             
-            // CF1 FIX: Use blocking acquire instead of try_acquire to prevent dropping tasks
+            // CF2 FIX: Use blocking acquire with graceful error handling instead of expect()
             // This applies backpressure when recovery queue is full, ensuring no orphaned positions
-            let permit = self.semaphore.clone()
-                .acquire_owned()
-                .await
-                .expect("Semaphore should never close");
+            let permit = match self.semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    // Semaphore closed - this should never happen, but handle gracefully
+                    error!("CRITICAL: Semaphore acquisition failed for recovery task {}: {}. Skipping task - MANUAL INTERVENTION REQUIRED.", task.symbol, e);
+                    let _ = self.feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
+                    continue;
+                }
+            };
             
             info!("Recovery task acquired permit for {}", task.symbol);
-
             
-            // Local throttler for the spawned task
-                // Local throttler for the spawned task
-
-                // But the throttler is for the WORKER loop logging, or the spawned task logging?
-                // "Apply the existing LogThrottle pattern to the RecoveryWorker failure logs"
-                // The failure logs are inside the spawned task.
-                // So a local throttler inside the spawned task is sufficient!
-                
                 tokio::spawn(async move {
                     // Permit is held until dropped at end of scope
                     let _permit = permit;
