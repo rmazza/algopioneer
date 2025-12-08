@@ -1066,7 +1066,6 @@ pub struct DualLegStrategy {
     throttler: DualLegLogThrottler,
     pub state_notifier: Option<mpsc::Sender<StrategyState>>,
     config: DualLegConfig,
-    // tasks: tokio::task::JoinSet<()>, // Removed unused field
     // AS2: Tick validator for market data validation
     validator: Box<dyn TickValidator>,
     // AS9: Exit policy for flexible exit logic
@@ -1116,7 +1115,6 @@ impl DualLegStrategy {
             throttler: DualLegLogThrottler::new(config.throttle_interval_secs),
             state_notifier: None,
             config,
-            // tasks: tokio::task::JoinSet::new(), // Removed unused field
             validator, // AS2
             exit_policy, // AS9
         }

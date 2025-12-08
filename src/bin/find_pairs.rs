@@ -4,7 +4,6 @@ use algopioneer::strategy::dual_leg_trading::TransactionCostModel;
 use cbadv::time::Granularity;
 use chrono::{Utc, Duration};
 use rust_decimal_macros::dec;
-// use serde::Serialize; // Removed unused import
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;

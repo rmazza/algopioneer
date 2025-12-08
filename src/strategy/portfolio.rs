@@ -30,6 +30,9 @@ const STRATEGY_CHANNEL_BUFFER: usize = 100; // ~100ms buffer per leg
 const RECOVERY_CHANNEL_BUFFER: usize = 100;
 const FEEDBACK_CHANNEL_BUFFER: usize = 100;
 
+// NP2: Reconnection constants
+const MAX_RECONNECT_BACKOFF_SECS: u64 = 30;
+
 // --- Strategy Actor Wrapper ---
 
 /// Wrapper for DualLegStrategy that ensures pair_id is always returned,
@@ -299,7 +302,7 @@ impl PortfolioManager {
                                     }
                                     Err(e) => {
                                         error!("Reconnection failed: {}", e);
-                                        backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+                                        backoff = std::cmp::min(backoff * 2, Duration::from_secs(MAX_RECONNECT_BACKOFF_SECS));
                                     }
                                 }
                             }
