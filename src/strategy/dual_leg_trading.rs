@@ -1600,3 +1600,93 @@ use tokio::sync::{Mutex, RwLock};
         assert_eq!(signal, Signal::Hold);
     }
 }
+
+    // Test Coverage Improvement: Mock Executor for testing
+    struct MockExecutor {
+        should_fail: Arc<Mutex<bool>>,
+        call_count: Arc<Mutex<usize>>,
+        executed_orders: Arc<Mutex<Vec<(String, OrderSide, Decimal)>>>,
+    }
+    
+    impl MockExecutor {
+        fn new() -> Self {
+            Self {
+                should_fail: Arc::new(Mutex::new(false)),
+                call_count: Arc::new(Mutex::new(0)),
+                executed_orders: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        
+        async fn set_should_fail(&self, fail: bool) {
+            *self.should_fail.lock().await = fail;
+        }
+        
+        async fn get_call_count(&self) -> usize {
+            *self.call_count.lock().await
+        }
+    }
+    
+    #[async_trait]
+    impl Executor for MockExecutor {
+        async fn execute_order(
+            &self,
+            symbol: &str,
+            side: OrderSide,
+            quantity: Decimal,
+            _price: Option<Decimal>,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut count = self.call_count.lock().await;
+            *count += 1;
+            
+            if *self.should_fail.lock().await {
+                return Err("Mock execution failure".into());
+            }
+            
+            self.executed_orders.lock().await.push((
+                symbol.to_string(),
+                side,
+                quantity,
+            ));
+            
+            Ok(())
+        }
+        
+        async fn get_position(
+            &self,
+            _symbol: &str,
+        ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(Decimal::ZERO)
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_mock_executor_success() {
+        let executor = MockExecutor::new();
+        
+        let result = executor.execute_order(
+            "BTC-USD",
+            OrderSide::Buy,
+            dec!(0.1),
+            Some(dec!(50000.0)),
+        ).await;
+        
+        assert!(result.is_ok());
+        assert_eq!(executor.get_call_count().await, 1);
+    }
+    
+    #[tokio::test]
+    async fn test_mock_executor_failure() {
+        let executor = MockExecutor::new();
+        executor.set_should_fail(true).await;
+        
+        let result = executor.execute_order(
+            "BTC-USD",
+            OrderSide::Buy,
+            dec!(0.1),
+            Some(dec!(50000.0)),
+        ).await;
+        
+        assert!(result.is_err());
+        assert_eq!(executor.get_call_count().await, 1);
+    }
+    
