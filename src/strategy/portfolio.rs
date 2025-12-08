@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
+// OW5: Use DashMap for lock-free concurrent PnL updates
+use dashmap::DashMap;
 use tracing::{info, error, debug, warn};
 
 use rust_decimal_macros::dec;
@@ -82,16 +84,19 @@ pub struct PortfolioPairConfig {
 
 
 /// Portfolio-level PnL tracking for risk monitoring
+/// OW5: Uses DashMap for lock-free concurrent updates
 pub struct PortfolioPnL {
     total_pnl: Arc<Mutex<Decimal>>,
-    strategy_pnls: Arc<Mutex<HashMap<String, Decimal>>>,
+    // OW5: DashMap for lock-free concurrent access
+    strategy_pnls: Arc<DashMap<String, Decimal>>,
 }
 
 impl PortfolioPnL {
     pub fn new() -> Self {
         Self {
             total_pnl: Arc::new(Mutex::new(Decimal::ZERO)),
-            strategy_pnls: Arc::new(Mutex::new(HashMap::new())),
+            // OW5: Use DashMap instead of Mutex<HashMap>
+            strategy_pnls: Arc::new(DashMap::new()),
         }
     }
     
@@ -99,9 +104,11 @@ impl PortfolioPnL {
         let mut total = self.total_pnl.lock().await;
         *total += pnl_delta;
         
-        let mut by_strategy = self.strategy_pnls.lock().await;
-        *by_strategy.entry(strategy_id.to_string())
-            .or_insert(Decimal::ZERO) += pnl_delta;
+        // OW5: Lock-free concurrent update with DashMap
+        self.strategy_pnls
+            .entry(strategy_id.to_string())
+            .and_modify(|pnl| *pnl += pnl_delta)
+            .or_insert(pnl_delta);
     }
     
     pub async fn get_total_pnl(&self) -> Decimal {
@@ -109,9 +116,10 @@ impl PortfolioPnL {
     }
     
     pub async fn get_strategy_pnl(&self, strategy_id: &str) -> Decimal {
-        self.strategy_pnls.lock().await
+        // OW5: Lock-free concurrent read with DashMap
+        self.strategy_pnls
             .get(strategy_id)
-            .copied()
+            .map(|entry| *entry.value())
             .unwrap_or(Decimal::ZERO)
     }
 }

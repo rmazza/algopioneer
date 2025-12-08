@@ -1,7 +1,7 @@
 [package]
 name = "algopioneer"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"  # NP1: Fixed from "2024"
 
 [dependencies]
 cbadv = "2.0.2"
@@ -36,15 +36,20 @@ env_logger = "0.11.8"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 thiserror = "2.0.17"
+# AS5: Rate limiting for API calls
+governor = "0.6"
+# OW4: Zero-copy string handling
+bytes = "1.5"
 
 [dev-dependencies]
 mockall = "0.13.1"
 
-# AS10: Health check HTTP endpoint
-axum = "0.7"
-tower = "0.4"
-dashmap = "5.5"
-opentelemetry = "0.21"
-opentelemetry_sdk = "0.21"
-opentelemetry-jaeger = "0.20"
-tracing-opentelemetry = "0.22"
+# NP2: Removed duplicate dependencies (axum, tower, dashmap, opentelemetry, etc.)
+# These are already in [dependencies] and don't need to be repeated here
+
+[profile.release]
+# OW7: Use jemalloc for better memory allocation performance
+# Uncomment to enable jemalloc (requires jemalloc system package):
+# [target.'cfg(not(target_env = "msvc"))'.dependencies]
+# tikv-jemallocator = "0.5"
+

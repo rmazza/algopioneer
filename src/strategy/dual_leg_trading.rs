@@ -237,6 +237,77 @@ pub struct MarketData {
     pub timestamp: i64,
 }
 
+// --- AS2: Market Data Validation ---
+
+/// Trait for validating market data ticks before processing.
+/// Enables testable and composable validation logic.
+pub trait TickValidator: Send + Sync {
+    /// Validates a market data tick against validation rules.
+    /// Returns Ok(()) if valid, Err(msg) if invalid.
+    fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String>;
+}
+
+/// Validates tick age to ensure data freshness.
+#[derive(Debug, Clone)]
+pub struct AgeValidator {
+    max_age_ms: i64,
+}
+
+impl AgeValidator {
+    pub fn new(max_age_ms: i64) -> Self {
+        Self { max_age_ms }
+    }
+}
+
+impl TickValidator for AgeValidator {
+    fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String> {
+        let age_ms = now_ts - tick.timestamp;
+        if age_ms > self.max_age_ms {
+            Err(format!("Tick age {}ms exceeds max {}ms", age_ms, self.max_age_ms))
+        } else if age_ms < 0 {
+            Err(format!("Tick timestamp {} is in the future (now: {})", tick.timestamp, now_ts))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Validates tick price is positive and not NaN/Inf.
+#[derive(Debug, Clone)]
+pub struct PriceValidator;
+
+impl TickValidator for PriceValidator {
+    fn validate(&self, tick: &MarketData, _now_ts: i64) -> Result<(), String> {
+        if tick.price <= Decimal::ZERO {
+            Err(format!("Invalid price: {} must be positive", tick.price))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Composite validator that chains multiple validators.
+/// Fails on first validation error.
+pub struct CompositeValidator {
+    validators: Vec<Box<dyn TickValidator>>,
+}
+
+impl CompositeValidator {
+    pub fn new(validators: Vec<Box<dyn TickValidator>>) -> Self {
+        Self { validators }
+    }
+}
+
+impl TickValidator for CompositeValidator {
+    fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String> {
+        for validator in &self.validators {
+            validator.validate(tick, now_ts)?;
+        }
+        Ok(())
+    }
+}
+
+
 /// Represents an open position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Position {
@@ -1015,6 +1086,8 @@ pub struct DualLegStrategy {
     pub state_notifier: Option<mpsc::Sender<StrategyState>>,
     config: DualLegConfig,
     tasks: tokio::task::JoinSet<()>,
+    // AS2: Tick validator for market data validation
+    validator: Box<dyn TickValidator>,
 }
 
 impl DualLegStrategy {
@@ -1034,6 +1107,12 @@ impl DualLegStrategy {
             future_symbol: config.future_symbol.clone() 
         };
         
+        // AS2: Create default validator (age + price validation)
+        let validator = Box::new(CompositeValidator::new(vec![
+            Box::new(AgeValidator::new(config.max_tick_age_ms)),
+            Box::new(PriceValidator),
+        ]));
+        
         Self {
             entry_manager,
             risk_monitor,
@@ -1049,6 +1128,7 @@ impl DualLegStrategy {
             state_notifier: None,
             config,
             tasks: tokio::task::JoinSet::new(),
+            validator, // AS2
         }
     }
 
@@ -1279,22 +1359,26 @@ impl DualLegStrategy {
         }
         let now = self.clock.now_ts_millis();
         
-        // Check 1: Data freshness (Age)
-        let leg1_age = now - leg1.timestamp;
-        let leg2_age = now - leg2.timestamp;
-        if leg1_age.abs() > self.config.max_tick_age_ms || leg2_age.abs() > self.config.max_tick_age_ms {
+        // AS2: Use TickValidator trait for validation
+        if let Err(e) = self.validator.validate(leg1, now) {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
-                warn!("Dropping tick due to age. Leg1 Age: {}ms, Leg2 Age: {}ms (Max: {}ms) (Suppressed: {})", leg1_age, leg2_age, self.config.max_tick_age_ms, suppressed);
+                warn!("Dropping tick for {}: {} (Suppressed: {})", leg1.symbol, e, suppressed);
             }
-            return; 
+            return;
+        }
+        
+        if let Err(e) = self.validator.validate(leg2, now) {
+            if self.throttler.tick_age.should_log() {
+                let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
+                warn!("Dropping tick for {}: {} (Suppressed: {})", leg2.symbol, e, suppressed);
+            }
+            return;
         }
 
         // Check 2: Data correlation (Synchronization)
         // Ensure the two price points are from roughly the same moment in time.
         let diff = (leg1.timestamp - leg2.timestamp).abs();
-        // Using max_tick_age_ms as a proxy for max diff for now, or we could add a specific config.
-        // Let's assume max_tick_age_ms is a reasonable bound for diff too.
         if diff > self.config.max_tick_age_ms {
             if self.throttler.sync_issue.should_log() {
                 let suppressed = self.throttler.sync_issue.get_and_reset_suppressed_count();

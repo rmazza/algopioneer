@@ -2,10 +2,14 @@ pub mod websocket;
 pub mod market_data_provider;
 use cbadv::{RestClient, RestClientBuilder};
 use std::env;
+use std::sync::Arc;
 use crate::sandbox;
 use cbadv::models::product::{Candle, ProductCandleQuery};
 use cbadv::time::Granularity;
 use chrono::{DateTime, Utc};
+// AS5: Rate limiting
+use governor::{Quota, RateLimiter, state::InMemoryState, clock::DefaultClock};
+use std::num::NonZeroU32;
 
 #[derive(Clone, Copy)]
 pub enum AppEnv {
@@ -17,6 +21,8 @@ pub enum AppEnv {
 pub struct CoinbaseClient {
     client: RestClient,
     mode: AppEnv,
+    // AS5: Rate limiter for API calls (10 req/sec for Coinbase Advanced Trade)
+    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
 }
 
 impl CoinbaseClient {
@@ -36,7 +42,11 @@ impl CoinbaseClient {
             .with_authentication(&_api_key, &_api_secret)
             .build()?;
 
-        Ok(Self { client, mode: env })
+        // AS5: Initialize rate limiter (Coinbase Advanced Trade: 10 requests/second)
+        let quota = Quota::per_second(NonZeroU32::new(10).unwrap());
+        let rate_limiter = Arc::new(RateLimiter::direct(quota));
+
+        Ok(Self { client, mode: env, rate_limiter })
     }
 
     /// Pings the Coinbase server to test the API connection.
@@ -56,6 +66,9 @@ impl CoinbaseClient {
 
     /// Places an order.
     pub async fn place_order(&self, product_id: &str, side: &str, size: rust_decimal::Decimal, price: Option<rust_decimal::Decimal>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // AS5: Wait for rate limit
+        self.rate_limiter.until_ready().await;
+        
         match self.mode {
             AppEnv::Live => {
                 println!("-- Live Mode: Placing order for {} {} of {} --", side, size, product_id);
@@ -95,6 +108,9 @@ impl CoinbaseClient {
         end: &DateTime<Utc>,
         granularity: Granularity,
     ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
+        // AS5: Wait for rate limit
+        self.rate_limiter.until_ready().await;
+        
         let start_timestamp = start.timestamp() as u64;
         let end_timestamp = end.timestamp() as u64;
 
@@ -116,6 +132,9 @@ impl CoinbaseClient {
     /// Gets the current position for a symbol.
     /// In paper/sandbox mode returns zero, in live mode would query actual positions.
     pub async fn get_position(&self, _product_id: &str) -> Result<rust_decimal::Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        // AS5: Wait for rate limit
+        self.rate_limiter.until_ready().await;
+        
         match self.mode {
             AppEnv::Live => Ok(rust_decimal::Decimal::ZERO),
             AppEnv::Sandbox | AppEnv::Paper => Ok(rust_decimal::Decimal::ZERO),
