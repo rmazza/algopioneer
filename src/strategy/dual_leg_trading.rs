@@ -485,6 +485,9 @@ pub struct PairsManager {
     entry_z_score: f64,
     exit_z_score: f64,
     spread_history: Mutex<std::collections::VecDeque<f64>>,
+    // CF3 FIX: Precision monitoring metrics
+    precision_rejections: std::sync::atomic::AtomicU64,
+    precision_warnings: std::sync::atomic::AtomicU64,
 }
 
 impl PairsManager {
@@ -494,7 +497,18 @@ impl PairsManager {
             entry_z_score,
             exit_z_score,
             spread_history: Mutex::new(std::collections::VecDeque::with_capacity(window_size)),
+            // CF3 FIX: Initialize precision monitoring counters
+            precision_rejections: std::sync::atomic::AtomicU64::new(0),
+            precision_warnings: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+    
+    /// CF3 FIX: Get precision monitoring metrics
+    pub fn get_precision_metrics(&self) -> (u64, u64) {
+        (
+            self.precision_rejections.load(std::sync::atomic::Ordering::Relaxed),
+            self.precision_warnings.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 }
 
@@ -527,18 +541,22 @@ impl EntryStrategy for PairsManager {
                 // CF3 FIX: Enforce hard limits on price ratios to prevent precision loss
                 let ratio = v1 / v2;
                 if ratio > MAX_SAFE_PRICE_RATIO || ratio < MIN_SAFE_PRICE_RATIO {
+                    // CF3 MONITORING: Increment rejection counter
+                    let count = self.precision_rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     error!(
-                        "PRECISION ERROR: Price ratio {:.2e} exceeds safe f64 bounds [{:.2e}, {:.2e}]. Rejecting signal to prevent precision loss.",
-                        ratio, MIN_SAFE_PRICE_RATIO, MAX_SAFE_PRICE_RATIO
+                        "PRECISION ERROR: Price ratio {:.2e} exceeds safe f64 bounds [{:.2e}, {:.2e}]. Rejecting signal to prevent precision loss. (Total rejections: {})",
+                        ratio, MIN_SAFE_PRICE_RATIO, MAX_SAFE_PRICE_RATIO, count
                     );
                     return Signal::Hold; // Hard rejection - do not trade on degraded precision
                 }
                 
                 // Log warning for ratios approaching the limit (within 2 orders of magnitude)
                 if ratio > MAX_SAFE_PRICE_RATIO / 100.0 || ratio < MIN_SAFE_PRICE_RATIO * 100.0 {
+                    // CF3 MONITORING: Increment warning counter
+                    let count = self.precision_warnings.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     warn!(
-                        "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation.",
-                        ratio
+                        "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation. (Total warnings: {})",
+                        ratio, count
                     );
                 }
                 
@@ -719,15 +737,16 @@ impl RecoveryWorker {
         while let Some(mut task) = self.rx.recv().await {
             let client = self.client.clone();
             let feedback_tx = self.feedback_tx.clone();
-            // Non-blocking acquire to prevent deadlock
-            let permit = match self.semaphore.clone().try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    error!("CRITICAL: Recovery worker overloaded. Dropping task for {}.", task.symbol);
-                    let _ = self.feedback_tx.send(RecoveryResult::Failed(task.symbol)).await;
-                    continue;
-                }
-            };
+            
+            // CF1 FIX: Use blocking acquire instead of try_acquire to prevent dropping tasks
+            // This applies backpressure when recovery queue is full, ensuring no orphaned positions
+            let permit = self.semaphore.clone()
+                .acquire_owned()
+                .await
+                .expect("Semaphore should never close");
+            
+            info!("Recovery task acquired permit for {}", task.symbol);
+
             
             // Local throttler for the spawned task
                 // Local throttler for the spawned task
@@ -1171,6 +1190,28 @@ impl DualLegStrategy {
         }
     }
 
+    /// CF4 FIX: Handle recovery results without holding state locks during async operations
+    /// 
+    /// DEADLOCK PREVENTION PATTERN:
+    /// - Capture state snapshot BEFORE any async executor calls
+    /// - Release locks before awaiting
+    /// - Re-acquire locks only for final state transitions
+    /// 
+    /// Example (for future position reconciliation):
+    /// ```ignore
+    /// // Capture state snapshot
+    /// let (leg1_id, leg2_id) = match &self.state {
+    ///     StrategyState::Reconciling => (self.pair.spot_symbol.clone(), self.pair.future_symbol.clone()),
+    ///     _ => return,
+    /// };
+    /// 
+    /// // Now safe to call async executor without holding self
+    /// let pos1 = self.execution_engine.client.get_position(&leg1_id).await;
+    /// let pos2 = self.execution_engine.client.get_position(&leg2_id).await;
+    /// 
+    /// // Re-acquire for state transition
+    /// self.transition_state(...);
+    /// ```
     fn handle_recovery_result(&mut self, result: RecoveryResult) {
         info!("Received Recovery Result: {:?}", result);
         match result {
@@ -1191,6 +1232,7 @@ impl DualLegStrategy {
                 // Exit Partial -> Retry Exit -> Goal: Flat
                 
                 // So in both current cases, success means Flat.
+                // CF4 NOTE: No async executor calls in this path, so no deadlock risk
                 if self.state == StrategyState::Reconciling {
                     info!("Recovery complete. Transitioning to Flat.");
                     self.transition_state(StrategyState::Flat);

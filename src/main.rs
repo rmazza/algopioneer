@@ -277,8 +277,9 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
     // Initialize components
     let client = Arc::new(CoinbaseClient::new(env)?);
 
-    // Create Recovery Channel
-    let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(100);
+    // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure
+    // This prevents unbounded queuing and ensures recovery tasks are never dropped
+    let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(20);
     // Create Feedback Channel for Recovery Worker -> Strategy
     let (feedback_tx, feedback_rx) = tokio::sync::mpsc::channel(100);
 
