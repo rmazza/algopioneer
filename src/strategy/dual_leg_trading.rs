@@ -799,7 +799,7 @@ impl CircuitBreaker {
     }
     
     pub async fn get_state(&self) -> CircuitState {
-        *self.state.write().await
+        *self.state.lock().await
     }
     
     pub async fn record_success(&self) {

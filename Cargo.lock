@@ -47,6 +47,7 @@ dependencies = [
  "mockall",
  "opentelemetry",
  "opentelemetry-jaeger",
+ "opentelemetry_sdk",
  "polars",
  "rand 0.9.2",
  "rust_decimal",

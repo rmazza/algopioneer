@@ -1,7 +1,7 @@
 //! AS11: OpenTelemetry observability for production tracing
 
 use opentelemetry::{global, KeyValue};
-use opentelemetry::sdk::{trace as sdktrace, Resource};
+use opentelemetry_sdk::{trace as sdktrace, Resource};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Initialize OpenTelemetry tracing with Jaeger exporter
