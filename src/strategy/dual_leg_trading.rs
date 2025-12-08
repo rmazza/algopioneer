@@ -1243,6 +1243,18 @@ impl Executor for CoinbaseClient {
     }
 }
 
+// AS7: Drop implementation for cleanup logging
+impl Drop for DualLegStrategy {
+    fn drop(&mut self) {
+        info!(
+            spot = %self.pair.spot_symbol,
+            future = %self.pair.future_symbol,
+            state = ?self.state,
+            "DualLegStrategy dropped - cleanup complete"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
