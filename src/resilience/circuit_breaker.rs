@@ -83,7 +83,7 @@ impl CircuitBreaker {
     pub async fn get_state(&self) -> CircuitState {
         self.inner.read().await.state
     }
-    
+
     /// Returns the current failure count.
     pub async fn get_failure_count(&self) -> u32 {
         self.inner.read().await.failure_count
@@ -123,7 +123,7 @@ impl CircuitBreaker {
             if state.state != CircuitState::Open {
                 return false;
             }
-            
+
             // Check if timeout has NOT passed
             if let Some(last_failure) = state.last_failure_time {
                 if last_failure.elapsed() <= self.timeout {
@@ -131,7 +131,7 @@ impl CircuitBreaker {
                 }
             }
         }
-        
+
         // Slow path: timeout has passed, need to transition to HalfOpen
         let mut state = self.inner.write().await;
         if state.state == CircuitState::Open {
@@ -146,7 +146,7 @@ impl CircuitBreaker {
         }
         false
     }
-    
+
     /// Resets the circuit breaker to its initial closed state.
     pub async fn reset(&self) {
         let mut state = self.inner.write().await;
@@ -170,13 +170,13 @@ mod tests {
     #[tokio::test]
     async fn test_circuit_breaker_trips_after_threshold() {
         let breaker = CircuitBreaker::new(3, Duration::from_secs(10));
-        
+
         breaker.record_failure().await;
         assert_eq!(breaker.get_state().await, CircuitState::Closed);
-        
+
         breaker.record_failure().await;
         assert_eq!(breaker.get_state().await, CircuitState::Closed);
-        
+
         breaker.record_failure().await;
         assert_eq!(breaker.get_state().await, CircuitState::Open);
         assert!(breaker.is_open().await);
@@ -185,11 +185,11 @@ mod tests {
     #[tokio::test]
     async fn test_circuit_breaker_success_resets() {
         let breaker = CircuitBreaker::new(3, Duration::from_secs(10));
-        
+
         breaker.record_failure().await;
         breaker.record_failure().await;
         breaker.record_success().await;
-        
+
         assert_eq!(breaker.get_state().await, CircuitState::Closed);
         assert_eq!(breaker.get_failure_count().await, 0);
     }
@@ -197,17 +197,17 @@ mod tests {
     #[tokio::test]
     async fn test_circuit_breaker_half_open_transition() {
         tokio::time::pause();
-        
+
         let breaker = CircuitBreaker::new(2, Duration::from_millis(100));
-        
+
         // Trip the breaker
         breaker.record_failure().await;
         breaker.record_failure().await;
         assert!(breaker.is_open().await);
-        
+
         // Advance past timeout
         tokio::time::advance(Duration::from_millis(150)).await;
-        
+
         // Should transition to HalfOpen
         assert!(!breaker.is_open().await);
         assert_eq!(breaker.get_state().await, CircuitState::HalfOpen);

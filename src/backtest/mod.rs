@@ -1,8 +1,8 @@
 //! Backtesting engine for trading strategies.
 
+use crate::strategy::{Signal, Strategy};
 use polars::prelude::*;
-use crate::strategy::{Strategy, Signal};
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Slippage in basis points (0.05% = 5 bps)
 const SLIPPAGE_BPS: f64 = 5.0;
@@ -71,7 +71,10 @@ pub fn run(
                 last_buy_price = slipped_price;
                 capital = 0.0;
                 total_trades += 1;
-                debug!("BUY at {:.2} (signal at candle {}, executed at {})", slipped_price, i, next_idx);
+                debug!(
+                    "BUY at {:.2} (signal at candle {}, executed at {})",
+                    slipped_price, i, next_idx
+                );
             }
             Signal::Sell if position > 0.0 => {
                 // Apply slippage: sell at LOWER price (unfavorable)
@@ -83,7 +86,10 @@ pub fn run(
                 } else {
                     losing_trades += 1;
                 }
-                debug!("SELL at {:.2} (signal at candle {}, executed at {})", slipped_price, i, next_idx);
+                debug!(
+                    "SELL at {:.2} (signal at candle {}, executed at {})",
+                    slipped_price, i, next_idx
+                );
             }
             _ => {}
         }

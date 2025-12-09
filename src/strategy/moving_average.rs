@@ -1,8 +1,6 @@
-use polars::prelude::*;
 use crate::strategy::Signal;
+use polars::prelude::*;
 use std::collections::VecDeque;
-
-
 
 /// Configuration for the Moving Average Crossover strategy.
 pub struct MovingAverageCrossover {
@@ -19,9 +17,12 @@ pub struct MovingAverageCrossover {
 impl MovingAverageCrossover {
     /// Creates a new Moving Average Crossover strategy configuration.
     pub fn new(short_window: usize, long_window: usize) -> Self {
-        assert!(short_window < long_window, "Short window must be less than long window");
-        Self { 
-            short_window, 
+        assert!(
+            short_window < long_window,
+            "Short window must be less than long window"
+        );
+        Self {
+            short_window,
             long_window,
             history: VecDeque::with_capacity(long_window + 1),
             short_sum: 0.0,
@@ -43,7 +44,7 @@ impl MovingAverageCrossover {
     pub fn update(&mut self, price: f64, position_open: bool) -> Signal {
         // 1. Update History
         self.history.push_back(price);
-        
+
         // 2. Update Sums
         self.short_sum += price;
         self.long_sum += price;
@@ -69,7 +70,7 @@ impl MovingAverageCrossover {
 
         // 6. Check Crossover
         let mut signal = Signal::Hold;
-        
+
         // Only check if we have a valid previous MA (not the first tick)
         if self.prev_long_ma != 0.0 {
             // Golden Cross (Buy Signal)
@@ -77,7 +78,8 @@ impl MovingAverageCrossover {
                 signal = Signal::Buy;
             }
             // Death Cross (Sell Signal)
-            else if self.prev_short_ma >= self.prev_long_ma && short_ma < long_ma && position_open {
+            else if self.prev_short_ma >= self.prev_long_ma && short_ma < long_ma && position_open
+            {
                 signal = Signal::Sell;
             }
         }
@@ -90,7 +92,11 @@ impl MovingAverageCrossover {
     }
 
     /// Generates a trading signal for the latest data point.
-    pub fn get_latest_signal(&self, data: &DataFrame, position_open: bool) -> Result<Signal, PolarsError> {
+    pub fn get_latest_signal(
+        &self,
+        data: &DataFrame,
+        position_open: bool,
+    ) -> Result<Signal, PolarsError> {
         let close_series = data.column("close")?;
         let close = close_series.f64()?;
 
@@ -169,14 +175,14 @@ impl MovingAverageCrossover {
         };
 
         // Compute rolling means as Series, then access as Float64Chunked
-    // Use the ChunkedArray rolling_mean method provided by Polars.
-    // Clone the Float64Chunked into an owned Series and use Polars' native rolling mean.
-    let close_owned = close.clone().into_series();
-    let short_series = close_owned.rolling_mean(short_opts)?;
-    let long_series = close_owned.rolling_mean(long_opts)?;
+        // Use the ChunkedArray rolling_mean method provided by Polars.
+        // Clone the Float64Chunked into an owned Series and use Polars' native rolling mean.
+        let close_owned = close.clone().into_series();
+        let short_series = close_owned.rolling_mean(short_opts)?;
+        let long_series = close_owned.rolling_mean(long_opts)?;
 
-    let short_ca = short_series.f64()?;
-    let long_ca = long_series.f64()?;
+        let short_ca = short_series.f64()?;
+        let long_ca = long_series.f64()?;
 
         // (Removed debug printing)
 
@@ -244,7 +250,8 @@ mod tests {
                 62.0, 58.0, 55.0, // Prices fall
                 50.0, 45.0        // Death cross should occur here
             ]
-        ).unwrap();
+        )
+        .unwrap();
 
         let signals = strategy.generate_signals(&df).unwrap();
 
@@ -257,9 +264,21 @@ mod tests {
         // Buy at index 7 (Price 53.0)
         // Sell at index 12 (Price 55.0)
         let expected_signals = vec![
-            Signal::Hold, Signal::Hold, Signal::Hold, Signal::Hold, Signal::Hold,
-            Signal::Hold, Signal::Hold, Signal::Buy, Signal::Hold, Signal::Hold,
-            Signal::Hold, Signal::Hold, Signal::Sell, Signal::Hold, Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Buy,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Hold,
+            Signal::Sell,
+            Signal::Hold,
+            Signal::Hold,
         ];
 
         assert_eq!(signals, expected_signals);
@@ -268,7 +287,8 @@ mod tests {
     #[test]
     fn test_no_crossover() {
         let strategy = MovingAverageCrossover::new(3, 5);
-        let df = df!("close" => &[50.0, 52.0, 55.0, 58.0, 60.0, 62.0, 65.0, 68.0, 70.0, 72.0]).unwrap();
+        let df =
+            df!("close" => &[50.0, 52.0, 55.0, 58.0, 60.0, 62.0, 65.0, 68.0, 70.0, 72.0]).unwrap();
 
         let signals = strategy.generate_signals(&df).unwrap();
         // No crossover, so all signals should be Hold.
@@ -335,7 +355,10 @@ mod tests {
         assert!(last_buy_pos.is_some(), "Second buy signal not found");
 
         // The first sell must happen before the second buy.
-        assert!(first_sell_pos < last_buy_pos, "Sell should happen before the second buy");
+        assert!(
+            first_sell_pos < last_buy_pos,
+            "Sell should happen before the second buy"
+        );
     }
 
     #[test]
@@ -343,11 +366,11 @@ mod tests {
         let mut strategy = MovingAverageCrossover::new(3, 5);
         let prices = vec![
             50.0, 52.0, 55.0, // Short MA starts calculating
-            48.0, 45.0,       // Long MA starts calculating, short > long
+            48.0, 45.0, // Long MA starts calculating, short > long
             46.0, 48.0, 53.0, // Prices rise, short pulls away from long
-            60.0, 65.0,       // Golden cross should occur here
+            60.0, 65.0, // Golden cross should occur here
             62.0, 58.0, 55.0, // Prices fall
-            50.0, 45.0        // Death cross should occur here
+            50.0, 45.0, // Death cross should occur here
         ];
 
         let mut signals = Vec::new();
@@ -366,7 +389,7 @@ mod tests {
         // Note: update() returns signal for current tick.
         // Batch test output was:
         // Hold, Hold, Hold, Hold, Hold, Hold, Hold, Buy, Hold, Hold, Hold, Hold, Sell, Hold, Hold
-        
+
         // Let's verify specific indices
         assert_eq!(signals[7], Signal::Buy, "Should buy at index 7");
         assert_eq!(signals[12], Signal::Sell, "Should sell at index 12");

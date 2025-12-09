@@ -1,29 +1,28 @@
-use crate::coinbase::{CoinbaseClient, AppEnv};
 use crate::coinbase::websocket::CoinbaseWebsocket;
+use crate::coinbase::{AppEnv, CoinbaseClient};
 use crate::strategy::dual_leg_trading::{
-    DualLegStrategy, DualLegConfig, ExecutionEngine, RecoveryWorker, 
-    SystemClock, PairsManager, 
-    RiskMonitor, InstrumentType, HedgeMode, MarketData
+    DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType, MarketData,
+    PairsManager, RecoveryWorker, RiskMonitor, SystemClock,
 };
 
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use std::sync::Arc;
-use std::collections::HashSet;
-use tokio::sync::Mutex;
 // OW5: Use DashMap for lock-free concurrent PnL updates
 use dashmap::DashMap;
-use tracing::{info, error, debug, warn, instrument};
 use thiserror::Error;
+use tracing::{debug, error, info, instrument, warn};
 
 use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
-use serde::{Serialize, Deserialize};
 
 // Channel buffer size constants
 const WS_CHANNEL_BUFFER: usize = 1000; // ~1 sec of ticks at 1000 ticks/sec
@@ -84,7 +83,7 @@ impl StrategyActor {
         let result = std::panic::AssertUnwindSafe(async {
             self.strategy.run(leg1_rx, leg2_rx).await;
         });
-        
+
         match futures_util::future::FutureExt::catch_unwind(result).await {
             Ok(_) => {
                 debug!(pair_id = %self.pair_id, "Strategy exited cleanly");
@@ -97,7 +96,7 @@ impl StrategyActor {
                 );
             }
         }
-        
+
         self.pair_id // Always return pair_id for supervisor restart logic
     }
 }
@@ -110,7 +109,6 @@ pub struct PortfolioPairConfig {
     pub entry_z_score: f64,
     pub exit_z_score: f64,
 }
-
 
 /// Portfolio-level PnL tracking for risk monitoring
 /// OW5: Uses DashMap for lock-free concurrent updates
@@ -128,22 +126,22 @@ impl PortfolioPnL {
             strategy_pnls: Arc::new(DashMap::new()),
         }
     }
-    
+
     pub async fn update_pnl(&self, strategy_id: &str, pnl_delta: Decimal) {
         let mut total = self.total_pnl.lock().await;
         *total += pnl_delta;
-        
+
         // OW5: Lock-free concurrent update with DashMap
         self.strategy_pnls
             .entry(strategy_id.to_string())
             .and_modify(|pnl| *pnl += pnl_delta)
             .or_insert(pnl_delta);
     }
-    
+
     pub async fn get_total_pnl(&self) -> Decimal {
         *self.total_pnl.lock().await
     }
-    
+
     pub async fn get_strategy_pnl(&self, strategy_id: &str) -> Decimal {
         // OW5: Lock-free concurrent read with DashMap
         self.strategy_pnls
@@ -155,9 +153,12 @@ impl PortfolioPnL {
 
 impl PortfolioPairConfig {
     pub fn pair_id(&self) -> String {
-        format!("{}-{}", self.dual_leg_config.spot_symbol, self.dual_leg_config.future_symbol)
+        format!(
+            "{}-{}",
+            self.dual_leg_config.spot_symbol, self.dual_leg_config.future_symbol
+        )
     }
-    
+
     /// AS2: Validates the configuration at startup to catch errors early.
     /// Returns Ok(()) if valid, or an error message describing the issue.
     pub fn validate(&self) -> Result<(), String> {
@@ -180,7 +181,7 @@ impl PortfolioPairConfig {
                 self.exit_z_score, self.entry_z_score
             ));
         }
-        
+
         // Validate window size
         if self.window_size == 0 {
             return Err("window_size must be greater than 0".to_string());
@@ -188,7 +189,7 @@ impl PortfolioPairConfig {
         if self.window_size < 10 {
             warn!("window_size {} is very small, consider using at least 10 for statistical significance", self.window_size);
         }
-        
+
         // Validate order size
         if self.dual_leg_config.order_size <= Decimal::ZERO {
             return Err(format!(
@@ -196,7 +197,7 @@ impl PortfolioPairConfig {
                 self.dual_leg_config.order_size
             ));
         }
-        
+
         // Validate symbols are non-empty
         if self.dual_leg_config.spot_symbol.is_empty() {
             return Err("spot_symbol cannot be empty".to_string());
@@ -210,7 +211,7 @@ impl PortfolioPairConfig {
                 self.dual_leg_config.spot_symbol
             ));
         }
-        
+
         // Validate timeout values
         if self.dual_leg_config.max_tick_age_ms <= 0 {
             return Err(format!(
@@ -224,11 +225,10 @@ impl PortfolioPairConfig {
                 self.dual_leg_config.execution_timeout_ms
             ));
         }
-        
+
         Ok(())
     }
 }
-
 
 pub struct PortfolioManager {
     config_path: String,
@@ -249,7 +249,10 @@ impl PortfolioManager {
 
     #[instrument(skip(self), fields(config_path = %self.config_path))]
     pub async fn run(&mut self) -> Result<(), PortfolioError> {
-        info!("Starting Portfolio Manager with config: {}", self.config_path);
+        info!(
+            "Starting Portfolio Manager with config: {}",
+            self.config_path
+        );
 
         // 1. Load Configuration
         let file = File::open(&self.config_path)?;
@@ -257,18 +260,27 @@ impl PortfolioManager {
         let config_list: Vec<PortfolioPairConfig> = serde_json::from_reader(reader)?;
 
         if config_list.is_empty() {
-            return Err(PortfolioError::Config("No pairs found in configuration.".to_string()));
+            return Err(PortfolioError::Config(
+                "No pairs found in configuration.".to_string(),
+            ));
         }
 
         // AS2: Validate all configurations at startup
         for (idx, config) in config_list.iter().enumerate() {
             if let Err(e) = config.validate() {
-                return Err(PortfolioError::Config(format!("Invalid configuration for pair #{} ({}): {}", idx + 1, config.pair_id(), e)));
+                return Err(PortfolioError::Config(format!(
+                    "Invalid configuration for pair #{} ({}): {}",
+                    idx + 1,
+                    config.pair_id(),
+                    e
+                )));
             }
         }
 
-        info!("Loaded and validated {} pairs from config.", config_list.len());
-
+        info!(
+            "Loaded and validated {} pairs from config.",
+            config_list.len()
+        );
 
         // Store configs for restart capability
         let config_map: HashMap<String, Arc<PortfolioPairConfig>> = config_list
@@ -280,17 +292,20 @@ impl PortfolioManager {
             .collect();
 
         // 2. Initialize Shared Resources
-        let client = Arc::new(CoinbaseClient::new(self.env.clone())
-            .map_err(|e| PortfolioError::Infrastructure(e.to_string()))?); 
-        
+        let client = Arc::new(
+            CoinbaseClient::new(self.env.clone())
+                .map_err(|e| PortfolioError::Infrastructure(e.to_string()))?,
+        );
+
         // 3. Spawn Strategy Actors
         // We use JoinSet to monitor actors. They return their pair_id on exit.
         let mut join_set: JoinSet<String> = JoinSet::new();
-        
+
         // Symbol Map: Symbol -> List of (Sender, PairID)
         // We need PairID to remove stale senders on restart.
-        let mut symbol_map: HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>> = HashMap::new();
-        
+        let mut symbol_map: HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>> =
+            HashMap::new();
+
         // OW1: Use HashSet for O(n) instead of O(n²) duplicate checking
         let mut symbols_set: HashSet<String> = HashSet::new();
         for config in config_map.values() {
@@ -302,17 +317,18 @@ impl PortfolioManager {
         // Spawn all strategies
         for config in config_map.values() {
             Self::spawn_strategy(
-                &mut join_set, 
-                &mut symbol_map, 
-                client.clone(), 
-                config.clone()
-            ).await;
+                &mut join_set,
+                &mut symbol_map,
+                client.clone(),
+                config.clone(),
+            )
+            .await;
         }
 
         // 4. WebSocket Connection & Demultiplexer
-        let ws_client = CoinbaseWebsocket::new()
-            .map_err(|e| PortfolioError::Infrastructure(e.to_string()))?;
-        let (ws_tx, mut ws_rx) = mpsc::channel(WS_CHANNEL_BUFFER); 
+        let ws_client =
+            CoinbaseWebsocket::new().map_err(|e| PortfolioError::Infrastructure(e.to_string()))?;
+        let (ws_tx, mut ws_rx) = mpsc::channel(WS_CHANNEL_BUFFER);
 
         let symbols_clone = symbols_to_subscribe.clone();
         let cancel_token = self.ws_cancel_token.clone();
@@ -330,7 +346,10 @@ impl PortfolioManager {
         });
         self.ws_task_handle = Some(ws_handle);
 
-        info!("Portfolio Manager running. Monitoring {} strategies.", config_map.len());
+        info!(
+            "Portfolio Manager running. Monitoring {} strategies.",
+            config_map.len()
+        );
 
         // Supervisor Loop
         loop {
@@ -343,7 +362,7 @@ impl PortfolioManager {
                             // CF5: Clean up closed senders before routing
                             if let Some(senders) = symbol_map.get_mut(&arc_data.symbol) {
                                 senders.retain(|(sender, _)| !sender.is_closed());
-                                
+
                                 for (sender, pair_id) in senders {
                                     // FIX: Use try_send to prevent latency cascading
                                     // If one strategy is slow, don't block ticks for all others
@@ -364,37 +383,37 @@ impl PortfolioManager {
                         None => {
                             // CF4: Implement WebSocket reconnection instead of fatal error
                             error!("WebSocket channel closed. Attempting reconnection...");
-                            
+
                             let mut reconnect_attempts = 0;
                             let mut backoff = Duration::from_secs(1);
-                            
+
                             loop {
                                 reconnect_attempts += 1;
                                 if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
                                     error!("FATAL: WebSocket reconnection failed after {} attempts", MAX_RECONNECT_ATTEMPTS);
                                     return Err(PortfolioError::WebSocketFailure(MAX_RECONNECT_ATTEMPTS));
                                 }
-                                
+
                                 warn!("Reconnection attempt {} of {}", reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
                                 tokio::time::sleep(backoff).await;
-                                
+
                                 match CoinbaseWebsocket::new() {
                                     Ok(new_ws_client) => {
                                         let (new_ws_tx, new_ws_rx) = mpsc::channel(WS_CHANNEL_BUFFER);
-                                        
+
                                         // CF1 FIX: Use CancellationToken for graceful shutdown
                                         if let Some(old_handle) = self.ws_task_handle.take() {
                                             // Signal old task to stop
                                             self.ws_cancel_token.cancel();
                                             debug!("Sent cancellation signal to old WebSocket task");
-                                            
+
                                             // Wait for clean shutdown (with timeout)
                                             let _ = tokio::time::timeout(Duration::from_secs(2), old_handle).await;
-                                            
+
                                             // Create new token for new task
                                             self.ws_cancel_token = CancellationToken::new();
                                         }
-                                        
+
                                         let cancel_token = self.ws_cancel_token.clone();
                                         let symbols_clone = symbols_to_subscribe.clone();
                                         let new_handle = tokio::spawn(async move {
@@ -410,7 +429,7 @@ impl PortfolioManager {
                                             }
                                         });
                                         self.ws_task_handle = Some(new_handle);
-                                        
+
                                         ws_rx = new_ws_rx;
                                         info!("WebSocket reconnected successfully!");
                                         break;
@@ -430,7 +449,7 @@ impl PortfolioManager {
                     match res {
                         Ok(pair_id) => {
                             error!(pair_id = %pair_id, "Strategy exited unexpectedly, initiating restart");
-                            
+
                             // 1. Clean up old routing entries for this pair
                             for (_, list) in symbol_map.iter_mut() {
                                 list.retain(|(_, pid)| pid != &pair_id);
@@ -440,14 +459,14 @@ impl PortfolioManager {
                             if let Some(config) = config_map.get(&pair_id) {
                                 // CF2: Add backoff to prevent tight crash loops (removed duplicate)
                                 tokio::time::sleep(Duration::from_secs(1)).await;
-                                
+
                                 Self::spawn_strategy(
-                                    &mut join_set, 
-                                    &mut symbol_map, 
-                                    client.clone(), 
+                                    &mut join_set,
+                                    &mut symbol_map,
+                                    client.clone(),
                                     config.clone()
                                 ).await;
-                                
+
                                 info!(pair_id = %pair_id, "Strategy restarted successfully");
                             } else {
                                 error!(pair_id = %pair_id, "CRITICAL: Could not find config for exited pair");
@@ -466,14 +485,14 @@ impl PortfolioManager {
                             } else {
                                 "failed"
                             };
-                            
+
                             error!(
                                 error_type = error_type,
                                 error = %e,
                                 "Strategy task {} (likely due to explicit cancellation).",
                                 error_type
                             );
-                            
+
                             // Task cancellation is expected during shutdown, so this is less critical
                             warn!("Strategy terminated without returning pair_id. If this happens during normal operation, investigate.");
                         }
@@ -488,7 +507,7 @@ impl PortfolioManager {
         join_set: &mut JoinSet<String>,
         symbol_map: &mut HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
         client: Arc<CoinbaseClient>,
-        config: Arc<PortfolioPairConfig>
+        config: Arc<PortfolioPairConfig>,
     ) {
         let pair_id = config.pair_id();
         info!("Initializing strategy for {}", pair_id);
@@ -496,10 +515,20 @@ impl PortfolioManager {
         // Create Channels
         let (leg1_tx, leg1_rx) = mpsc::channel(STRATEGY_CHANNEL_BUFFER);
         let (leg2_tx, leg2_rx) = mpsc::channel(STRATEGY_CHANNEL_BUFFER);
-        
+
         // DRY: Use helper function for symbol registration
-        Self::register_symbol(symbol_map, config.dual_leg_config.spot_symbol.clone(), leg1_tx, pair_id.clone());
-        Self::register_symbol(symbol_map, config.dual_leg_config.future_symbol.clone(), leg2_tx, pair_id.clone());
+        Self::register_symbol(
+            symbol_map,
+            config.dual_leg_config.spot_symbol.clone(),
+            leg1_tx,
+            pair_id.clone(),
+        );
+        Self::register_symbol(
+            symbol_map,
+            config.dual_leg_config.future_symbol.clone(),
+            leg2_tx,
+            pair_id.clone(),
+        );
 
         // Setup Strategy Components
         let (recovery_tx, recovery_rx) = mpsc::channel(RECOVERY_CHANNEL_BUFFER);
@@ -510,16 +539,25 @@ impl PortfolioManager {
             recovery_worker.run().await;
         });
 
-        let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx, EXECUTION_MAX_RETRIES, EXECUTION_TIMEOUT_SECS);
+        let execution_engine = ExecutionEngine::new(
+            client.clone(),
+            recovery_tx,
+            EXECUTION_MAX_RETRIES,
+            EXECUTION_TIMEOUT_SECS,
+        );
 
         // Strategy Logic (Pairs Trading for Portfolio)
         // Use dynamic parameters from config
         let manager = Box::new(PairsManager::new(
-            config.window_size, 
-            config.entry_z_score, 
-            config.exit_z_score
+            config.window_size,
+            config.entry_z_score,
+            config.exit_z_score,
         ));
-        let monitor = RiskMonitor::new(DEFAULT_LEVERAGE, InstrumentType::Linear, HedgeMode::DollarNeutral);
+        let monitor = RiskMonitor::new(
+            DEFAULT_LEVERAGE,
+            InstrumentType::Linear,
+            HedgeMode::DollarNeutral,
+        );
 
         let strategy = DualLegStrategy::new(
             manager,
@@ -532,9 +570,7 @@ impl PortfolioManager {
 
         // CF2 FIX: Wrap strategy in StrategyActor to ensure pair_id is always returned
         let actor = StrategyActor::new(pair_id.clone(), strategy);
-        join_set.spawn(async move {
-            actor.run_with_id(leg1_rx, leg2_rx).await
-        });
+        join_set.spawn(async move { actor.run_with_id(leg1_rx, leg2_rx).await });
     }
 
     /// DRY helper: Register a symbol->sender mapping for tick distribution
@@ -573,7 +609,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_validate_valid_config() {
         let config = valid_config();
@@ -586,7 +621,9 @@ mod tests {
         config.entry_z_score = 0.0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("entry_z_score must be positive"));
+        assert!(result
+            .unwrap_err()
+            .contains("entry_z_score must be positive"));
     }
 
     #[test]
@@ -595,7 +632,9 @@ mod tests {
         config.entry_z_score = -1.0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("entry_z_score must be positive"));
+        assert!(result
+            .unwrap_err()
+            .contains("entry_z_score must be positive"));
     }
 
     #[test]
@@ -604,7 +643,9 @@ mod tests {
         config.exit_z_score = -0.5;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("exit_z_score cannot be negative"));
+        assert!(result
+            .unwrap_err()
+            .contains("exit_z_score cannot be negative"));
     }
 
     #[test]
@@ -614,7 +655,9 @@ mod tests {
         config.exit_z_score = 2.0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must be less than entry_z_score"));
+        assert!(result
+            .unwrap_err()
+            .contains("must be less than entry_z_score"));
     }
 
     #[test]
@@ -624,7 +667,9 @@ mod tests {
         config.exit_z_score = 2.0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must be less than entry_z_score"));
+        assert!(result
+            .unwrap_err()
+            .contains("must be less than entry_z_score"));
     }
 
     #[test]
@@ -633,7 +678,9 @@ mod tests {
         config.window_size = 0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("window_size must be greater than 0"));
+        assert!(result
+            .unwrap_err()
+            .contains("window_size must be greater than 0"));
     }
 
     #[test]
@@ -669,7 +716,9 @@ mod tests {
         config.dual_leg_config.future_symbol = "".to_string();
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("future_symbol cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .contains("future_symbol cannot be empty"));
     }
 
     #[test]
@@ -688,7 +737,9 @@ mod tests {
         config.dual_leg_config.max_tick_age_ms = 0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("max_tick_age_ms must be positive"));
+        assert!(result
+            .unwrap_err()
+            .contains("max_tick_age_ms must be positive"));
     }
 
     #[test]
@@ -697,7 +748,9 @@ mod tests {
         config.dual_leg_config.max_tick_age_ms = -100;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("max_tick_age_ms must be positive"));
+        assert!(result
+            .unwrap_err()
+            .contains("max_tick_age_ms must be positive"));
     }
 
     #[test]
@@ -706,7 +759,9 @@ mod tests {
         config.dual_leg_config.execution_timeout_ms = 0;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("execution_timeout_ms must be positive"));
+        assert!(result
+            .unwrap_err()
+            .contains("execution_timeout_ms must be positive"));
     }
 
     #[test]
@@ -715,7 +770,9 @@ mod tests {
         config.dual_leg_config.execution_timeout_ms = -500;
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("execution_timeout_ms must be positive"));
+        assert!(result
+            .unwrap_err()
+            .contains("execution_timeout_ms must be positive"));
     }
 
     #[test]

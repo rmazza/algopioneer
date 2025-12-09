@@ -6,27 +6,30 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use algopioneer::coinbase::{CoinbaseClient, AppEnv};
 use algopioneer::coinbase::websocket::CoinbaseWebsocket;
-use cbadv::time::Granularity;
-use dotenv::dotenv;
-use polars::prelude::*;
-use std::fs::File;
-use clap::Parser;
-use tokio::time::Duration;
-use chrono::{Utc, Duration as ChronoDuration};
+use algopioneer::coinbase::{AppEnv, CoinbaseClient};
+use algopioneer::strategy::dual_leg_trading::{
+    BasisManager, DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType,
+    PairsManager, RecoveryWorker, RiskMonitor, SystemClock, TransactionCostModel,
+};
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::dual_leg_trading::{DualLegStrategy, BasisManager, PairsManager, RiskMonitor, ExecutionEngine, RecoveryWorker, SystemClock, TransactionCostModel, InstrumentType, HedgeMode, DualLegConfig};
 use algopioneer::strategy::portfolio::PortfolioManager;
 use algopioneer::strategy::Signal;
-use std::sync::Arc;
+use cbadv::time::Granularity;
+use chrono::{Duration as ChronoDuration, Utc};
+use clap::Parser;
+use dotenv::dotenv;
+use polars::prelude::*;
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::File;
 use std::io::Write;
-use rust_decimal_macros::dec;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
-use tracing::{info, warn, error};
+use std::sync::Arc;
+use tokio::time::Duration;
+use tracing::{error, info, warn};
 
 // --- Constants ---
 const STATE_FILE: &str = "trade_state.json";
@@ -63,17 +66,17 @@ impl TradeState {
         file.write_all(json.as_bytes())?;
         Ok(())
     }
-    
+
     /// Check if we have an open position for a symbol
     fn has_position(&self, symbol: &str) -> bool {
         self.positions.contains_key(symbol)
     }
-    
+
     /// Open a new position
     fn open_position(&mut self, detail: PositionDetail) {
         self.positions.insert(detail.symbol.clone(), detail);
     }
-    
+
     /// Close a position and return its details
     fn close_position(&mut self, symbol: &str) -> Option<PositionDetail> {
         self.positions.remove(symbol)
@@ -161,7 +164,6 @@ enum Commands {
     },
 }
 
-
 // --- Main Application Logic ---
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -176,7 +178,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     match &cli.command {
-        Commands::Trade { product_id, duration, paper, order_size, short_window, long_window, max_history } => {
+        Commands::Trade {
+            product_id,
+            duration,
+            paper,
+            order_size,
+            short_window,
+            long_window,
+            max_history,
+        } => {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
             let config = SimpleTradingConfig {
                 product_id: product_id.clone(),
@@ -195,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             // Create async state persistence channel
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<TradeState>();
-            
+
             // Spawn background task for async state persistence
             tokio::spawn(async move {
                 while let Some(state) = state_rx.recv().await {
@@ -203,17 +213,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Err(e) = state.save() {
                             tracing::error!("Background state save failed: {}", e);
                         }
-                    }).await;
+                    })
+                    .await;
                 }
             });
-            
+
             let mut engine = SimpleTradingEngine::new(config, state_tx).await?;
             engine.run().await?;
         }
         Commands::Backtest => {
             run_backtest()?;
         }
-        Commands::DualLeg { strategy, symbols, paper, order_size, max_tick_age_ms, execution_timeout_ms, min_profit_threshold, stop_loss_threshold, throttle_interval_secs } => {
+        Commands::DualLeg {
+            strategy,
+            symbols,
+            paper,
+            order_size,
+            max_tick_age_ms,
+            execution_timeout_ms,
+            min_profit_threshold,
+            stop_loss_threshold,
+            throttle_interval_secs,
+        } => {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
             let parts: Vec<&str> = symbols.split(',').collect();
             if parts.len() != 2 {
@@ -259,11 +280,20 @@ struct SimpleTradingEngine {
 }
 
 impl SimpleTradingEngine {
-    async fn new(config: SimpleTradingConfig, state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(
+        config: SimpleTradingConfig,
+        state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let client = CoinbaseClient::new(config.env.clone())?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
-        Ok(Self { client, strategy, state, config, state_tx })
+        Ok(Self {
+            client,
+            strategy,
+            state,
+            config,
+            state_tx,
+        })
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -274,8 +304,16 @@ impl SimpleTradingEngine {
         // --- Warm up the strategy with historical data ---
         info!("Fetching historical data to warm up the strategy...");
         let end = Utc::now();
-        let start = end - ChronoDuration::minutes((self.config.long_window * 5) as i64); 
-        let initial_candles = self.client.get_product_candles(&self.config.product_id, &start, &end, Granularity::OneMinute).await?;
+        let start = end - ChronoDuration::minutes((self.config.long_window * 5) as i64);
+        let initial_candles = self
+            .client
+            .get_product_candles(
+                &self.config.product_id,
+                &start,
+                &end,
+                Granularity::OneMinute,
+            )
+            .await?;
 
         let mut closes: Vec<f64> = initial_candles.iter().map(|c| c.close).collect();
 
@@ -291,14 +329,22 @@ impl SimpleTradingEngine {
 
         // --- Main Trading Loop ---
         let mut interval = tokio::time::interval(Duration::from_secs(self.config.duration));
-        
+
         loop {
             interval.tick().await;
             info!("--- AlgoPioneer: Running Trade Cycle ---");
 
             let end = Utc::now();
             let start = end - ChronoDuration::minutes(1);
-            let latest_candles = self.client.get_product_candles(&self.config.product_id, &start, &end, Granularity::OneMinute).await?;
+            let latest_candles = self
+                .client
+                .get_product_candles(
+                    &self.config.product_id,
+                    &start,
+                    &end,
+                    Granularity::OneMinute,
+                )
+                .await?;
 
             if let Some(latest_candle) = latest_candles.first() {
                 let has_position = self.state.has_position(&self.config.product_id);
@@ -308,8 +354,16 @@ impl SimpleTradingEngine {
                 match signal {
                     Signal::Buy => {
                         info!("Buy signal received. Placing order.");
-                        self.client.place_order(&self.config.product_id, "buy", self.config.order_size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
-                        
+                        self.client
+                            .place_order(
+                                &self.config.product_id,
+                                "buy",
+                                self.config.order_size,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| e as Box<dyn std::error::Error>)?;
+
                         // Track position with full details for reconciliation
                         let detail = PositionDetail {
                             symbol: self.config.product_id.clone(),
@@ -318,7 +372,7 @@ impl SimpleTradingEngine {
                             entry_price: Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0)),
                         };
                         self.state.open_position(detail);
-                        
+
                         // Non-blocking async state persistence
                         if let Err(e) = self.state_tx.send(self.state.clone()) {
                             warn!("Failed to queue state save: {}", e);
@@ -326,15 +380,27 @@ impl SimpleTradingEngine {
                     }
                     Signal::Sell => {
                         info!("Sell signal received. Placing order.");
-                        self.client.place_order(&self.config.product_id, "sell", self.config.order_size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
-                        
+                        self.client
+                            .place_order(
+                                &self.config.product_id,
+                                "sell",
+                                self.config.order_size,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| e as Box<dyn std::error::Error>)?;
+
                         // Close position and log details
                         if let Some(closed) = self.state.close_position(&self.config.product_id) {
-                            let exit_price = Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0));
+                            let exit_price =
+                                Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0));
                             let pnl = (exit_price - closed.entry_price) * closed.quantity;
-                            info!("Closed position: entry={}, exit={}, pnl={}", closed.entry_price, exit_price, pnl);
+                            info!(
+                                "Closed position: entry={}, exit={}, pnl={}",
+                                closed.entry_price, exit_price, pnl
+                            );
                         }
-                        
+
                         // Non-blocking async state persistence
                         if let Err(e) = self.state_tx.send(self.state.clone()) {
                             warn!("Failed to queue state save: {}", e);
@@ -353,7 +419,6 @@ impl SimpleTradingEngine {
         }
     }
 }
-
 
 // --- Backtesting Logic ---
 use algopioneer::backtest;
@@ -386,7 +451,6 @@ fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 // --- Basis Trading Logic ---
 
 /// CLI configuration for DualLeg strategy (externalized from hardcoded values)
@@ -399,8 +463,17 @@ struct DualLegCliConfig {
     throttle_interval_secs: u64,
 }
 
-async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str, env: AppEnv, cli_config: DualLegCliConfig) -> Result<(), Box<dyn std::error::Error>> {
-    info!("--- AlgoPioneer: Initializing Dual-Leg Strategy ({}) ---", strategy_type);
+async fn run_dual_leg_trading(
+    strategy_type: &str,
+    leg1_id: &str,
+    leg2_id: &str,
+    env: AppEnv,
+    cli_config: DualLegCliConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!(
+        "--- AlgoPioneer: Initializing Dual-Leg Strategy ({}) ---",
+        strategy_type
+    );
 
     // Initialize components
     let client = Arc::new(CoinbaseClient::new(env)?);
@@ -425,19 +498,30 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
             // Initialize Cost Model (e.g., 10 bps maker, 20 bps taker, 5 bps slippage)
             let cost_model = TransactionCostModel::default();
             let manager = Box::new(BasisManager::new(dec!(10.0), dec!(2.0), cost_model)); // 10 bps entry, 2 bps exit
-            let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
-            (manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>, monitor)
-        },
+            let monitor =
+                RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
+            (
+                manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>,
+                monitor,
+            )
+        }
         "pairs" => {
             // Pairs Trading: Z-Score based
             // Window 20, Entry Z=2.0, Exit Z=0.1
             let manager = Box::new(PairsManager::new(500, 4.0, 0.1));
             // Pairs is usually Dollar Neutral
-            let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
-            (manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>, monitor)
-        },
+            let monitor =
+                RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
+            (
+                manager as Box<dyn algopioneer::strategy::dual_leg_trading::EntryStrategy>,
+                monitor,
+            )
+        }
         _ => {
-            error!("Error: Unknown strategy type '{}'. Use 'basis' or 'pairs'.", strategy_type);
+            error!(
+                "Error: Unknown strategy type '{}'. Use 'basis' or 'pairs'.",
+                strategy_type
+            );
             return Ok(());
         }
     };
@@ -445,21 +529,30 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
     let order_size = match Decimal::from_f64(cli_config.order_size) {
         Some(d) => d,
         None => {
-            warn!("Invalid order_size '{}', defaulting to 0.00001", cli_config.order_size);
+            warn!(
+                "Invalid order_size '{}', defaulting to 0.00001",
+                cli_config.order_size
+            );
             dec!(0.00001)
         }
     };
     let min_profit = match Decimal::from_f64(cli_config.min_profit_threshold) {
         Some(d) => d,
         None => {
-            warn!("Invalid min_profit_threshold '{}', defaulting to 0.005", cli_config.min_profit_threshold);
+            warn!(
+                "Invalid min_profit_threshold '{}', defaulting to 0.005",
+                cli_config.min_profit_threshold
+            );
             dec!(0.005)
         }
     };
     let stop_loss = match Decimal::from_f64(cli_config.stop_loss_threshold) {
         Some(d) => d,
         None => {
-            warn!("Invalid stop_loss_threshold '{}', defaulting to -0.05", cli_config.stop_loss_threshold);
+            warn!(
+                "Invalid stop_loss_threshold '{}', defaulting to -0.05",
+                cli_config.stop_loss_threshold
+            );
             dec!(-0.05)
         }
     };
@@ -504,15 +597,19 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
     // Demultiplexer: Route WS messages to appropriate strategy channels
     let leg1_id_clone = leg1_id.to_string();
     let leg2_id_clone = leg2_id.to_string();
-    
+
     tokio::spawn(async move {
         while let Some(data) = ws_rx.recv().await {
             tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
             let arc_data = Arc::new(data);
             if arc_data.symbol == leg1_id_clone {
-                if let Err(_) = leg1_tx.send(arc_data.clone()).await { break; }
+                if let Err(_) = leg1_tx.send(arc_data.clone()).await {
+                    break;
+                }
             } else if arc_data.symbol == leg2_id_clone {
-                if let Err(_) = leg2_tx.send(arc_data.clone()).await { break; }
+                if let Err(_) = leg2_tx.send(arc_data.clone()).await {
+                    break;
+                }
             } else {
                 tracing::warn!("Demux received unknown symbol: {}", arc_data.symbol);
             }

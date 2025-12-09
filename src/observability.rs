@@ -8,15 +8,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub fn init_telemetry(service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Configure Jaeger exporter
     global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name(service_name)
-        .with_trace_config(
-            sdktrace::config().with_resource(Resource::new(vec![
+
+    let tracer =
+        opentelemetry_jaeger::new_agent_pipeline()
+            .with_service_name(service_name)
+            .with_trace_config(sdktrace::config().with_resource(Resource::new(vec![
                 KeyValue::new("service.name", service_name.to_string()),
-            ]))
-        )
-        .install_simple()?;
+            ])))
+            .install_simple()?;
 
     // Create tracing subscriber with OpenTelemetry layer
     tracing_subscriber::registry()

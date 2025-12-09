@@ -16,21 +16,21 @@
 //! The strategy enforces strict risk checks via `RiskMonitor::calc_hedge_ratio` to prevent over-leveraging
 //! and ensure proper hedging.
 
-use crate::strategy::Signal;
-use crate::resilience::CircuitBreaker;
-use async_trait::async_trait;
-use std::sync::Arc;
-use std::error::Error;
 use crate::coinbase::CoinbaseClient;
+use crate::resilience::CircuitBreaker;
+use crate::strategy::Signal;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use rust_decimal::prelude::*;
-use chrono::{Utc, DateTime};
-use tracing::{info, debug, error, instrument, warn};
-use tokio::sync::{mpsc, Semaphore, Mutex};
-use tokio::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::sync::Arc;
 use thiserror::Error;
-use serde::{Serialize, Deserialize};
+use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::time::{Duration, Instant};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Error, Debug)]
 pub enum DualLegError {
@@ -65,7 +65,9 @@ impl ExecutionError {
         let s = e.to_string();
         if s.to_lowercase().contains("network") || s.to_lowercase().contains("timeout") {
             ExecutionError::NetworkError(s)
-        } else if s.to_lowercase().contains("insufficient funds") || s.to_lowercase().contains("rejected") {
+        } else if s.to_lowercase().contains("insufficient funds")
+            || s.to_lowercase().contains("rejected")
+        {
             ExecutionError::OrderRejected(s)
         } else {
             ExecutionError::ExchangeError(s)
@@ -87,8 +89,6 @@ impl std::fmt::Display for OrderSide {
         }
     }
 }
-
-
 
 const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
 
@@ -177,7 +177,11 @@ pub struct TransactionCostModel {
 
 impl TransactionCostModel {
     pub fn new(maker_fee_bps: Decimal, taker_fee_bps: Decimal, slippage_bps: Decimal) -> Self {
-        Self { maker_fee_bps, taker_fee_bps, slippage_bps }
+        Self {
+            maker_fee_bps,
+            taker_fee_bps,
+            slippage_bps,
+        }
     }
 
     pub fn calc_net_spread(&self, gross_spread_bps: Decimal) -> Decimal {
@@ -263,9 +267,15 @@ impl TickValidator for AgeValidator {
     fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String> {
         let age_ms = now_ts - tick.timestamp;
         if age_ms > self.max_age_ms {
-            Err(format!("Tick age {}ms exceeds max {}ms", age_ms, self.max_age_ms))
+            Err(format!(
+                "Tick age {}ms exceeds max {}ms",
+                age_ms, self.max_age_ms
+            ))
         } else if age_ms < 0 {
-            Err(format!("Tick timestamp {} is in the future (now: {})", tick.timestamp, now_ts))
+            Err(format!(
+                "Tick timestamp {} is in the future (now: {})",
+                tick.timestamp, now_ts
+            ))
         } else {
             Ok(())
         }
@@ -307,7 +317,6 @@ impl TickValidator for CompositeValidator {
     }
 }
 
-
 /// Represents an open position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Position {
@@ -341,7 +350,11 @@ impl Spread {
         } else {
             ((future - spot) / spot) * dec!(10000.0)
         };
-        Self { value_bps, spot_price: spot, future_price: future }
+        Self {
+            value_bps,
+            spot_price: spot,
+            future_price: future,
+        }
     }
 }
 
@@ -351,12 +364,8 @@ impl Spread {
 #[async_trait]
 pub trait ExitPolicy: Send + Sync {
     /// Returns true if the position should be exited
-    async fn should_exit(
-        &self,
-        entry_price: Decimal,
-        current_price: Decimal,
-        pnl: Decimal,
-    ) -> bool;
+    async fn should_exit(&self, entry_price: Decimal, current_price: Decimal, pnl: Decimal)
+        -> bool;
 }
 
 /// Exit when minimum profit threshold is met
@@ -381,7 +390,7 @@ impl ExitPolicy for MinimumProfitPolicy {
         if entry_price.is_zero() {
             return false;
         }
-        
+
         let price_change_bps = ((current_price - entry_price) / entry_price) * dec!(10000.0);
         price_change_bps >= self.min_profit_bps
     }
@@ -409,7 +418,7 @@ impl ExitPolicy for StopLossPolicy {
         if entry_price.is_zero() {
             return false;
         }
-        
+
         let price_change_bps = ((current_price - entry_price) / entry_price) * dec!(10000.0);
         price_change_bps.abs() >= self.max_loss_bps && price_change_bps < Decimal::ZERO
     }
@@ -451,7 +460,10 @@ pub struct PnlExitPolicy {
 
 impl PnlExitPolicy {
     pub fn new(min_profit: Decimal, stop_loss: Decimal) -> Self {
-        Self { min_profit, stop_loss }
+        Self {
+            min_profit,
+            stop_loss,
+        }
     }
 }
 
@@ -517,69 +529,71 @@ impl DualLegConfigBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Set the spot symbol (required)
     pub fn spot_symbol(mut self, symbol: impl Into<String>) -> Self {
         self.spot_symbol = Some(symbol.into());
         self
     }
-    
+
     /// Set the future symbol (required)
     pub fn future_symbol(mut self, symbol: impl Into<String>) -> Self {
         self.future_symbol = Some(symbol.into());
         self
     }
-    
+
     /// Set the order size in base currency
     pub fn order_size(mut self, size: Decimal) -> Self {
         self.order_size = size;
         self
     }
-    
+
     /// Set the maximum tick age in milliseconds
     pub fn max_tick_age_ms(mut self, age_ms: i64) -> Self {
         self.max_tick_age_ms = age_ms;
         self
     }
-    
+
     /// Set the execution timeout in milliseconds
     pub fn execution_timeout_ms(mut self, timeout_ms: i64) -> Self {
         self.execution_timeout_ms = timeout_ms;
         self
     }
-    
+
     /// Set the minimum profit threshold for exits
     pub fn min_profit_threshold(mut self, threshold: Decimal) -> Self {
         self.min_profit_threshold = threshold;
         self
     }
-    
+
     /// Set the stop loss threshold (should be negative)
     pub fn stop_loss_threshold(mut self, threshold: Decimal) -> Self {
         self.stop_loss_threshold = threshold;
         self
     }
-    
+
     /// Set the fee tier model
     pub fn fee_tier(mut self, fee_tier: TransactionCostModel) -> Self {
         self.fee_tier = fee_tier;
         self
     }
-    
+
     /// Set the log throttle interval in seconds
     pub fn throttle_interval_secs(mut self, secs: u64) -> Self {
         self.throttle_interval_secs = secs;
         self
     }
-    
+
     /// Build and validate the configuration.
     /// Returns Err if required fields are missing or validation fails.
     pub fn build(self) -> Result<DualLegConfig, String> {
-        let spot_symbol = self.spot_symbol
+        let spot_symbol = self
+            .spot_symbol
             .ok_or_else(|| "spot_symbol is required".to_string())?;
-        let future_symbol = self.future_symbol
+        let future_symbol = self
+            .future_symbol
             .ok_or_else(|| "future_symbol is required".to_string())?;
-        
+
         // Validate required fields
         if spot_symbol.is_empty() {
             return Err("spot_symbol cannot be empty".to_string());
@@ -588,20 +602,32 @@ impl DualLegConfigBuilder {
             return Err("future_symbol cannot be empty".to_string());
         }
         if spot_symbol == future_symbol {
-            return Err(format!("spot_symbol and future_symbol cannot be the same: {}", spot_symbol));
+            return Err(format!(
+                "spot_symbol and future_symbol cannot be the same: {}",
+                spot_symbol
+            ));
         }
-        
+
         // Validate numeric fields
         if self.order_size <= Decimal::ZERO {
-            return Err(format!("order_size must be positive, got: {}", self.order_size));
+            return Err(format!(
+                "order_size must be positive, got: {}",
+                self.order_size
+            ));
         }
         if self.max_tick_age_ms <= 0 {
-            return Err(format!("max_tick_age_ms must be positive, got: {}", self.max_tick_age_ms));
+            return Err(format!(
+                "max_tick_age_ms must be positive, got: {}",
+                self.max_tick_age_ms
+            ));
         }
         if self.execution_timeout_ms <= 0 {
-            return Err(format!("execution_timeout_ms must be positive, got: {}", self.execution_timeout_ms));
+            return Err(format!(
+                "execution_timeout_ms must be positive, got: {}",
+                self.execution_timeout_ms
+            ));
         }
-        
+
         Ok(DualLegConfig {
             spot_symbol,
             future_symbol,
@@ -620,9 +646,24 @@ impl DualLegConfigBuilder {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrategyState {
     Flat,
-    Entering { leg1_qty: Decimal, leg2_qty: Decimal, leg1_entry_price: Decimal, leg2_entry_price: Decimal },
-    InPosition { leg1_qty: Decimal, leg2_qty: Decimal, leg1_entry_price: Decimal, leg2_entry_price: Decimal },
-    Exiting { leg1_qty: Decimal, leg2_qty: Decimal, leg1_entry_price: Decimal, leg2_entry_price: Decimal },
+    Entering {
+        leg1_qty: Decimal,
+        leg2_qty: Decimal,
+        leg1_entry_price: Decimal,
+        leg2_entry_price: Decimal,
+    },
+    InPosition {
+        leg1_qty: Decimal,
+        leg2_qty: Decimal,
+        leg1_entry_price: Decimal,
+        leg2_entry_price: Decimal,
+    },
+    Exiting {
+        leg1_qty: Decimal,
+        leg2_qty: Decimal,
+        leg1_entry_price: Decimal,
+        leg2_entry_price: Decimal,
+    },
     Reconciling, // New State: "I don't know what happened, let me check."
     Halted,      // New State: "Something is broken, human needed."
 }
@@ -659,7 +700,7 @@ pub enum ExecutionResult {
 #[derive(Debug)]
 pub struct ExecutionReport {
     pub result: ExecutionResult,
-    pub action: Signal, // Buy (Entry) or Sell (Exit)
+    pub action: Signal,             // Buy (Entry) or Sell (Exit)
     pub pnl_delta: Option<Decimal>, // PnL change from this execution (for exits)
 }
 
@@ -694,7 +735,7 @@ pub trait Executor: Send + Sync {
         quantity: Decimal,
         price: Option<Decimal>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    
+
     /// Gets the current position for a symbol.
     /// Returns the quantity held (positive for long, negative for short, zero for no position).
     async fn get_position(
@@ -713,7 +754,11 @@ pub struct BasisManager {
 }
 
 impl BasisManager {
-    pub fn new(entry_threshold_bps: Decimal, exit_threshold_bps: Decimal, cost_model: TransactionCostModel) -> Self {
+    pub fn new(
+        entry_threshold_bps: Decimal,
+        exit_threshold_bps: Decimal,
+        cost_model: TransactionCostModel,
+    ) -> Self {
         Self {
             entry_threshold_bps,
             exit_threshold_bps,
@@ -728,8 +773,11 @@ impl EntryStrategy for BasisManager {
     async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal {
         let spread = Spread::new(leg1.price, leg2.price);
         let net_spread = self.cost_model.calc_net_spread(spread.value_bps);
-        debug!("Basis Spread: {:.4} bps (Net: {:.4}) (Spot: {}, Future: {})", spread.value_bps, net_spread, spread.spot_price, spread.future_price);
-        
+        debug!(
+            "Basis Spread: {:.4} bps (Net: {:.4}) (Spot: {}, Future: {})",
+            spread.value_bps, net_spread, spread.spot_price, spread.future_price
+        );
+
         if net_spread > self.entry_threshold_bps {
             Signal::Buy
         } else if spread.value_bps < self.exit_threshold_bps {
@@ -764,12 +812,14 @@ impl PairsManager {
             precision_warnings: std::sync::atomic::AtomicU64::new(0),
         }
     }
-    
+
     /// CF3 FIX: Get precision monitoring metrics
     pub fn get_precision_metrics(&self) -> (u64, u64) {
         (
-            self.precision_rejections.load(std::sync::atomic::Ordering::Relaxed),
-            self.precision_warnings.load(std::sync::atomic::Ordering::Relaxed),
+            self.precision_rejections
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.precision_warnings
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 }
@@ -796,42 +846,54 @@ impl EntryStrategy for PairsManager {
         let (p1, p2) = match (p1_opt, p2_opt) {
             (Some(v1), Some(v2)) if v1 > 0.0 && v2 > 0.0 => {
                 if v1.is_infinite() || v1.is_nan() || v2.is_infinite() || v2.is_nan() {
-                    warn!("PRECISION WARNING: Infinite or NaN prices detected. P1: {}, P2: {}", v1, v2);
+                    warn!(
+                        "PRECISION WARNING: Infinite or NaN prices detected. P1: {}, P2: {}",
+                        v1, v2
+                    );
                     return Signal::Hold;
                 }
-                
+
                 // CF3 FIX: Enforce hard limits on price ratios to prevent precision loss
                 let ratio = v1 / v2;
                 if ratio > MAX_SAFE_PRICE_RATIO || ratio < MIN_SAFE_PRICE_RATIO {
                     // CF3 MONITORING: Increment rejection counter
-                    let count = self.precision_rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let count = self
+                        .precision_rejections
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
                     error!(
                         "PRECISION ERROR: Price ratio {:.2e} exceeds safe f64 bounds [{:.2e}, {:.2e}]. Rejecting signal to prevent precision loss. (Total rejections: {})",
                         ratio, MIN_SAFE_PRICE_RATIO, MAX_SAFE_PRICE_RATIO, count
                     );
                     return Signal::Hold; // Hard rejection - do not trade on degraded precision
                 }
-                
+
                 // Log warning for ratios approaching the limit (within 2 orders of magnitude)
                 if ratio > MAX_SAFE_PRICE_RATIO / 100.0 || ratio < MIN_SAFE_PRICE_RATIO * 100.0 {
                     // CF3 MONITORING: Increment warning counter
-                    let count = self.precision_warnings.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let count = self
+                        .precision_warnings
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
                     warn!(
                         "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation. (Total warnings: {})",
                         ratio, count
                     );
                 }
-                
+
                 (v1, v2)
-            },
+            }
             _ => {
-                warn!("Invalid prices for Pairs analysis: {:?}, {:?}", leg1.price, leg2.price);
+                warn!(
+                    "Invalid prices for Pairs analysis: {:?}, {:?}",
+                    leg1.price, leg2.price
+                );
                 return Signal::Hold;
             }
         };
 
         let spread = p1.ln() - p2.ln();
-        
+
         let z_score = {
             let mut history = self.spread_history.lock().await;
             history.push_back(spread);
@@ -847,10 +909,14 @@ impl EntryStrategy for PairsManager {
             let sum: f64 = history.iter().sum();
             let mean = sum / n;
 
-            let variance: f64 = history.iter().map(|val| {
-                let diff = mean - val;
-                diff * diff
-            }).sum::<f64>() / n;
+            let variance: f64 = history
+                .iter()
+                .map(|val| {
+                    let diff = mean - val;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / n;
 
             let std_dev = variance.sqrt();
 
@@ -895,7 +961,11 @@ pub struct RiskMonitor {
 }
 
 impl RiskMonitor {
-    pub fn new(max_leverage: Decimal, instrument_type: InstrumentType, hedge_mode: HedgeMode) -> Self {
+    pub fn new(
+        max_leverage: Decimal,
+        instrument_type: InstrumentType,
+        hedge_mode: HedgeMode,
+    ) -> Self {
         Self {
             _max_leverage: max_leverage,
             hedge_mode,
@@ -903,28 +973,37 @@ impl RiskMonitor {
         }
     }
 
-    pub fn calc_hedge_ratio(&self, leg1_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<Decimal, DualLegError> {
+    pub fn calc_hedge_ratio(
+        &self,
+        leg1_qty: Decimal,
+        leg1_price: Decimal,
+        leg2_price: Decimal,
+    ) -> Result<Decimal, DualLegError> {
         if leg1_qty <= Decimal::zero() {
-            return Err(DualLegError::InvalidInput("Leg 1 quantity must be positive".to_string()));
+            return Err(DualLegError::InvalidInput(
+                "Leg 1 quantity must be positive".to_string(),
+            ));
         }
 
         match self.hedge_mode {
-            HedgeMode::DeltaNeutral => {
-                match self.instrument_type {
-                    InstrumentType::Linear => Ok(leg1_qty),
-                    InstrumentType::Inverse => {
-                        if leg2_price.is_zero() {
-                            return Err(DualLegError::MathError("Leg 2 price cannot be zero for inverse calculation".to_string()));
-                        }
-                        Ok(leg1_qty * leg2_price)
+            HedgeMode::DeltaNeutral => match self.instrument_type {
+                InstrumentType::Linear => Ok(leg1_qty),
+                InstrumentType::Inverse => {
+                    if leg2_price.is_zero() {
+                        return Err(DualLegError::MathError(
+                            "Leg 2 price cannot be zero for inverse calculation".to_string(),
+                        ));
                     }
+                    Ok(leg1_qty * leg2_price)
                 }
             },
             HedgeMode::DollarNeutral => {
                 // Qty1 * Price1 = Qty2 * Price2
                 // Qty2 = (Qty1 * Price1) / Price2
                 if leg2_price.is_zero() {
-                    return Err(DualLegError::MathError("Leg 2 price cannot be zero for dollar neutral calculation".to_string()));
+                    return Err(DualLegError::MathError(
+                        "Leg 2 price cannot be zero for dollar neutral calculation".to_string(),
+                    ));
                 }
                 Ok((leg1_qty * leg1_price) / leg2_price)
             }
@@ -936,9 +1015,9 @@ impl RiskMonitor {
 // AS3: Priority system for recovery tasks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskPriority {
-    Critical = 0,  // Kill switches (highest priority)
-    High = 1,      // Large positions
-    Normal = 2,    // Regular retries
+    Critical = 0, // Kill switches (highest priority)
+    High = 1,     // Large positions
+    Normal = 2,   // Regular retries
 }
 
 // N2: Named constant instead of magic number
@@ -952,9 +1031,13 @@ pub struct RecoveryWorker {
 }
 
 impl RecoveryWorker {
-    pub fn new(client: Arc<dyn Executor>, rx: mpsc::Receiver<RecoveryTask>, feedback_tx: mpsc::Sender<RecoveryResult>) -> Self {
-        Self { 
-            client, 
+    pub fn new(
+        client: Arc<dyn Executor>,
+        rx: mpsc::Receiver<RecoveryTask>,
+        feedback_tx: mpsc::Sender<RecoveryResult>,
+    ) -> Self {
+        Self {
+            client,
             rx,
             feedback_tx,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_RECOVERIES)), // Limit to 5 concurrent recoveries
@@ -967,7 +1050,7 @@ impl RecoveryWorker {
         while let Some(mut task) = self.rx.recv().await {
             let client = self.client.clone();
             let feedback_tx = self.feedback_tx.clone();
-            
+
             // CF2 FIX: Use blocking acquire with graceful error handling instead of expect()
             // This applies backpressure when recovery queue is full, ensuring no orphaned positions
             let permit = match self.semaphore.clone().acquire_owned().await {
@@ -975,49 +1058,67 @@ impl RecoveryWorker {
                 Err(e) => {
                     // Semaphore closed - this should never happen, but handle gracefully
                     error!("CRITICAL: Semaphore acquisition failed for recovery task {}: {}. Skipping task - MANUAL INTERVENTION REQUIRED.", task.symbol, e);
-                    let _ = self.feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
+                    let _ = self
+                        .feedback_tx
+                        .send(RecoveryResult::Failed(task.symbol.clone()))
+                        .await;
                     continue;
                 }
             };
-            
-            info!("Recovery task acquired permit for {}", task.symbol);
-            
-                tokio::spawn(async move {
-                    // Permit is held until dropped at end of scope
-                    let _permit = permit;
-                    let mut task_throttler = LogThrottle::new(Duration::from_secs(5));
-                    
-                    info!("Processing Recovery Task: {:?}", task);
-                    let mut backoff = Duration::from_secs(2);
 
-                    loop {
-                        task.attempts += 1;
-                        // Recovery uses Market orders (None price)
-                        match client.execute_order(&task.symbol, task.action, task.quantity, None).await {
-                            Ok(_) => {
-                                info!("Recovery Successful for {} on attempt {}", task.symbol, task.attempts);
-                                let _ = feedback_tx.send(RecoveryResult::Success(task.symbol.clone())).await;
-                                break;
-                            },
-                            Err(e) => {
-                                if task_throttler.should_log() {
-                                     let suppressed = task_throttler.get_and_reset_suppressed_count();
-                                     error!("Recovery Failed for {} (Attempt {}): {} (Suppressed: {})", task.symbol, task.attempts, e, suppressed);
-                                }
-                                
-                                if task.attempts >= 5 {
-                                    error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
-                                    let _ = feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
-                                    break;
-                                }
-                                tokio::time::sleep(backoff).await;
-                                backoff = std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
+            info!("Recovery task acquired permit for {}", task.symbol);
+
+            tokio::spawn(async move {
+                // Permit is held until dropped at end of scope
+                let _permit = permit;
+                let mut task_throttler = LogThrottle::new(Duration::from_secs(5));
+
+                info!("Processing Recovery Task: {:?}", task);
+                let mut backoff = Duration::from_secs(2);
+
+                loop {
+                    task.attempts += 1;
+                    // Recovery uses Market orders (None price)
+                    match client
+                        .execute_order(&task.symbol, task.action, task.quantity, None)
+                        .await
+                    {
+                        Ok(_) => {
+                            info!(
+                                "Recovery Successful for {} on attempt {}",
+                                task.symbol, task.attempts
+                            );
+                            let _ = feedback_tx
+                                .send(RecoveryResult::Success(task.symbol.clone()))
+                                .await;
+                            break;
+                        }
+                        Err(e) => {
+                            if task_throttler.should_log() {
+                                let suppressed = task_throttler.get_and_reset_suppressed_count();
+                                error!(
+                                    "Recovery Failed for {} (Attempt {}): {} (Suppressed: {})",
+                                    task.symbol, task.attempts, e, suppressed
+                                );
                             }
+
+                            if task.attempts >= 5 {
+                                error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
+                                let _ = feedback_tx
+                                    .send(RecoveryResult::Failed(task.symbol.clone()))
+                                    .await;
+                                break;
+                            }
+                            tokio::time::sleep(backoff).await;
+                            backoff = std::cmp::min(
+                                backoff * 2,
+                                Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS),
+                            );
                         }
                     }
-                });
+                }
+            });
             // End of successful permit block
-
         }
     }
 }
@@ -1034,11 +1135,19 @@ pub struct ExecutionEngine {
 
 impl ExecutionEngine {
     /// Creates a new ExecutionEngine with the specified executor, recovery channel, and circuit breaker settings.
-    pub fn new(client: Arc<dyn Executor>, recovery_tx: mpsc::Sender<RecoveryTask>, failure_threshold: u32, timeout_secs: u64) -> Self {
-        Self { 
-            client, 
+    pub fn new(
+        client: Arc<dyn Executor>,
+        recovery_tx: mpsc::Sender<RecoveryTask>,
+        failure_threshold: u32,
+        timeout_secs: u64,
+    ) -> Self {
+        Self {
+            client,
             recovery_tx,
-            circuit_breaker: CircuitBreaker::new(failure_threshold, Duration::from_secs(timeout_secs)),
+            circuit_breaker: CircuitBreaker::new(
+                failure_threshold,
+                Duration::from_secs(timeout_secs),
+            ),
         }
     }
 
@@ -1055,11 +1164,15 @@ impl ExecutionEngine {
     ) -> Result<ExecutionResult, ExecutionError> {
         error!(
             "CRITICAL: {} failed. {} leg succeeded, queuing kill switch on {}.",
-            context, 
-            if recovery_action == OrderSide::Buy { "Spot" } else { "Future" },
+            context,
+            if recovery_action == OrderSide::Buy {
+                "Spot"
+            } else {
+                "Future"
+            },
             successful_leg_symbol
         );
-        
+
         let task = RecoveryTask {
             symbol: successful_leg_symbol.to_string(),
             action: recovery_action,
@@ -1067,20 +1180,23 @@ impl ExecutionEngine {
             reason: format!("{}: {}", context, failed_result),
             attempts: 0,
         };
-        
+
         if let Err(send_err) = self.recovery_tx.send(task).await {
-            error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
+            error!(
+                "EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}",
+                send_err
+            );
             self.circuit_breaker.record_failure().await;
             return Err(ExecutionError::CriticalFailure(format!(
                 "Recovery queue failure - {} kill switch failed: {}",
                 context, send_err
             )));
         }
-        
+
         self.circuit_breaker.record_failure().await;
         Ok(ExecutionResult::PartialFailure(failed_result))
     }
-    
+
     /// Refactor Challenge: DRY helper for queuing exit retry recovery tasks.
     async fn queue_exit_retry(
         &self,
@@ -1091,7 +1207,7 @@ impl ExecutionEngine {
         leg_name: &str,
     ) -> Result<(), ExecutionError> {
         error!("Exit {} failed: {}. Queuing retry.", leg_name, error);
-        
+
         let task = RecoveryTask {
             symbol: symbol.to_string(),
             action,
@@ -1099,31 +1215,53 @@ impl ExecutionEngine {
             reason: format!("Exit {} failed: {}", leg_name, error),
             attempts: 0,
         };
-        
+
         if let Err(send_err) = self.recovery_tx.send(task).await {
-            error!("EMERGENCY: Failed to queue exit {} recovery task! Error: {}", leg_name, send_err);
+            error!(
+                "EMERGENCY: Failed to queue exit {} recovery task! Error: {}",
+                leg_name, send_err
+            );
             return Err(ExecutionError::CriticalFailure(format!(
                 "Recovery queue failure - exit {} retry failed: {}",
                 leg_name, send_err
             )));
         }
-        
+
         Ok(())
     }
 
     #[instrument(skip(self))]
-    pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
+    pub async fn execute_basis_entry(
+        &self,
+        pair: &InstrumentPair,
+        quantity: Decimal,
+        hedge_qty: Decimal,
+        leg1_price: Decimal,
+        leg2_price: Decimal,
+    ) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
         if self.circuit_breaker.is_open().await {
-            return Err(ExecutionError::CircuitBreakerOpen("Circuit breaker is OPEN due to recent failures".to_string()));
+            return Err(ExecutionError::CircuitBreakerOpen(
+                "Circuit breaker is OPEN due to recent failures".to_string(),
+            ));
         }
 
         // Concurrently execute both legs to minimize leg risk
-        let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Buy, quantity, Some(leg1_price));
-        let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Sell, hedge_qty, Some(leg2_price));
+        let spot_leg = self.client.execute_order(
+            &pair.spot_symbol,
+            OrderSide::Buy,
+            quantity,
+            Some(leg1_price),
+        );
+        let future_leg = self.client.execute_order(
+            &pair.future_symbol,
+            OrderSide::Sell,
+            hedge_qty,
+            Some(leg2_price),
+        );
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
-        
+
         // Convert errors to ExecutionError
         let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
@@ -1131,14 +1269,30 @@ impl ExecutionEngine {
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
             if future_res.is_ok() {
-                return self.queue_kill_switch(e, &pair.future_symbol, OrderSide::Buy, hedge_qty, "Spot entry").await;
+                return self
+                    .queue_kill_switch(
+                        e,
+                        &pair.future_symbol,
+                        OrderSide::Buy,
+                        hedge_qty,
+                        "Spot entry",
+                    )
+                    .await;
             }
             self.circuit_breaker.record_failure().await;
             return Ok(ExecutionResult::TotalFailure(e));
         }
 
         if let Err(e) = future_res {
-            return self.queue_kill_switch(e, &pair.spot_symbol, OrderSide::Sell, quantity, "Future entry").await;
+            return self
+                .queue_kill_switch(
+                    e,
+                    &pair.spot_symbol,
+                    OrderSide::Sell,
+                    quantity,
+                    "Future entry",
+                )
+                .await;
         }
 
         self.circuit_breaker.record_success().await;
@@ -1147,32 +1301,67 @@ impl ExecutionEngine {
 
     /// CF1 FIX: Execute Short Entry (Sell Spot, Buy Future)
     #[instrument(skip(self))]
-    pub async fn execute_basis_short_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
+    pub async fn execute_basis_short_entry(
+        &self,
+        pair: &InstrumentPair,
+        quantity: Decimal,
+        hedge_qty: Decimal,
+        leg1_price: Decimal,
+        leg2_price: Decimal,
+    ) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
         if self.circuit_breaker.is_open().await {
-            return Err(ExecutionError::CircuitBreakerOpen("Circuit breaker is OPEN due to recent failures".to_string()));
+            return Err(ExecutionError::CircuitBreakerOpen(
+                "Circuit breaker is OPEN due to recent failures".to_string(),
+            ));
         }
 
         // Short Entry: Sell Spot, Buy Future
-        let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Sell, quantity, Some(leg1_price));
-        let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Buy, hedge_qty, Some(leg2_price));
+        let spot_leg = self.client.execute_order(
+            &pair.spot_symbol,
+            OrderSide::Sell,
+            quantity,
+            Some(leg1_price),
+        );
+        let future_leg = self.client.execute_order(
+            &pair.future_symbol,
+            OrderSide::Buy,
+            hedge_qty,
+            Some(leg2_price),
+        );
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
-        
+
         let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
             if future_res.is_ok() {
-                return self.queue_kill_switch(e, &pair.future_symbol, OrderSide::Sell, hedge_qty, "Spot short entry").await;
+                return self
+                    .queue_kill_switch(
+                        e,
+                        &pair.future_symbol,
+                        OrderSide::Sell,
+                        hedge_qty,
+                        "Spot short entry",
+                    )
+                    .await;
             }
             self.circuit_breaker.record_failure().await;
             return Ok(ExecutionResult::TotalFailure(e));
         }
 
         if let Err(e) = future_res {
-            return self.queue_kill_switch(e, &pair.spot_symbol, OrderSide::Buy, quantity, "Future short entry").await;
+            return self
+                .queue_kill_switch(
+                    e,
+                    &pair.spot_symbol,
+                    OrderSide::Buy,
+                    quantity,
+                    "Future short entry",
+                )
+                .await;
         }
 
         self.circuit_breaker.record_success().await;
@@ -1180,46 +1369,78 @@ impl ExecutionEngine {
     }
 
     #[instrument(skip(self))]
-    pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
+    pub async fn execute_basis_exit(
+        &self,
+        pair: &InstrumentPair,
+        quantity: Decimal,
+        hedge_qty: Decimal,
+        leg1_price: Decimal,
+        leg2_price: Decimal,
+    ) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
         if self.circuit_breaker.is_open().await {
-            return Err(ExecutionError::CircuitBreakerOpen("Circuit breaker is OPEN due to recent failures".to_string()));
+            return Err(ExecutionError::CircuitBreakerOpen(
+                "Circuit breaker is OPEN due to recent failures".to_string(),
+            ));
         }
 
         // Reverse of entry: Sell Spot, Buy Future
-        let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Sell, quantity, Some(leg1_price));
-        let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Buy, hedge_qty, Some(leg2_price));
+        let spot_leg = self.client.execute_order(
+            &pair.spot_symbol,
+            OrderSide::Sell,
+            quantity,
+            Some(leg1_price),
+        );
+        let future_leg = self.client.execute_order(
+            &pair.future_symbol,
+            OrderSide::Buy,
+            hedge_qty,
+            Some(leg2_price),
+        );
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
-        
+
         let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
         if spot_res.is_err() && future_res.is_err() {
             self.circuit_breaker.record_failure().await;
-            return Ok(ExecutionResult::TotalFailure(ExecutionError::ExchangeError(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err()))));
+            return Ok(ExecutionResult::TotalFailure(
+                ExecutionError::ExchangeError(format!(
+                    "Both legs failed to exit. Spot: {:?}, Future: {:?}",
+                    spot_res.err(),
+                    future_res.err()
+                )),
+            ));
         }
 
         // For exit, failures require retrying the same action (not reversal)
         if spot_res.is_err() || future_res.is_err() {
             if let Err(e) = spot_res {
-                self.queue_exit_retry(&pair.spot_symbol, OrderSide::Sell, quantity, e, "Spot").await?;
+                self.queue_exit_retry(&pair.spot_symbol, OrderSide::Sell, quantity, e, "Spot")
+                    .await?;
             }
-            
+
             if let Err(e) = future_res {
-                self.queue_exit_retry(&pair.future_symbol, OrderSide::Buy, hedge_qty, e, "Future").await?;
+                self.queue_exit_retry(&pair.future_symbol, OrderSide::Buy, hedge_qty, e, "Future")
+                    .await?;
             }
 
             self.circuit_breaker.record_failure().await;
-            return Ok(ExecutionResult::PartialFailure(ExecutionError::ExchangeError("Partial Exit Failure".to_string())));
+            return Ok(ExecutionResult::PartialFailure(
+                ExecutionError::ExchangeError("Partial Exit Failure".to_string()),
+            ));
         }
 
         self.circuit_breaker.record_success().await;
         Ok(ExecutionResult::Success)
     }
-    
+
     /// Query current position from exchange (for state reconciliation)
-    pub async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_position(
+        &self,
+        symbol: &str,
+    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
         self.client.get_position(symbol).await
     }
 }
@@ -1259,11 +1480,11 @@ impl DualLegStrategy {
     ) -> Self {
         let (report_tx, report_rx) = mpsc::channel(100);
         let now = clock.now_ts_millis();
-        let pair = InstrumentPair { 
-            spot_symbol: config.spot_symbol.clone(), 
-            future_symbol: config.future_symbol.clone() 
+        let pair = InstrumentPair {
+            spot_symbol: config.spot_symbol.clone(),
+            future_symbol: config.future_symbol.clone(),
         };
-        
+
         // AS2: Create default validator (age + price validation)
         let validator = Box::new(CompositeValidator::new(vec![
             Box::new(AgeValidator::new(config.max_tick_age_ms)),
@@ -1273,9 +1494,9 @@ impl DualLegStrategy {
         // AS9: Create default exit policy (Pnl Based)
         let exit_policy = Box::new(PnlExitPolicy::new(
             config.min_profit_threshold,
-            config.stop_loss_threshold
+            config.stop_loss_threshold,
         ));
-        
+
         Self {
             entry_manager,
             risk_monitor,
@@ -1290,7 +1511,7 @@ impl DualLegStrategy {
             throttler: DualLegLogThrottler::new(config.throttle_interval_secs),
             state_notifier: None,
             config,
-            validator, // AS2
+            validator,   // AS2
             exit_policy, // AS9
         }
     }
@@ -1304,30 +1525,36 @@ impl DualLegStrategy {
             info!("State Transition: {:?} -> {:?}", self.state, new_state);
             self.state = new_state.clone();
             self.last_state_change_ts = self.clock.now_ts_millis();
-            
+
             if let Some(tx) = &self.state_notifier {
                 if let Err(e) = tx.try_send(new_state) {
-                     warn!("State update dropped due to backpressure: {}", e);
+                    warn!("State update dropped due to backpressure: {}", e);
                 }
             }
         }
     }
-    
+
     /// STATE AMNESIA FIX: Reconcile strategy state with actual exchange positions.
     /// Queries exchange for current holdings and updates state accordingly.
     /// Should be called at the start of run() before processing any ticks.
     async fn reconcile_state(&mut self) {
         info!("Reconciling state with exchange positions...");
-        
+
         // Query positions for both legs
-        let leg1_pos = self.execution_engine.get_position(&self.pair.spot_symbol).await;
-        let leg2_pos = self.execution_engine.get_position(&self.pair.future_symbol).await;
-        
+        let leg1_pos = self
+            .execution_engine
+            .get_position(&self.pair.spot_symbol)
+            .await;
+        let leg2_pos = self
+            .execution_engine
+            .get_position(&self.pair.future_symbol)
+            .await;
+
         match (leg1_pos, leg2_pos) {
             (Ok(leg1_qty), Ok(leg2_qty)) => {
                 // Threshold for considering a position "open" (to handle dust)
                 let threshold = dec!(0.00001);
-                
+
                 if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
                     // We have an open position - transition to InPosition
                     // Use Decimal::ZERO for entry price since exact history is unavailable
@@ -1342,7 +1569,7 @@ impl DualLegStrategy {
                         leg2_entry_price: Decimal::ZERO,
                     };
                     self.last_state_change_ts = self.clock.now_ts_millis();
-                    
+
                     warn!("NOTICE: Entry prices set to 0 due to state recovery. PnL calculations will be inaccurate until position is closed.");
                 } else {
                     info!("No existing positions detected. Starting in Flat state.");
@@ -1362,9 +1589,16 @@ impl DualLegStrategy {
 
     /// Runs the strategy loop.
     #[instrument(skip(self, leg1_rx, leg2_rx), name = "strategy_loop")]
-    pub async fn run(&mut self, mut leg1_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>, mut leg2_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>) {
-        info!("Starting Dual-Leg Strategy for {}/{}", self.pair.spot_symbol, self.pair.future_symbol);
-        
+    pub async fn run(
+        &mut self,
+        mut leg1_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>,
+        mut leg2_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>,
+    ) {
+        info!(
+            "Starting Dual-Leg Strategy for {}/{}",
+            self.pair.spot_symbol, self.pair.future_symbol
+        );
+
         // STATE AMNESIA FIX: Reconcile position state before processing any ticks
         self.reconcile_state().await;
 
@@ -1411,29 +1645,54 @@ impl DualLegStrategy {
                 match report.action {
                     Signal::Buy => {
                         info!("Entry Successful. Transitioning to InPosition.");
-                        if let StrategyState::Entering { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
-                             self.transition_state(StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
+                        if let StrategyState::Entering {
+                            leg1_qty,
+                            leg2_qty,
+                            leg1_entry_price,
+                            leg2_entry_price,
+                        } = self.state
+                        {
+                            self.transition_state(StrategyState::InPosition {
+                                leg1_qty,
+                                leg2_qty,
+                                leg1_entry_price,
+                                leg2_entry_price,
+                            });
                         } else {
-                            error!("Received Entry Success but state is not Entering! State: {:?}", self.state);
+                            error!(
+                                "Received Entry Success but state is not Entering! State: {:?}",
+                                self.state
+                            );
                         }
-                    },
+                    }
                     Signal::Sell => {
                         // CF1 FIX: Short Entry Successful
                         info!("Short Entry Successful. Transitioning to InPosition.");
-                        if let StrategyState::Entering { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
-                             self.transition_state(StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
+                        if let StrategyState::Entering {
+                            leg1_qty,
+                            leg2_qty,
+                            leg1_entry_price,
+                            leg2_entry_price,
+                        } = self.state
+                        {
+                            self.transition_state(StrategyState::InPosition {
+                                leg1_qty,
+                                leg2_qty,
+                                leg1_entry_price,
+                                leg2_entry_price,
+                            });
                         } else {
                             error!("Received Short Entry Success but state is not Entering! State: {:?}", self.state);
                         }
-                    },
+                    }
                     Signal::Exit => {
                         // CF2 FIX: Exit Successful
                         info!("Exit Successful. Transitioning to Flat.");
                         self.transition_state(StrategyState::Flat);
-                    },
+                    }
                     _ => {}
                 }
-            },
+            }
             ExecutionResult::TotalFailure(reason) => {
                 error!("Execution Failed completely: {}. Reverting state.", reason);
                 if let ExecutionError::CriticalFailure(_) = reason {
@@ -1443,42 +1702,73 @@ impl DualLegStrategy {
                 }
                 match report.action {
                     Signal::Buy => {
-                         if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
-                             error!("Ambiguous Entry Failure ({:?}). Transitioning to Reconciling.", reason);
-                             self.transition_state(StrategyState::Reconciling);
-                         } else {
-                             self.transition_state(StrategyState::Flat);
-                         }
-                    },
+                        if matches!(
+                            reason,
+                            ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)
+                        ) {
+                            error!(
+                                "Ambiguous Entry Failure ({:?}). Transitioning to Reconciling.",
+                                reason
+                            );
+                            self.transition_state(StrategyState::Reconciling);
+                        } else {
+                            self.transition_state(StrategyState::Flat);
+                        }
+                    }
                     Signal::Sell => {
-                         // CF1 FIX: Short Entry Failure
-                         if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
-                             error!("Ambiguous Short Entry Failure ({:?}). Transitioning to Reconciling.", reason);
-                             self.transition_state(StrategyState::Reconciling);
-                         } else {
-                             self.transition_state(StrategyState::Flat);
-                         }
-                    },
+                        // CF1 FIX: Short Entry Failure
+                        if matches!(
+                            reason,
+                            ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)
+                        ) {
+                            error!("Ambiguous Short Entry Failure ({:?}). Transitioning to Reconciling.", reason);
+                            self.transition_state(StrategyState::Reconciling);
+                        } else {
+                            self.transition_state(StrategyState::Flat);
+                        }
+                    }
                     Signal::Exit => {
-                         // CF2 FIX: Exit Failure
-                         if matches!(reason, ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)) {
-                             error!("Ambiguous Exit Failure ({:?}). Transitioning to Reconciling.", reason);
-                             self.transition_state(StrategyState::Reconciling);
-                         } else {
-                             if let StrategyState::Exiting { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
-                                 info!("Exit rejected/failed definitively. Reverting to InPosition.");
-                                 self.transition_state(StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
-                             } else {
-                                 error!("CRITICAL: State mismatch! Expected Exiting but found {:?}. Transitioning to Reconciling.", self.state);
-                                 self.transition_state(StrategyState::Reconciling); 
-                             }
-                         }
-                    },
+                        // CF2 FIX: Exit Failure
+                        if matches!(
+                            reason,
+                            ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)
+                        ) {
+                            error!(
+                                "Ambiguous Exit Failure ({:?}). Transitioning to Reconciling.",
+                                reason
+                            );
+                            self.transition_state(StrategyState::Reconciling);
+                        } else {
+                            if let StrategyState::Exiting {
+                                leg1_qty,
+                                leg2_qty,
+                                leg1_entry_price,
+                                leg2_entry_price,
+                            } = self.state
+                            {
+                                info!(
+                                    "Exit rejected/failed definitively. Reverting to InPosition."
+                                );
+                                self.transition_state(StrategyState::InPosition {
+                                    leg1_qty,
+                                    leg2_qty,
+                                    leg1_entry_price,
+                                    leg2_entry_price,
+                                });
+                            } else {
+                                error!("CRITICAL: State mismatch! Expected Exiting but found {:?}. Transitioning to Reconciling.", self.state);
+                                self.transition_state(StrategyState::Reconciling);
+                            }
+                        }
+                    }
                     _ => {}
                 }
-            },
+            }
             ExecutionResult::PartialFailure(reason) => {
-                error!("CRITICAL: Partial Execution Failure: {}. Transitioning to Reconciling.", reason);
+                error!(
+                    "CRITICAL: Partial Execution Failure: {}. Transitioning to Reconciling.",
+                    reason
+                );
                 self.transition_state(StrategyState::Reconciling);
             }
         }
@@ -1488,12 +1778,15 @@ impl DualLegStrategy {
         info!("Received Recovery Result: {:?}", result);
         match result {
             RecoveryResult::Success(symbol) => {
-                info!("Recovery successful for {}. Attempting to resolve state.", symbol);
+                info!(
+                    "Recovery successful for {}. Attempting to resolve state.",
+                    symbol
+                );
                 if self.state == StrategyState::Reconciling {
                     info!("Recovery complete. Transitioning to Flat.");
                     self.transition_state(StrategyState::Flat);
                 }
-            },
+            }
             RecoveryResult::Failed(symbol) => {
                 error!("Recovery FAILED for {}. Transitioning to Halted.", symbol);
                 self.transition_state(StrategyState::Halted);
@@ -1502,7 +1795,10 @@ impl DualLegStrategy {
     }
 
     fn check_timeout(&mut self) {
-        if matches!(self.state, StrategyState::Entering { .. } | StrategyState::Exiting { .. }) {
+        if matches!(
+            self.state,
+            StrategyState::Entering { .. } | StrategyState::Exiting { .. }
+        ) {
             let now = self.clock.now_ts_millis();
             if now - self.last_state_change_ts > self.config.execution_timeout_ms {
                 error!("CRITICAL: Execution Timeout in state {:?}! No report received for {}ms. Transitioning to Reconciling.", self.state, self.config.execution_timeout_ms);
@@ -1520,27 +1816,42 @@ impl DualLegStrategy {
     /// Processes a single tick of matched Leg 1 and Leg 2 data.
     #[instrument(skip(self, leg1, leg2), fields(leg1_price = %leg1.price, leg2_price = %leg2.price))]
     async fn process_tick(&mut self, leg1: &MarketData, leg2: &MarketData) {
-        if matches!(self.state, StrategyState::Reconciling | StrategyState::Halted) {
+        if matches!(
+            self.state,
+            StrategyState::Reconciling | StrategyState::Halted
+        ) {
             if self.throttler.unstable_state.should_log() {
-                let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
-                warn!("Dropping tick due to unstable state: {:?} (Suppressed: {})", self.state, suppressed);
+                let suppressed = self
+                    .throttler
+                    .unstable_state
+                    .get_and_reset_suppressed_count();
+                warn!(
+                    "Dropping tick due to unstable state: {:?} (Suppressed: {})",
+                    self.state, suppressed
+                );
             }
             return;
         }
         let now = self.clock.now_ts_millis();
-        
+
         if let Err(e) = self.validator.validate(leg1, now) {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
-                warn!("Dropping tick for {}: {} (Suppressed: {})", leg1.symbol, e, suppressed);
+                warn!(
+                    "Dropping tick for {}: {} (Suppressed: {})",
+                    leg1.symbol, e, suppressed
+                );
             }
             return;
         }
-        
+
         if let Err(e) = self.validator.validate(leg2, now) {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
-                warn!("Dropping tick for {}: {} (Suppressed: {})", leg2.symbol, e, suppressed);
+                warn!(
+                    "Dropping tick for {}: {} (Suppressed: {})",
+                    leg2.symbol, e, suppressed
+                );
             }
             return;
         }
@@ -1558,12 +1869,22 @@ impl DualLegStrategy {
 
         match signal {
             Signal::Buy => {
-                if self.state != StrategyState::Flat { return; }
+                if self.state != StrategyState::Flat {
+                    return;
+                }
 
-                let leg1_qty = self.config.order_size; 
-                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
+                let leg1_qty = self.config.order_size;
+                if let Ok(hedge_qty) = self
+                    .risk_monitor
+                    .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
+                {
                     info!("Long Entry Signal! Transitioning to Entering state and spawning execution...");
-                    self.transition_state(StrategyState::Entering { leg1_qty, leg2_qty: hedge_qty, leg1_entry_price: leg1.price, leg2_entry_price: leg2.price });
+                    self.transition_state(StrategyState::Entering {
+                        leg1_qty,
+                        leg2_qty: hedge_qty,
+                        leg1_entry_price: leg1.price,
+                        leg2_entry_price: leg2.price,
+                    });
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
@@ -1572,12 +1893,19 @@ impl DualLegStrategy {
                     let p2 = leg2.price;
 
                     tokio::spawn(async move {
-                        let result = match engine.execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2).await {
+                        let result = match engine
+                            .execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2)
+                            .await
+                        {
                             Ok(res) => res,
                             Err(e) => ExecutionResult::TotalFailure(e),
                         };
-                        let report = ExecutionReport { result, action: Signal::Buy, pnl_delta: None };
-                        
+                        let report = ExecutionReport {
+                            result,
+                            action: Signal::Buy,
+                            pnl_delta: None,
+                        };
+
                         match tx.send(report).await {
                             Ok(_) => debug!("Entry execution report sent successfully"),
                             Err(e) => {
@@ -1586,15 +1914,25 @@ impl DualLegStrategy {
                         }
                     });
                 }
-            },
+            }
             Signal::Sell => {
                 // CF1 FIX: Handle Short Entry (Sell Leg 1, Buy Leg 2)
-                if self.state != StrategyState::Flat { return; }
+                if self.state != StrategyState::Flat {
+                    return;
+                }
 
                 let leg1_qty = self.config.order_size;
-                if let Ok(hedge_qty) = self.risk_monitor.calc_hedge_ratio(leg1_qty, leg1.price, leg2.price) {
+                if let Ok(hedge_qty) = self
+                    .risk_monitor
+                    .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
+                {
                     info!("Short Entry Signal! Transitioning to Entering state and spawning execution...");
-                    self.transition_state(StrategyState::Entering { leg1_qty, leg2_qty: hedge_qty, leg1_entry_price: leg1.price, leg2_entry_price: leg2.price });
+                    self.transition_state(StrategyState::Entering {
+                        leg1_qty,
+                        leg2_qty: hedge_qty,
+                        leg1_entry_price: leg1.price,
+                        leg2_entry_price: leg2.price,
+                    });
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
@@ -1618,16 +1956,23 @@ impl DualLegStrategy {
                         // execute_basis_entry(pair, qty1, qty2, p1, p2) -> Buys Spot, Sells Future.
                         // Short Entry -> Sell Spot, Buy Future.
                         //
-                        // Let's implement `execute_basis_short_entry` in ExecutionEngine later. 
+                        // Let's implement `execute_basis_short_entry` in ExecutionEngine later.
                         // For now, I will assume `execute_basis_short_entry` exists or I will add it.
                         // To avoid compilation error, I must add it to ExecutionEngine.
-                        
-                        let result = match engine.execute_basis_short_entry(&pair, leg1_qty, hedge_qty, p1, p2).await {
+
+                        let result = match engine
+                            .execute_basis_short_entry(&pair, leg1_qty, hedge_qty, p1, p2)
+                            .await
+                        {
                             Ok(res) => res,
                             Err(e) => ExecutionResult::TotalFailure(e),
                         };
-                        let report = ExecutionReport { result, action: Signal::Sell, pnl_delta: None };
-                        
+                        let report = ExecutionReport {
+                            result,
+                            action: Signal::Sell,
+                            pnl_delta: None,
+                        };
+
                         match tx.send(report).await {
                             Ok(_) => debug!("Short Entry execution report sent successfully"),
                             Err(e) => {
@@ -1636,36 +1981,58 @@ impl DualLegStrategy {
                         }
                     });
                 }
-            },
+            }
             Signal::Exit => {
                 // CF2 FIX: Handle Exit Signal (Mean Reversion)
-                if let StrategyState::InPosition { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price } = self.state {
+                if let StrategyState::InPosition {
+                    leg1_qty,
+                    leg2_qty,
+                    leg1_entry_price,
+                    leg2_entry_price,
+                } = self.state
+                {
                     let leg1_pnl = (leg1.price - leg1_entry_price) * leg1_qty;
                     let leg2_pnl = (leg2_entry_price - leg2.price) * leg2_qty;
                     let gross_pnl = leg1_pnl + leg2_pnl;
-                    
-                    let total_volume = (leg1_entry_price * leg1_qty) + (leg2_entry_price * leg2_qty) + (leg1.price * leg1_qty) + (leg2.price * leg2_qty);
+
+                    let total_volume = (leg1_entry_price * leg1_qty)
+                        + (leg2_entry_price * leg2_qty)
+                        + (leg1.price * leg1_qty)
+                        + (leg2.price * leg2_qty);
                     let fee_rate = self.config.fee_tier.taker_fee_bps / dec!(10000.0);
                     let estimated_fees = total_volume * fee_rate;
-                    let slippage_cost = total_volume * (self.config.fee_tier.slippage_bps / dec!(10000.0));
+                    let slippage_cost =
+                        total_volume * (self.config.fee_tier.slippage_bps / dec!(10000.0));
                     let net_pnl = gross_pnl - estimated_fees - slippage_cost;
-                    
-                    if !self.exit_policy.should_exit(Decimal::ZERO, Decimal::ZERO, net_pnl).await {
+
+                    if !self
+                        .exit_policy
+                        .should_exit(Decimal::ZERO, Decimal::ZERO, net_pnl)
+                        .await
+                    {
                         if self.throttler.unstable_state.should_log() {
-                             let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
-                             info!("Holding Position. Signal: Exit, but Exit Policy says HOLD. Net PnL: {:.6} (Suppressed: {})", net_pnl, suppressed);
+                            let suppressed = self
+                                .throttler
+                                .unstable_state
+                                .get_and_reset_suppressed_count();
+                            info!("Holding Position. Signal: Exit, but Exit Policy says HOLD. Net PnL: {:.6} (Suppressed: {})", net_pnl, suppressed);
                         }
                         return;
                     }
 
                     info!("Exit Signal! Net PnL: {:.6} (Gross: {:.6}, Fees: {:.6}, Slippage: {:.6}). Transitioning to Exiting...", net_pnl, gross_pnl, estimated_fees, slippage_cost);
-                    self.transition_state(StrategyState::Exiting { leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price });
+                    self.transition_state(StrategyState::Exiting {
+                        leg1_qty,
+                        leg2_qty,
+                        leg1_entry_price,
+                        leg2_entry_price,
+                    });
 
                     let engine = self.execution_engine.clone();
                     let pair = self.pair.clone();
                     let tx = self.report_tx.clone();
                     let slippage_factor = self.config.fee_tier.slippage_bps / dec!(10000.0);
-                    
+
                     // Determine exit sides based on position type (Long vs Short)
                     // Currently StrategyState doesn't track if we are Long or Short, just quantities.
                     // But we can infer from entry prices? No.
@@ -1688,34 +2055,49 @@ impl DualLegStrategy {
                     //
                     // Let's check `StrategyState` definition.
                     // It's in this file.
-                    
+
                     // For now, I will assume we need to update `StrategyState` to track direction or use signed quantities.
                     // Using signed quantities is elegant.
                     // Long Entry: leg1_qty = +1.0
                     // Short Entry: leg1_qty = -1.0
-                    
+
                     // So in Short Entry block above, I should set `leg1_qty` to `-self.config.order_size`.
-                    
+
                     // Let's update the Short Entry logic to use negative quantity.
-                    
+
                     // And here in Exit logic:
                     // If leg1_qty > 0: Sell L1, Buy L2 (Standard Exit)
                     // If leg1_qty < 0: Buy L1, Sell L2 (Short Exit)
-                    
+
                     let is_long = leg1_qty > Decimal::ZERO;
-                    
-                    let p1_limit = if is_long { leg1.price * (dec!(1.0) - slippage_factor) } else { leg1.price * (dec!(1.0) + slippage_factor) };
-                    let p2_limit = if is_long { leg2.price * (dec!(1.0) + slippage_factor) } else { leg2.price * (dec!(1.0) - slippage_factor) };
-                    
+
+                    let p1_limit = if is_long {
+                        leg1.price * (dec!(1.0) - slippage_factor)
+                    } else {
+                        leg1.price * (dec!(1.0) + slippage_factor)
+                    };
+                    let p2_limit = if is_long {
+                        leg2.price * (dec!(1.0) + slippage_factor)
+                    } else {
+                        leg2.price * (dec!(1.0) - slippage_factor)
+                    };
+
                     debug!("Executing Exit with Limit Prices - Spot: {} (Market: {}), Future: {} (Market: {})", p1_limit, leg1.price, p2_limit, leg2.price);
 
                     tokio::spawn(async move {
-                        let result = match engine.execute_basis_exit(&pair, leg1_qty, leg2_qty, p1_limit, p2_limit).await {
+                        let result = match engine
+                            .execute_basis_exit(&pair, leg1_qty, leg2_qty, p1_limit, p2_limit)
+                            .await
+                        {
                             Ok(res) => res,
                             Err(e) => ExecutionResult::TotalFailure(e),
                         };
-                        let report = ExecutionReport { result, action: Signal::Exit, pnl_delta: None };
-                        
+                        let report = ExecutionReport {
+                            result,
+                            action: Signal::Exit,
+                            pnl_delta: None,
+                        };
+
                         match tx.send(report).await {
                             Ok(_) => debug!("Exit execution report sent successfully"),
                             Err(e) => {
@@ -1724,7 +2106,7 @@ impl DualLegStrategy {
                         }
                     });
                 }
-            },
+            }
             _ => {}
         }
     }
@@ -1732,14 +2114,18 @@ impl DualLegStrategy {
 
 #[async_trait]
 impl Executor for CoinbaseClient {
-    async fn execute_order(&self, symbol: &str, side: OrderSide, quantity: Decimal, price: Option<Decimal>) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.place_order(symbol, &side.to_string(), quantity, price).await
-    }
-    
-    async fn get_position(
+    async fn execute_order(
         &self,
         symbol: &str,
-    ) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
+        side: OrderSide,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.place_order(symbol, &side.to_string(), quantity, price)
+            .await
+    }
+
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
         self.get_position(symbol).await
     }
 }
@@ -1758,8 +2144,8 @@ impl Drop for DualLegStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
     use tokio::sync::Mutex;
+    use tokio::time::Duration;
 
     #[test]
     fn test_log_throttle() {
@@ -1773,39 +2159,69 @@ mod tests {
     async fn test_z_score_calculation() {
         let manager = PairsManager::new(5, 1.9, 0.1);
         for _ in 0..5 {
-             let _ = manager.analyze(
-                &MarketData { symbol: "A".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 },
-                &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
-            ).await;
+            let _ = manager
+                .analyze(
+                    &MarketData {
+                        symbol: "A".into(),
+                        price: dec!(1.0),
+                        instrument_id: None,
+                        timestamp: 0,
+                    },
+                    &MarketData {
+                        symbol: "B".into(),
+                        price: dec!(1.0),
+                        instrument_id: None,
+                        timestamp: 0,
+                    },
+                )
+                .await;
         }
-        
+
         let p1 = Decimal::from_f64((-10.0f64).exp()).unwrap();
-        let signal = manager.analyze(
-            &MarketData { symbol: "A".into(), price: p1, instrument_id: None, timestamp: 0 },
-            &MarketData { symbol: "B".into(), price: dec!(1.0), instrument_id: None, timestamp: 0 }
-        ).await;
-        
+        let signal = manager
+            .analyze(
+                &MarketData {
+                    symbol: "A".into(),
+                    price: p1,
+                    instrument_id: None,
+                    timestamp: 0,
+                },
+                &MarketData {
+                    symbol: "B".into(),
+                    price: dec!(1.0),
+                    instrument_id: None,
+                    timestamp: 0,
+                },
+            )
+            .await;
+
         assert_eq!(signal, Signal::Buy);
     }
 
     #[test]
     fn test_hedge_ratio_dollar_neutral() {
         let monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
-        let ratio = monitor.calc_hedge_ratio(dec!(1.0), dec!(100.0), dec!(50.0)).unwrap();
+        let ratio = monitor
+            .calc_hedge_ratio(dec!(1.0), dec!(100.0), dec!(50.0))
+            .unwrap();
         assert_eq!(ratio, dec!(2.0));
     }
 
     #[test]
     fn test_hedge_ratio_delta_neutral_linear() {
         let monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
-        let ratio = monitor.calc_hedge_ratio(dec!(1.5), dec!(100.0), dec!(50.0)).unwrap();
+        let ratio = monitor
+            .calc_hedge_ratio(dec!(1.5), dec!(100.0), dec!(50.0))
+            .unwrap();
         assert_eq!(ratio, dec!(1.5));
     }
 
     #[test]
     fn test_hedge_ratio_delta_neutral_inverse() {
         let monitor = RiskMonitor::new(dec!(1.0), InstrumentType::Inverse, HedgeMode::DeltaNeutral);
-        let ratio = monitor.calc_hedge_ratio(dec!(1.0), dec!(100.0), dec!(50000.0)).unwrap();
+        let ratio = monitor
+            .calc_hedge_ratio(dec!(1.0), dec!(100.0), dec!(50000.0))
+            .unwrap();
         assert_eq!(ratio, dec!(50000.0));
     }
 
@@ -1813,18 +2229,30 @@ mod tests {
     fn test_net_spread_calculation() {
         let model = TransactionCostModel::new(dec!(10.0), dec!(20.0), dec!(5.0));
         let net = model.calc_net_spread(dec!(100.0));
-        assert_eq!(net, dec!(15.0)); 
+        assert_eq!(net, dec!(15.0));
     }
 
     #[tokio::test]
     async fn test_basis_manager_signals() {
-        let cost_model = TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0)); 
+        let cost_model = TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0));
         let manager = BasisManager::new(dec!(10.0), dec!(2.0), cost_model);
-        
-        let signal = manager.analyze(
-            &MarketData { symbol: "S".into(), price: dec!(100.0), instrument_id: None, timestamp: 0 },
-            &MarketData { symbol: "F".into(), price: dec!(100.2), instrument_id: None, timestamp: 0 }
-        ).await;
+
+        let signal = manager
+            .analyze(
+                &MarketData {
+                    symbol: "S".into(),
+                    price: dec!(100.0),
+                    instrument_id: None,
+                    timestamp: 0,
+                },
+                &MarketData {
+                    symbol: "F".into(),
+                    price: dec!(100.2),
+                    instrument_id: None,
+                    timestamp: 0,
+                },
+            )
+            .await;
         assert_eq!(signal, Signal::Buy);
     }
 
@@ -1833,7 +2261,7 @@ mod tests {
         call_count: Arc<Mutex<usize>>,
         executed_orders: Arc<Mutex<Vec<(String, OrderSide, Decimal)>>>,
     }
-    
+
     impl MockExecutor {
         fn new() -> Self {
             Self {
@@ -1842,16 +2270,16 @@ mod tests {
                 executed_orders: Arc::new(Mutex::new(Vec::new())),
             }
         }
-        
+
         async fn set_should_fail(&self, fail: bool) {
             *self.should_fail.lock().await = fail;
         }
-        
+
         async fn get_call_count(&self) -> usize {
             *self.call_count.lock().await
         }
     }
-    
+
     #[async_trait]
     impl Executor for MockExecutor {
         async fn execute_order(
@@ -1863,20 +2291,19 @@ mod tests {
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let mut count = self.call_count.lock().await;
             *count += 1;
-            
+
             if *self.should_fail.lock().await {
                 return Err("Mock execution failure".into());
             }
-            
-            self.executed_orders.lock().await.push((
-                symbol.to_string(),
-                side,
-                quantity,
-            ));
-            
+
+            self.executed_orders
+                .lock()
+                .await
+                .push((symbol.to_string(), side, quantity));
+
             Ok(())
         }
-        
+
         async fn get_position(
             &self,
             _symbol: &str,
@@ -1884,22 +2311,25 @@ mod tests {
             Ok(Decimal::ZERO)
         }
     }
-    
+
     #[tokio::test]
     async fn test_mock_executor_success() {
         let executor = MockExecutor::new();
-        let result = executor.execute_order("BTC-USD", OrderSide::Buy, dec!(0.1), Some(dec!(50000.0))).await;
+        let result = executor
+            .execute_order("BTC-USD", OrderSide::Buy, dec!(0.1), Some(dec!(50000.0)))
+            .await;
         assert!(result.is_ok());
         assert_eq!(executor.get_call_count().await, 1);
     }
-    
+
     #[tokio::test]
     async fn test_mock_executor_failure() {
         let executor = MockExecutor::new();
         executor.set_should_fail(true).await;
-        let result = executor.execute_order("BTC-USD", OrderSide::Buy, dec!(0.1), Some(dec!(50000.0))).await;
+        let result = executor
+            .execute_order("BTC-USD", OrderSide::Buy, dec!(0.1), Some(dec!(50000.0)))
+            .await;
         assert!(result.is_err());
         assert_eq!(executor.get_call_count().await, 1);
     }
 }
-    

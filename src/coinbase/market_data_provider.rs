@@ -1,9 +1,9 @@
-use async_trait::async_trait;
-use tokio::sync::mpsc;
-use std::error::Error;
-use crate::strategy::dual_leg_trading::MarketData;
 use crate::coinbase::websocket::CoinbaseWebsocket;
+use crate::strategy::dual_leg_trading::MarketData;
+use async_trait::async_trait;
 use rust_decimal::Decimal;
+use std::error::Error;
+use tokio::sync::mpsc;
 
 /// Trait for market data providers. Enables swapping between different data sources
 /// (WebSocket, synthetic, replay) without changing strategy code.
@@ -38,18 +38,22 @@ impl MarketDataProvider for CoinbaseWebsocketProvider {
         symbols: Vec<String>,
     ) -> Result<mpsc::Receiver<MarketData>, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = mpsc::channel(1000);
-        
+
         // Create new WebSocket connection - convert error to String for Send+Sync
-        let ws = CoinbaseWebsocket::new()
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
-        
+        let ws = CoinbaseWebsocket::new().map_err(|e| -> Box<dyn Error + Send + Sync> {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
+
         // Spawn task to connect and stream data
         tokio::spawn(async move {
             if let Err(e) = ws.connect_and_subscribe(symbols, tx).await {
                 eprintln!("Coinbase WebSocket error: {}", e);
             }
         });
-        
+
         Ok(rx)
     }
 
@@ -71,7 +75,7 @@ pub struct SyntheticProvider {
 
 impl SyntheticProvider {
     /// Create a new synthetic provider
-    /// 
+    ///
     /// # Arguments
     /// * `base_price` - Starting price (e.g., 50000 for BTC)
     /// * `volatility` - Price movement per tick as a fraction (e.g., 0.001 = 0.1%)
@@ -92,57 +96,57 @@ impl MarketDataProvider for SyntheticProvider {
         symbols: Vec<String>,
     ) -> Result<mpsc::Receiver<MarketData>, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = mpsc::channel(1000);
-        
+
         let base_price = self.base_price;
         let volatility = self.volatility;
         let interval_ms = self.tick_interval_ms;
-        
+
         // Spawn task to generate synthetic ticks
         tokio::spawn(async move {
-            let mut current_prices: std::collections::HashMap<String, Decimal> = symbols
-                .iter()
-                .map(|s| (s.clone(), base_price))
-                .collect();
-            
+            let mut current_prices: std::collections::HashMap<String, Decimal> =
+                symbols.iter().map(|s| (s.clone(), base_price)).collect();
+
             let mut tick_count: i64 = 0;
-            
+
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
-                
+
                 for symbol in &symbols {
                     // Generate random walk price using sine wave for predictable variation
                     let current_price = current_prices.get(symbol).unwrap();
                     let change_pct = (tick_count as f64 * 0.01).sin() * volatility;
-                    let change = current_price * Decimal::try_from(change_pct).unwrap_or(Decimal::ZERO);
+                    let change =
+                        current_price * Decimal::try_from(change_pct).unwrap_or(Decimal::ZERO);
                     let new_price = current_price + change;
-                    
+
                     current_prices.insert(symbol.clone(), new_price);
-                    
+
                     let tick = MarketData {
                         symbol: symbol.clone(),
-                        price: new_price, instrument_id: None,
+                        price: new_price,
+                        instrument_id: None,
                         timestamp: chrono::Utc::now().timestamp_millis(),
                     };
-                    
+
                     // Non-blocking send with backpressure handling
                     // In HFT, it's better to drop stale data than process lagged data
                     match tx.try_send(tick) {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             // Channel full: drop tick to maintain real-time sync
                             // This prevents latency buildup when consumer is slower than producer
-                        },
+                        }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             // Receiver dropped, stop generating
                             return;
                         }
                     }
                 }
-                
+
                 tick_count += 1;
             }
         });
-        
+
         Ok(rx)
     }
 

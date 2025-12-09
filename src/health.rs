@@ -1,16 +1,12 @@
 //! AS10: Health check HTTP endpoint for monitoring
 
-use axum::{
-    routing::get,
-    Router,
-    Json,
-};
-use serde::{Serialize, Deserialize};
+use crate::resilience::{CircuitBreaker, CircuitState};
+use axum::{routing::get, Json, Router};
+use chrono::Utc; // Added for `chrono::Utc::now()`
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use chrono::Utc; // Added for `chrono::Utc::now()`
-use crate::resilience::{CircuitBreaker, CircuitState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HealthResponse {
@@ -51,7 +47,7 @@ pub async fn update_from_circuit_breaker(state: &HealthState, breaker: &CircuitB
     let cb_state = breaker.get_state().await;
     health.circuit_breaker_state = Some(format_circuit_state(cb_state));
     health.timestamp = Utc::now().timestamp();
-    
+
     // Update overall status based on circuit breaker
     health.status = match cb_state {
         CircuitState::Closed => "healthy".to_string(),
@@ -70,7 +66,7 @@ fn format_circuit_state(state: CircuitState) -> String {
 }
 
 async fn health_check(
-    axum::extract::State(state): axum::extract::State<HealthState>
+    axum::extract::State(state): axum::extract::State<HealthState>,
 ) -> Json<HealthResponse> {
     let health = state.read().await.clone();
     Json(health)
@@ -80,11 +76,11 @@ pub async fn run_health_server(port: u16, state: HealthState) {
     let app = Router::new()
         .route("/health", get(health_check))
         .with_state(state);
-    
+
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    
+
     tracing::info!("Health check server listening on {}", addr);
-    
+
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -92,9 +88,8 @@ pub async fn run_health_server(port: u16, state: HealthState) {
             return;
         }
     };
-    
+
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!("Health check server failed: {}", e);
     }
 }
-

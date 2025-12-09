@@ -1,15 +1,15 @@
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tokio::time::{interval, Duration};
-use futures_util::{StreamExt, SinkExt};
+use crate::strategy::dual_leg_trading::MarketData;
+use chrono::Utc;
+use futures_util::{SinkExt, StreamExt};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::json;
 use std::env;
 use std::error::Error;
-use crate::strategy::dual_leg_trading::MarketData;
-use rust_decimal::Decimal;
-use chrono::Utc;
 use tokio::sync::mpsc::Sender;
-use tracing::{info, debug, error};
+use tokio::time::{interval, Duration};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tracing::{debug, error, info};
 
 const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
 
@@ -40,14 +40,25 @@ impl CoinbaseWebsocket {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let api_key = env::var("COINBASE_API_KEY")?;
         let api_secret = env::var("COINBASE_API_SECRET")?;
-        Ok(Self { _api_key: api_key, _api_secret: api_secret })
+        Ok(Self {
+            _api_key: api_key,
+            _api_secret: api_secret,
+        })
     }
 
     /// CF2 FIX: Connect with retry logic and exponential backoff
-    async fn connect_with_retry(&self, max_retries: u32) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Box<dyn Error + Send + Sync>> {
+    async fn connect_with_retry(
+        &self,
+        max_retries: u32,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Box<dyn Error + Send + Sync>,
+    > {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(60);
-        
+
         for attempt in 1..=max_retries {
             match connect_async(WS_URL).await {
                 Ok((stream, _)) => {
@@ -55,7 +66,10 @@ impl CoinbaseWebsocket {
                     return Ok(stream);
                 }
                 Err(e) if attempt < max_retries => {
-                    error!("WebSocket connection failed (attempt {}/{}): {}", attempt, max_retries, e);
+                    error!(
+                        "WebSocket connection failed (attempt {}/{}): {}",
+                        attempt, max_retries, e
+                    );
                     info!("Retrying in {:?}...", backoff);
                     tokio::time::sleep(backoff).await;
                     backoff = std::cmp::min(backoff * 2, max_backoff);
@@ -64,30 +78,33 @@ impl CoinbaseWebsocket {
                     error!("WebSocket connection failed after {} attempts", max_retries);
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        format!("Failed to connect after {} retries: {}", max_retries, e)
+                        format!("Failed to connect after {} retries: {}", max_retries, e),
                     )));
                 }
             }
         }
-        
+
         unreachable!()
     }
 
     pub async fn connect_and_subscribe(
-        &self, 
-        product_ids: Vec<String>, 
-        sender: Sender<MarketData>
+        &self,
+        product_ids: Vec<String>,
+        sender: Sender<MarketData>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // CF2 FIX: Wrap connection in reconnection loop
         const MAX_RECONNECT_ATTEMPTS: u32 = u32::MAX; // Infinite reconnection attempts
         const CONNECTION_MAX_RETRIES: u32 = 5; // Max retries per connection attempt
-        
+
         let mut reconnect_count = 0;
-        
+
         loop {
             reconnect_count += 1;
-            info!("WebSocket connection attempt {} (products: {:?})", reconnect_count, product_ids);
-            
+            info!(
+                "WebSocket connection attempt {} (products: {:?})",
+                reconnect_count, product_ids
+            );
+
             // Attempt to connect with retries
             let ws_stream = match self.connect_with_retry(CONNECTION_MAX_RETRIES).await {
                 Ok(stream) => stream,
@@ -110,12 +127,15 @@ impl CoinbaseWebsocket {
                 "channel": "ticker",
             });
 
-            if let Err(e) = write.send(Message::Text(subscribe_msg.to_string().into())).await {
+            if let Err(e) = write
+                .send(Message::Text(subscribe_msg.to_string().into()))
+                .await
+            {
                 error!("Failed to send subscribe message: {}", e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
-            
+
             info!("Subscribed to products: {:?}", product_ids);
 
             // Process messages
@@ -173,7 +193,7 @@ impl CoinbaseWebsocket {
                     }
                 }
             }
-            
+
             // If we should reconnect, continue the outer loop
             if should_reconnect {
                 info!("Initiating reconnection...");

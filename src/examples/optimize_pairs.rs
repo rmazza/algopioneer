@@ -138,16 +138,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let granularity = parse_granularity(&args.granularity);
         info!(granularity = args.granularity, end_date = ?args.end_date, "Using Coinbase API data");
-        load_coinbase_data(&args.leg1, &args.leg2, args.days, args.end_date.as_deref(), granularity).await?
+        load_coinbase_data(
+            &args.leg1,
+            &args.leg2,
+            args.days,
+            args.end_date.as_deref(),
+            granularity,
+        )
+        .await?
     };
     let n_rows = dates.len();
 
     info!(data_points = n_rows, "Starting Grid Search");
 
     // 2. Define Parameter Ranges
-    let windows = (10..=60).step_by(5);            // Test windows: 10, 15, 20... 60
+    let windows = (10..=60).step_by(5); // Test windows: 10, 15, 20... 60
     let z_entries = (15..=30).map(|i| i as f64 / 10.0); // Test Zs: 1.5, 1.6... 3.0
-    let z_exit = 0.1;                                     // Keep exit constant (Mean Reversion)
+    let z_exit = 0.1; // Keep exit constant (Mean Reversion)
 
     let mut results = Vec::new();
 
@@ -157,13 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manager = PairsManager::new(window, z_entry, z_exit);
 
             let result = run_simulation(
-                &manager,
-                &dates,
-                &prices_a,
-                &prices_b,
-                window,
-                z_entry,
-                z_exit,
+                &manager, &dates, &prices_a, &prices_b, window, z_entry, z_exit,
             )
             .await;
 
@@ -343,7 +344,7 @@ async fn load_coinbase_data(
     granularity: Granularity,
 ) -> Result<(Vec<i64>, Vec<f64>, Vec<f64>), Box<dyn std::error::Error>> {
     use chrono::NaiveDate;
-    
+
     info!("Connecting to Coinbase API...");
 
     let mut client = CoinbaseClient::new(AppEnv::Live)?;
