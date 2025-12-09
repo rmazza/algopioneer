@@ -53,12 +53,12 @@ impl CoinbaseClient {
     pub async fn test_connection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         match self.client.public.time().await {
             Ok(server_time) => {
-                println!("Successfully connected to Coinbase!");
-                println!("Server Time (ISO): {}", server_time.iso);
+                tracing::info!("Successfully connected to Coinbase!");
+                tracing::info!("Server Time (ISO): {}", server_time.iso);
                 Ok(())
             },
             Err(e) => {
-                eprintln!("Error during test API call: {}", e);
+                tracing::error!("Error during test API call: {}", e);
                 Err(Box::new(e) as Box<dyn std::error::Error>)
             }
         }
@@ -71,7 +71,7 @@ impl CoinbaseClient {
         
         match self.mode {
             AppEnv::Live => {
-                println!("-- Live Mode: Placing order for {} {} of {} --", side, size, product_id);
+                tracing::info!("-- Live Mode: Placing order for {} {} of {} --", side, size, product_id);
                 // Here you would add the actual call to the Coinbase API to place an order
                 // For now, we just print a message.
                 Ok(())
@@ -83,7 +83,7 @@ impl CoinbaseClient {
             AppEnv::Paper => {
                 let price_str = price.map(|p| p.to_string()).unwrap_or_else(|| "MARKET".to_string());
                 let msg = format!("-- PAPER TRADE: {} {} of {} @ {} --", side, size, product_id, price_str);
-                println!("{}", msg);
+                tracing::info!("{}", msg);
                 
                 // Log to CSV
                 use std::fs::OpenOptions;

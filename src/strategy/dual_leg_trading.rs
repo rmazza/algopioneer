@@ -482,6 +482,140 @@ pub struct DualLegConfig {
     pub throttle_interval_secs: u64,
 }
 
+/// AS1: Builder for DualLegConfig with sensible defaults and validation.
+/// Provides a fluent API for constructing strategy configurations consistently.
+#[derive(Debug, Clone)]
+pub struct DualLegConfigBuilder {
+    spot_symbol: Option<String>,
+    future_symbol: Option<String>,
+    order_size: Decimal,
+    max_tick_age_ms: i64,
+    execution_timeout_ms: i64,
+    min_profit_threshold: Decimal,
+    stop_loss_threshold: Decimal,
+    fee_tier: TransactionCostModel,
+    throttle_interval_secs: u64,
+}
+
+impl Default for DualLegConfigBuilder {
+    fn default() -> Self {
+        Self {
+            spot_symbol: None,
+            future_symbol: None,
+            order_size: dec!(0.001),
+            max_tick_age_ms: 2000,
+            execution_timeout_ms: 30000,
+            min_profit_threshold: dec!(0.005),
+            stop_loss_threshold: dec!(-0.05),
+            fee_tier: TransactionCostModel::default(),
+            throttle_interval_secs: 5,
+        }
+    }
+}
+
+impl DualLegConfigBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Set the spot symbol (required)
+    pub fn spot_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.spot_symbol = Some(symbol.into());
+        self
+    }
+    
+    /// Set the future symbol (required)
+    pub fn future_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.future_symbol = Some(symbol.into());
+        self
+    }
+    
+    /// Set the order size in base currency
+    pub fn order_size(mut self, size: Decimal) -> Self {
+        self.order_size = size;
+        self
+    }
+    
+    /// Set the maximum tick age in milliseconds
+    pub fn max_tick_age_ms(mut self, age_ms: i64) -> Self {
+        self.max_tick_age_ms = age_ms;
+        self
+    }
+    
+    /// Set the execution timeout in milliseconds
+    pub fn execution_timeout_ms(mut self, timeout_ms: i64) -> Self {
+        self.execution_timeout_ms = timeout_ms;
+        self
+    }
+    
+    /// Set the minimum profit threshold for exits
+    pub fn min_profit_threshold(mut self, threshold: Decimal) -> Self {
+        self.min_profit_threshold = threshold;
+        self
+    }
+    
+    /// Set the stop loss threshold (should be negative)
+    pub fn stop_loss_threshold(mut self, threshold: Decimal) -> Self {
+        self.stop_loss_threshold = threshold;
+        self
+    }
+    
+    /// Set the fee tier model
+    pub fn fee_tier(mut self, fee_tier: TransactionCostModel) -> Self {
+        self.fee_tier = fee_tier;
+        self
+    }
+    
+    /// Set the log throttle interval in seconds
+    pub fn throttle_interval_secs(mut self, secs: u64) -> Self {
+        self.throttle_interval_secs = secs;
+        self
+    }
+    
+    /// Build and validate the configuration.
+    /// Returns Err if required fields are missing or validation fails.
+    pub fn build(self) -> Result<DualLegConfig, String> {
+        let spot_symbol = self.spot_symbol
+            .ok_or_else(|| "spot_symbol is required".to_string())?;
+        let future_symbol = self.future_symbol
+            .ok_or_else(|| "future_symbol is required".to_string())?;
+        
+        // Validate required fields
+        if spot_symbol.is_empty() {
+            return Err("spot_symbol cannot be empty".to_string());
+        }
+        if future_symbol.is_empty() {
+            return Err("future_symbol cannot be empty".to_string());
+        }
+        if spot_symbol == future_symbol {
+            return Err(format!("spot_symbol and future_symbol cannot be the same: {}", spot_symbol));
+        }
+        
+        // Validate numeric fields
+        if self.order_size <= Decimal::ZERO {
+            return Err(format!("order_size must be positive, got: {}", self.order_size));
+        }
+        if self.max_tick_age_ms <= 0 {
+            return Err(format!("max_tick_age_ms must be positive, got: {}", self.max_tick_age_ms));
+        }
+        if self.execution_timeout_ms <= 0 {
+            return Err(format!("execution_timeout_ms must be positive, got: {}", self.execution_timeout_ms));
+        }
+        
+        Ok(DualLegConfig {
+            spot_symbol,
+            future_symbol,
+            order_size: self.order_size,
+            max_tick_age_ms: self.max_tick_age_ms,
+            execution_timeout_ms: self.execution_timeout_ms,
+            min_profit_threshold: self.min_profit_threshold,
+            stop_loss_threshold: self.stop_loss_threshold,
+            fee_tier: self.fee_tier,
+            throttle_interval_secs: self.throttle_interval_secs,
+        })
+    }
+}
+
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrategyState {
@@ -908,6 +1042,75 @@ impl ExecutionEngine {
         }
     }
 
+    /// Refactor Challenge: DRY helper for queuing kill switch recovery tasks.
+    /// Handles partial failure by queuing a recovery task and recording circuit breaker failure.
+    /// Returns PartialFailure on success, CriticalFailure if recovery queue fails.
+    async fn queue_kill_switch(
+        &self,
+        failed_result: ExecutionError,
+        successful_leg_symbol: &str,
+        recovery_action: OrderSide,
+        quantity: Decimal,
+        context: &str,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        error!(
+            "CRITICAL: {} failed. {} leg succeeded, queuing kill switch on {}.",
+            context, 
+            if recovery_action == OrderSide::Buy { "Spot" } else { "Future" },
+            successful_leg_symbol
+        );
+        
+        let task = RecoveryTask {
+            symbol: successful_leg_symbol.to_string(),
+            action: recovery_action,
+            quantity,
+            reason: format!("{}: {}", context, failed_result),
+            attempts: 0,
+        };
+        
+        if let Err(send_err) = self.recovery_tx.send(task).await {
+            error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
+            self.circuit_breaker.record_failure().await;
+            return Err(ExecutionError::CriticalFailure(format!(
+                "Recovery queue failure - {} kill switch failed: {}",
+                context, send_err
+            )));
+        }
+        
+        self.circuit_breaker.record_failure().await;
+        Ok(ExecutionResult::PartialFailure(failed_result))
+    }
+    
+    /// Refactor Challenge: DRY helper for queuing exit retry recovery tasks.
+    async fn queue_exit_retry(
+        &self,
+        symbol: &str,
+        action: OrderSide,
+        quantity: Decimal,
+        error: ExecutionError,
+        leg_name: &str,
+    ) -> Result<(), ExecutionError> {
+        error!("Exit {} failed: {}. Queuing retry.", leg_name, error);
+        
+        let task = RecoveryTask {
+            symbol: symbol.to_string(),
+            action,
+            quantity,
+            reason: format!("Exit {} failed: {}", leg_name, error),
+            attempts: 0,
+        };
+        
+        if let Err(send_err) = self.recovery_tx.send(task).await {
+            error!("EMERGENCY: Failed to queue exit {} recovery task! Error: {}", leg_name, send_err);
+            return Err(ExecutionError::CriticalFailure(format!(
+                "Recovery queue failure - exit {} retry failed: {}",
+                leg_name, send_err
+            )));
+        }
+        
+        Ok(())
+    }
+
     #[instrument(skip(self))]
     pub async fn execute_basis_entry(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
@@ -925,51 +1128,20 @@ impl ExecutionEngine {
         let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
+        // Handle failures using DRY helper
         if let Err(e) = spot_res {
-             if future_res.is_ok() {
-                 error!("CRITICAL: Spot failed but Future succeeded. Queuing Kill Switch on Future leg.");
-                 // Queue Kill Switch: Buy back future
-                 let task = RecoveryTask {
-                     symbol: pair.future_symbol.clone(),
-                     action: OrderSide::Buy,
-                     quantity: hedge_qty,
-                     reason: format!("Spot failed: {}", e),
-                     attempts: 0,
-                 };
-                 if let Err(send_err) = self.recovery_tx.send(task).await {
-                     error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-                     // CF4 FIX: Return CriticalFailure instead of panic
-                     self.circuit_breaker.record_failure().await; // CR1: Record failure
-                     return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - spot entry kill switch failed: {}", send_err)));
-                 }
-                 self.circuit_breaker.record_failure().await; // CR1: Record failure
-                 return Ok(ExecutionResult::PartialFailure(e));
-             }
-             self.circuit_breaker.record_failure().await; // CR1: Record failure
-             return Ok(ExecutionResult::TotalFailure(e));
+            if future_res.is_ok() {
+                return self.queue_kill_switch(e, &pair.future_symbol, OrderSide::Buy, hedge_qty, "Spot entry").await;
+            }
+            self.circuit_breaker.record_failure().await;
+            return Ok(ExecutionResult::TotalFailure(e));
         }
 
         if let Err(e) = future_res {
-            error!("CRITICAL: Future leg failed: {}. Queuing Kill Switch on Spot leg.", e);
-            // Queue Kill Switch: Sell spot
-            let task = RecoveryTask {
-                symbol: pair.spot_symbol.clone(),
-                action: OrderSide::Sell,
-                quantity: quantity,
-                reason: format!("Future failed: {}", e),
-                attempts: 0,
-            };
-             if let Err(send_err) = self.recovery_tx.send(task).await {
-                 error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-                 // CF4 FIX: Return CriticalFailure instead of panic
-                 self.circuit_breaker.record_failure().await; // CR1: Record failure
-                 return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - future entry kill switch failed: {}", send_err)));
-             }
-            self.circuit_breaker.record_failure().await; // CR1: Record failure
-            return Ok(ExecutionResult::PartialFailure(e));
+            return self.queue_kill_switch(e, &pair.spot_symbol, OrderSide::Sell, quantity, "Future entry").await;
         }
 
-        self.circuit_breaker.record_success().await; // CR1: Record success
+        self.circuit_breaker.record_success().await;
         Ok(ExecutionResult::Success)
     }
 
@@ -990,46 +1162,17 @@ impl ExecutionEngine {
         let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
+        // Handle failures using DRY helper
         if let Err(e) = spot_res {
-             if future_res.is_ok() {
-                 error!("CRITICAL: Spot Short Entry failed but Future succeeded. Queuing Kill Switch on Future leg.");
-                 // Kill Switch: Sell back future (Close Long Future)
-                 let task = RecoveryTask {
-                     symbol: pair.future_symbol.clone(),
-                     action: OrderSide::Sell,
-                     quantity: hedge_qty,
-                     reason: format!("Spot Short Entry failed: {}", e),
-                     attempts: 0,
-                 };
-                 if let Err(send_err) = self.recovery_tx.send(task).await {
-                     error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-                     self.circuit_breaker.record_failure().await;
-                     return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - spot short entry kill switch failed: {}", send_err)));
-                 }
-                 self.circuit_breaker.record_failure().await;
-                 return Ok(ExecutionResult::PartialFailure(e));
-             }
-             self.circuit_breaker.record_failure().await;
-             return Ok(ExecutionResult::TotalFailure(e));
+            if future_res.is_ok() {
+                return self.queue_kill_switch(e, &pair.future_symbol, OrderSide::Sell, hedge_qty, "Spot short entry").await;
+            }
+            self.circuit_breaker.record_failure().await;
+            return Ok(ExecutionResult::TotalFailure(e));
         }
 
         if let Err(e) = future_res {
-            error!("CRITICAL: Future Short Entry failed: {}. Queuing Kill Switch on Spot leg.", e);
-            // Kill Switch: Buy back spot (Close Short Spot)
-            let task = RecoveryTask {
-                symbol: pair.spot_symbol.clone(),
-                action: OrderSide::Buy,
-                quantity: quantity,
-                reason: format!("Future Short Entry failed: {}", e),
-                attempts: 0,
-            };
-             if let Err(send_err) = self.recovery_tx.send(task).await {
-                 error!("EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}", send_err);
-                 self.circuit_breaker.record_failure().await;
-                 return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - future short entry kill switch failed: {}", send_err)));
-             }
-            self.circuit_breaker.record_failure().await;
-            return Ok(ExecutionResult::PartialFailure(e));
+            return self.queue_kill_switch(e, &pair.spot_symbol, OrderSide::Buy, quantity, "Future short entry").await;
         }
 
         self.circuit_breaker.record_success().await;
@@ -1038,12 +1181,12 @@ impl ExecutionEngine {
 
     #[instrument(skip(self))]
     pub async fn execute_basis_exit(&self, pair: &InstrumentPair, quantity: Decimal, hedge_qty: Decimal, leg1_price: Decimal, leg2_price: Decimal) -> Result<ExecutionResult, ExecutionError> {
-         // CR1: Check Circuit Breaker
+        // CR1: Check Circuit Breaker
         if self.circuit_breaker.is_open().await {
             return Err(ExecutionError::CircuitBreakerOpen("Circuit breaker is OPEN due to recent failures".to_string()));
         }
 
-         // Reverse of entry: Sell Spot, Buy Future
+        // Reverse of entry: Sell Spot, Buy Future
         let spot_leg = self.client.execute_order(&pair.spot_symbol, OrderSide::Sell, quantity, Some(leg1_price));
         let future_leg = self.client.execute_order(&pair.future_symbol, OrderSide::Buy, hedge_qty, Some(leg2_price));
 
@@ -1053,54 +1196,25 @@ impl ExecutionEngine {
         let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
 
         if spot_res.is_err() && future_res.is_err() {
-            self.circuit_breaker.record_failure().await; // CR1: Record failure
+            self.circuit_breaker.record_failure().await;
             return Ok(ExecutionResult::TotalFailure(ExecutionError::ExchangeError(format!("Both legs failed to exit. Spot: {:?}, Future: {:?}", spot_res.err(), future_res.err()))));
         }
 
+        // For exit, failures require retrying the same action (not reversal)
         if spot_res.is_err() || future_res.is_err() {
-            // For exit, failures are messy. We might be left with a position.
-            // A real system would have complex unwinding logic here.
-            // For now, we queue whatever failed to be retried? 
-            // Actually, if exit fails, we want to RETRY the exit, not reverse it.
-            // So we queue the failed leg to be executed again.
-            
             if let Err(e) = spot_res {
-                error!("Exit Spot failed: {}. Queuing retry.", e);
-                let task = RecoveryTask {
-                    symbol: pair.spot_symbol.clone(),
-                    action: OrderSide::Sell,
-                    quantity: quantity,
-                    reason: format!("Exit Spot failed: {}", e),
-                    attempts: 0,
-                };
-                // CF4 FIX: Handle recovery task send errors
-                if let Err(send_err) = self.recovery_tx.send(task).await {
-                    error!("EMERGENCY: Failed to queue exit spot recovery task! Error: {}", send_err);
-                    return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit spot retry failed: {}", send_err)));
-                }
+                self.queue_exit_retry(&pair.spot_symbol, OrderSide::Sell, quantity, e, "Spot").await?;
             }
             
             if let Err(e) = future_res {
-                error!("Exit Future failed: {}. Queuing retry.", e);
-                let task = RecoveryTask {
-                    symbol: pair.future_symbol.clone(),
-                    action: OrderSide::Buy,
-                    quantity: hedge_qty,
-                    reason: format!("Exit Future failed: {}", e),
-                    attempts: 0,
-                };
-                if let Err(send_err) = self.recovery_tx.send(task).await {
-                    error!("EMERGENCY: Failed to queue exit future recovery task! Error: {}", send_err);
-                    self.circuit_breaker.record_failure().await; // CR1: Record failure
-                    return Err(ExecutionError::CriticalFailure(format!("Recovery queue failure - exit future retry failed: {}", send_err)));
-                }
+                self.queue_exit_retry(&pair.future_symbol, OrderSide::Buy, hedge_qty, e, "Future").await?;
             }
 
-            self.circuit_breaker.record_failure().await; // CR1: Record failure (Partial)
+            self.circuit_breaker.record_failure().await;
             return Ok(ExecutionResult::PartialFailure(ExecutionError::ExchangeError("Partial Exit Failure".to_string())));
         }
 
-        self.circuit_breaker.record_success().await; // CR1: Record success
+        self.circuit_breaker.record_success().await;
         Ok(ExecutionResult::Success)
     }
 }

@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use chrono::Utc; // Added for `chrono::Utc::now()`
+use crate::resilience::{CircuitBreaker, CircuitState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HealthResponse {
@@ -44,6 +45,30 @@ pub fn create_health_state() -> HealthState {
     Arc::new(RwLock::new(HealthResponse::default()))
 }
 
+/// AS2: Update health state from CircuitBreaker for operational visibility
+pub async fn update_from_circuit_breaker(state: &HealthState, breaker: &CircuitBreaker) {
+    let mut health = state.write().await;
+    let cb_state = breaker.get_state().await;
+    health.circuit_breaker_state = Some(format_circuit_state(cb_state));
+    health.timestamp = Utc::now().timestamp();
+    
+    // Update overall status based on circuit breaker
+    health.status = match cb_state {
+        CircuitState::Closed => "healthy".to_string(),
+        CircuitState::HalfOpen => "degraded".to_string(),
+        CircuitState::Open => "critical".to_string(),
+    };
+}
+
+/// Format CircuitState as a human-readable string
+fn format_circuit_state(state: CircuitState) -> String {
+    match state {
+        CircuitState::Closed => "closed".to_string(),
+        CircuitState::Open => "open".to_string(),
+        CircuitState::HalfOpen => "half_open".to_string(),
+    }
+}
+
 async fn health_check(
     axum::extract::State(state): axum::extract::State<HealthState>
 ) -> Json<HealthResponse> {
@@ -60,11 +85,16 @@ pub async fn run_health_server(port: u16, state: HealthState) {
     
     tracing::info!("Health check server listening on {}", addr);
     
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind health check server");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Health server failed to bind to {}: {}. System will continue without health endpoint.", addr, e);
+            return;
+        }
+    };
     
-    axum::serve(listener, app)
-        .await
-        .expect("Health check server failed");
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("Health check server failed: {}", e);
+    }
 }
+
