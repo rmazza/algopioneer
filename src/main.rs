@@ -31,10 +31,21 @@ use tracing::{info, warn, error};
 // --- Constants ---
 const STATE_FILE: &str = "trade_state.json";
 
-// --- State Persistence ---
+// --- Position Tracking ---
+/// Detailed position information for reconciliation
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PositionDetail {
+    symbol: String,
+    side: String,
+    quantity: Decimal,
+    entry_price: Decimal,
+}
+
+/// State persistence with proper position tracking (fixes Ghost Position risk)
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 struct TradeState {
-    position_open: bool,
+    /// Key: Symbol (e.g., "BTC-USD"), Value: Position details
+    positions: std::collections::HashMap<String, PositionDetail>,
 }
 
 impl TradeState {
@@ -51,6 +62,21 @@ impl TradeState {
         let mut file = fs::File::create(STATE_FILE)?;
         file.write_all(json.as_bytes())?;
         Ok(())
+    }
+    
+    /// Check if we have an open position for a symbol
+    fn has_position(&self, symbol: &str) -> bool {
+        self.positions.contains_key(symbol)
+    }
+    
+    /// Open a new position
+    fn open_position(&mut self, detail: PositionDetail) {
+        self.positions.insert(detail.symbol.clone(), detail);
+    }
+    
+    /// Close a position and return its details
+    fn close_position(&mut self, symbol: &str) -> Option<PositionDetail> {
+        self.positions.remove(symbol)
     }
 }
 
@@ -275,14 +301,24 @@ impl SimpleTradingEngine {
             let latest_candles = self.client.get_product_candles(&self.config.product_id, &start, &end, Granularity::OneMinute).await?;
 
             if let Some(latest_candle) = latest_candles.first() {
-                let signal = self.strategy.update(latest_candle.close, self.state.position_open);
+                let has_position = self.state.has_position(&self.config.product_id);
+                let signal = self.strategy.update(latest_candle.close, has_position);
                 info!("Latest Signal: {:?}", signal);
 
                 match signal {
                     Signal::Buy => {
                         info!("Buy signal received. Placing order.");
                         self.client.place_order(&self.config.product_id, "buy", self.config.order_size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
-                        self.state.position_open = true;
+                        
+                        // Track position with full details for reconciliation
+                        let detail = PositionDetail {
+                            symbol: self.config.product_id.clone(),
+                            side: "buy".to_string(),
+                            quantity: self.config.order_size,
+                            entry_price: Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0)),
+                        };
+                        self.state.open_position(detail);
+                        
                         // Non-blocking async state persistence
                         if let Err(e) = self.state_tx.send(self.state.clone()) {
                             warn!("Failed to queue state save: {}", e);
@@ -291,7 +327,14 @@ impl SimpleTradingEngine {
                     Signal::Sell => {
                         info!("Sell signal received. Placing order.");
                         self.client.place_order(&self.config.product_id, "sell", self.config.order_size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
-                        self.state.position_open = false;
+                        
+                        // Close position and log details
+                        if let Some(closed) = self.state.close_position(&self.config.product_id) {
+                            let exit_price = Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0));
+                            let pnl = (exit_price - closed.entry_price) * closed.quantity;
+                            info!("Closed position: entry={}, exit={}, pnl={}", closed.entry_price, exit_price, pnl);
+                        }
+                        
                         // Non-blocking async state persistence
                         if let Err(e) = self.state_tx.send(self.state.clone()) {
                             warn!("Failed to queue state save: {}", e);
