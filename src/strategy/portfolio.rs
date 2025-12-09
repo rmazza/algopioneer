@@ -17,7 +17,8 @@ use std::collections::HashSet;
 use tokio::sync::Mutex;
 // OW5: Use DashMap for lock-free concurrent PnL updates
 use dashmap::DashMap;
-use tracing::{info, error, debug, warn};
+use tracing::{info, error, debug, warn, instrument};
+use thiserror::Error;
 
 use rust_decimal_macros::dec;
 use std::fs::File;
@@ -30,8 +31,33 @@ const STRATEGY_CHANNEL_BUFFER: usize = 100; // ~100ms buffer per leg
 const RECOVERY_CHANNEL_BUFFER: usize = 100;
 const FEEDBACK_CHANNEL_BUFFER: usize = 100;
 
-// NP2: Reconnection constants
+// Reconnection constants
 const MAX_RECONNECT_BACKOFF_SECS: u64 = 30;
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
+// Execution engine configuration (NP4)
+const EXECUTION_MAX_RETRIES: u32 = 5;
+const EXECUTION_TIMEOUT_SECS: u64 = 60;
+
+// Risk monitor defaults (NP3)
+const DEFAULT_LEVERAGE: Decimal = dec!(3.0);
+
+// --- Error Types ---
+
+/// Typed errors for PortfolioManager operations
+#[derive(Error, Debug)]
+pub enum PortfolioError {
+    #[error("Configuration error: {0}")]
+    Config(String),
+    #[error("WebSocket permanent failure after {0} attempts")]
+    WebSocketFailure(u32),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Infrastructure error: {0}")]
+    Infrastructure(String),
+}
 
 // --- Strategy Actor Wrapper ---
 
@@ -209,7 +235,6 @@ pub struct PortfolioManager {
     env: AppEnv,
     ws_task_handle: Option<tokio::task::JoinHandle<()>>,
     ws_cancel_token: CancellationToken,
-    _pnl: PortfolioPnL,
 }
 
 impl PortfolioManager {
@@ -219,11 +244,11 @@ impl PortfolioManager {
             env,
             ws_task_handle: None,
             ws_cancel_token: CancellationToken::new(),
-            _pnl: PortfolioPnL::new(),
         }
     }
 
-    pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    #[instrument(skip(self), fields(config_path = %self.config_path))]
+    pub async fn run(&mut self) -> Result<(), PortfolioError> {
         info!("Starting Portfolio Manager with config: {}", self.config_path);
 
         // 1. Load Configuration
@@ -232,13 +257,13 @@ impl PortfolioManager {
         let config_list: Vec<PortfolioPairConfig> = serde_json::from_reader(reader)?;
 
         if config_list.is_empty() {
-            return Err("No pairs found in configuration.".into());
+            return Err(PortfolioError::Config("No pairs found in configuration.".to_string()));
         }
 
         // AS2: Validate all configurations at startup
         for (idx, config) in config_list.iter().enumerate() {
             if let Err(e) = config.validate() {
-                return Err(format!("Invalid configuration for pair #{} ({}): {}", idx + 1, config.pair_id(), e).into());
+                return Err(PortfolioError::Config(format!("Invalid configuration for pair #{} ({}): {}", idx + 1, config.pair_id(), e)));
             }
         }
 
@@ -255,7 +280,8 @@ impl PortfolioManager {
             .collect();
 
         // 2. Initialize Shared Resources
-        let client = Arc::new(CoinbaseClient::new(self.env.clone())?); 
+        let client = Arc::new(CoinbaseClient::new(self.env.clone())
+            .map_err(|e| PortfolioError::Infrastructure(e.to_string()))?); 
         
         // 3. Spawn Strategy Actors
         // We use JoinSet to monitor actors. They return their pair_id on exit.
@@ -284,7 +310,8 @@ impl PortfolioManager {
         }
 
         // 4. WebSocket Connection & Demultiplexer
-        let ws_client = CoinbaseWebsocket::new()?;
+        let ws_client = CoinbaseWebsocket::new()
+            .map_err(|e| PortfolioError::Infrastructure(e.to_string()))?;
         let (ws_tx, mut ws_rx) = mpsc::channel(WS_CHANNEL_BUFFER); 
 
         let symbols_clone = symbols_to_subscribe.clone();
@@ -339,14 +366,13 @@ impl PortfolioManager {
                             error!("WebSocket channel closed. Attempting reconnection...");
                             
                             let mut reconnect_attempts = 0;
-                            const MAX_RECONNECT_ATTEMPTS: u32 = 5;
                             let mut backoff = Duration::from_secs(1);
                             
                             loop {
                                 reconnect_attempts += 1;
                                 if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
                                     error!("FATAL: WebSocket reconnection failed after {} attempts", MAX_RECONNECT_ATTEMPTS);
-                                    return Err("WebSocket permanent failure".into());
+                                    return Err(PortfolioError::WebSocketFailure(MAX_RECONNECT_ATTEMPTS));
                                 }
                                 
                                 warn!("Reconnection attempt {} of {}", reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
@@ -457,6 +483,7 @@ impl PortfolioManager {
         }
     }
 
+    #[instrument(skip_all, fields(pair_id = %config.pair_id()))]
     async fn spawn_strategy(
         join_set: &mut JoinSet<String>,
         symbol_map: &mut HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
@@ -470,9 +497,9 @@ impl PortfolioManager {
         let (leg1_tx, leg1_rx) = mpsc::channel(STRATEGY_CHANNEL_BUFFER);
         let (leg2_tx, leg2_rx) = mpsc::channel(STRATEGY_CHANNEL_BUFFER);
         
-        // Map symbols to channels (1-to-N)
-        symbol_map.entry(config.dual_leg_config.spot_symbol.clone()).or_default().push((leg1_tx, pair_id.clone()));
-        symbol_map.entry(config.dual_leg_config.future_symbol.clone()).or_default().push((leg2_tx, pair_id.clone()));
+        // DRY: Use helper function for symbol registration
+        Self::register_symbol(symbol_map, config.dual_leg_config.spot_symbol.clone(), leg1_tx, pair_id.clone());
+        Self::register_symbol(symbol_map, config.dual_leg_config.future_symbol.clone(), leg2_tx, pair_id.clone());
 
         // Setup Strategy Components
         let (recovery_tx, recovery_rx) = mpsc::channel(RECOVERY_CHANNEL_BUFFER);
@@ -483,7 +510,7 @@ impl PortfolioManager {
             recovery_worker.run().await;
         });
 
-        let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx, 5, 60);
+        let execution_engine = ExecutionEngine::new(client.clone(), recovery_tx, EXECUTION_MAX_RETRIES, EXECUTION_TIMEOUT_SECS);
 
         // Strategy Logic (Pairs Trading for Portfolio)
         // Use dynamic parameters from config
@@ -492,7 +519,7 @@ impl PortfolioManager {
             config.entry_z_score, 
             config.exit_z_score
         ));
-        let monitor = RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
+        let monitor = RiskMonitor::new(DEFAULT_LEVERAGE, InstrumentType::Linear, HedgeMode::DollarNeutral);
 
         let strategy = DualLegStrategy::new(
             manager,
@@ -508,5 +535,192 @@ impl PortfolioManager {
         join_set.spawn(async move {
             actor.run_with_id(leg1_rx, leg2_rx).await
         });
+    }
+
+    /// DRY helper: Register a symbol->sender mapping for tick distribution
+    fn register_symbol(
+        map: &mut HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
+        symbol: String,
+        sender: mpsc::Sender<Arc<MarketData>>,
+        pair_id: String,
+    ) {
+        map.entry(symbol).or_default().push((sender, pair_id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strategy::dual_leg_trading::{DualLegConfig, TransactionCostModel};
+
+    /// Creates a valid test configuration
+    fn valid_config() -> PortfolioPairConfig {
+        PortfolioPairConfig {
+            dual_leg_config: DualLegConfig {
+                spot_symbol: "BTC-USD".to_string(),
+                future_symbol: "BTC-USDT".to_string(),
+                order_size: dec!(0.001),
+                max_tick_age_ms: 1000,
+                execution_timeout_ms: 5000,
+                min_profit_threshold: dec!(0.001),
+                stop_loss_threshold: dec!(-0.02),
+                fee_tier: TransactionCostModel::default(),
+                throttle_interval_secs: 5,
+            },
+            window_size: 30,
+            entry_z_score: 2.0,
+            exit_z_score: 0.5,
+        }
+    }
+
+
+    #[test]
+    fn test_validate_valid_config() {
+        let config = valid_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_entry_z_score_zero() {
+        let mut config = valid_config();
+        config.entry_z_score = 0.0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("entry_z_score must be positive"));
+    }
+
+    #[test]
+    fn test_validate_entry_z_score_negative() {
+        let mut config = valid_config();
+        config.entry_z_score = -1.0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("entry_z_score must be positive"));
+    }
+
+    #[test]
+    fn test_validate_exit_z_score_negative() {
+        let mut config = valid_config();
+        config.exit_z_score = -0.5;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exit_z_score cannot be negative"));
+    }
+
+    #[test]
+    fn test_validate_exit_greater_than_entry() {
+        let mut config = valid_config();
+        config.entry_z_score = 1.0;
+        config.exit_z_score = 2.0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be less than entry_z_score"));
+    }
+
+    #[test]
+    fn test_validate_exit_equal_to_entry() {
+        let mut config = valid_config();
+        config.entry_z_score = 2.0;
+        config.exit_z_score = 2.0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be less than entry_z_score"));
+    }
+
+    #[test]
+    fn test_validate_window_size_zero() {
+        let mut config = valid_config();
+        config.window_size = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("window_size must be greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_order_size_zero() {
+        let mut config = valid_config();
+        config.dual_leg_config.order_size = Decimal::ZERO;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("order_size must be positive"));
+    }
+
+    #[test]
+    fn test_validate_order_size_negative() {
+        let mut config = valid_config();
+        config.dual_leg_config.order_size = dec!(-0.001);
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("order_size must be positive"));
+    }
+
+    #[test]
+    fn test_validate_empty_spot_symbol() {
+        let mut config = valid_config();
+        config.dual_leg_config.spot_symbol = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("spot_symbol cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_empty_future_symbol() {
+        let mut config = valid_config();
+        config.dual_leg_config.future_symbol = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("future_symbol cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_same_symbols() {
+        let mut config = valid_config();
+        config.dual_leg_config.spot_symbol = "BTC-USD".to_string();
+        config.dual_leg_config.future_symbol = "BTC-USD".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be the same"));
+    }
+
+    #[test]
+    fn test_validate_max_tick_age_zero() {
+        let mut config = valid_config();
+        config.dual_leg_config.max_tick_age_ms = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_tick_age_ms must be positive"));
+    }
+
+    #[test]
+    fn test_validate_max_tick_age_negative() {
+        let mut config = valid_config();
+        config.dual_leg_config.max_tick_age_ms = -100;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_tick_age_ms must be positive"));
+    }
+
+    #[test]
+    fn test_validate_execution_timeout_zero() {
+        let mut config = valid_config();
+        config.dual_leg_config.execution_timeout_ms = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("execution_timeout_ms must be positive"));
+    }
+
+    #[test]
+    fn test_validate_execution_timeout_negative() {
+        let mut config = valid_config();
+        config.dual_leg_config.execution_timeout_ms = -500;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("execution_timeout_ms must be positive"));
+    }
+
+    #[test]
+    fn test_pair_id_format() {
+        let config = valid_config();
+        assert_eq!(config.pair_id(), "BTC-USD-BTC-USDT");
     }
 }
