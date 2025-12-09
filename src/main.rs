@@ -1,3 +1,11 @@
+// --- Global Allocator (Jemalloc for reduced fragmentation in long-running async apps) ---
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use algopioneer::coinbase::{CoinbaseClient, AppEnv};
 use algopioneer::coinbase::websocket::CoinbaseWebsocket;
 use cbadv::time::Granularity;
@@ -24,7 +32,7 @@ use tracing::{info, warn, error};
 const STATE_FILE: &str = "trade_state.json";
 
 // --- State Persistence ---
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 struct TradeState {
     position_open: bool,
 }
@@ -38,7 +46,7 @@ impl TradeState {
         }
     }
 
-    fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = serde_json::to_string_pretty(self)?;
         let mut file = fs::File::create(STATE_FILE)?;
         file.write_all(json.as_bytes())?;
@@ -97,6 +105,24 @@ enum Commands {
         /// Run in paper trading mode (simulated execution)
         #[arg(long, default_value_t = false)]
         paper: bool,
+        /// Order size in base currency
+        #[arg(long, default_value_t = 0.00001)]
+        order_size: f64,
+        /// Maximum tick age in milliseconds before dropping
+        #[arg(long, default_value_t = 2000)]
+        max_tick_age_ms: i64,
+        /// Execution timeout in milliseconds
+        #[arg(long, default_value_t = 30000)]
+        execution_timeout_ms: i64,
+        /// Minimum profit threshold for exits
+        #[arg(long, default_value_t = 0.005)]
+        min_profit_threshold: f64,
+        /// Stop loss threshold (negative value)
+        #[arg(long, default_value_t = -0.05)]
+        stop_loss_threshold: f64,
+        /// Log throttle interval in seconds
+        #[arg(long, default_value_t = 5)]
+        throttle_interval_secs: u64,
     },
     /// Run the Portfolio Manager
     Portfolio {
@@ -129,26 +155,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = SimpleTradingConfig {
                 product_id: product_id.clone(),
                 duration: *duration,
-                order_size: Decimal::from_f64(*order_size).unwrap_or(dec!(0.001)),
+                order_size: match Decimal::from_f64(*order_size) {
+                    Some(d) => d,
+                    None => {
+                        warn!("Invalid order_size '{}', defaulting to 0.001", order_size);
+                        dec!(0.001)
+                    }
+                },
                 short_window: *short_window,
                 long_window: *long_window,
                 max_history: *max_history,
                 env,
             };
-            let mut engine = SimpleTradingEngine::new(config).await?;
+            // Create async state persistence channel
+            let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<TradeState>();
+            
+            // Spawn background task for async state persistence
+            tokio::spawn(async move {
+                while let Some(state) = state_rx.recv().await {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Err(e) = state.save() {
+                            tracing::error!("Background state save failed: {}", e);
+                        }
+                    }).await;
+                }
+            });
+            
+            let mut engine = SimpleTradingEngine::new(config, state_tx).await?;
             engine.run().await?;
         }
         Commands::Backtest => {
             run_backtest()?;
         }
-        Commands::DualLeg { strategy, symbols, paper } => {
+        Commands::DualLeg { strategy, symbols, paper, order_size, max_tick_age_ms, execution_timeout_ms, min_profit_threshold, stop_loss_threshold, throttle_interval_secs } => {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
             let parts: Vec<&str> = symbols.split(',').collect();
             if parts.len() != 2 {
                 error!("Error: --symbols must contain exactly two symbols separated by a comma (e.g., BTC-USD,BTC-USDT)");
                 return Ok(());
             }
-            run_dual_leg_trading(strategy, parts[0], parts[1], env).await?;
+            let dual_leg_config = DualLegCliConfig {
+                order_size: *order_size,
+                max_tick_age_ms: *max_tick_age_ms,
+                execution_timeout_ms: *execution_timeout_ms,
+                min_profit_threshold: *min_profit_threshold,
+                stop_loss_threshold: *stop_loss_threshold,
+                throttle_interval_secs: *throttle_interval_secs,
+            };
+            run_dual_leg_trading(strategy, parts[0], parts[1], env, dual_leg_config).await?;
         }
         Commands::Portfolio { config, paper } => {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
@@ -175,14 +229,15 @@ struct SimpleTradingEngine {
     strategy: MovingAverageCrossover,
     state: TradeState,
     config: SimpleTradingConfig,
+    state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
 }
 
 impl SimpleTradingEngine {
-    async fn new(config: SimpleTradingConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(config: SimpleTradingConfig, state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>) -> Result<Self, Box<dyn std::error::Error>> {
         let client = CoinbaseClient::new(config.env.clone())?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
-        Ok(Self { client, strategy, state, config })
+        Ok(Self { client, strategy, state, config, state_tx })
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -228,13 +283,19 @@ impl SimpleTradingEngine {
                         info!("Buy signal received. Placing order.");
                         self.client.place_order(&self.config.product_id, "buy", self.config.order_size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
                         self.state.position_open = true;
-                        self.state.save()?;
+                        // Non-blocking async state persistence
+                        if let Err(e) = self.state_tx.send(self.state.clone()) {
+                            warn!("Failed to queue state save: {}", e);
+                        }
                     }
                     Signal::Sell => {
                         info!("Sell signal received. Placing order.");
                         self.client.place_order(&self.config.product_id, "sell", self.config.order_size, None).await.map_err(|e| e as Box<dyn std::error::Error>)?;
                         self.state.position_open = false;
-                        self.state.save()?;
+                        // Non-blocking async state persistence
+                        if let Err(e) = self.state_tx.send(self.state.clone()) {
+                            warn!("Failed to queue state save: {}", e);
+                        }
                     }
                     Signal::Hold => {
                         info!("Hold signal received. No action taken.");
@@ -256,7 +317,7 @@ use algopioneer::backtest;
 
 /// Loads data and runs the backtest.
 fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n--- Running Backtest for Moving Average Crossover Strategy ---");
+    info!("--- Running Backtest for Moving Average Crossover Strategy ---");
     // Load historical data from CSV
     let file = File::open("sample_data.csv")?;
     let df = CsvReader::new(file).finish()?;
@@ -269,15 +330,15 @@ fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
     let result = backtest::run(&strategy, &df, initial_capital)?;
 
     // Print the results
-    println!("\n--- Backtest Results ---");
-    println!("Initial Capital: ${:.2}", result.initial_capital);
-    println!("Final Capital:   ${:.2}", result.final_capital);
-    println!("Net Profit:      ${:.2}", result.net_profit);
-    println!("Return:          {:.2}%", result.return_percentage());
-    println!("Total Trades:    {}", result.total_trades);
-    println!("Winning Trades:  {}", result.winning_trades);
-    println!("Losing Trades:   {}", result.losing_trades);
-    println!("------------------------");
+    info!("--- Backtest Results ---");
+    info!("Initial Capital: ${:.2}", result.initial_capital);
+    info!("Final Capital:   ${:.2}", result.final_capital);
+    info!("Net Profit:      ${:.2}", result.net_profit);
+    info!("Return:          {:.2}%", result.return_percentage());
+    info!("Total Trades:    {}", result.total_trades);
+    info!("Winning Trades:  {}", result.winning_trades);
+    info!("Losing Trades:   {}", result.losing_trades);
+    info!("------------------------");
 
     Ok(())
 }
@@ -285,9 +346,17 @@ fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
 
 // --- Basis Trading Logic ---
 
+/// CLI configuration for DualLeg strategy (externalized from hardcoded values)
+struct DualLegCliConfig {
+    order_size: f64,
+    max_tick_age_ms: i64,
+    execution_timeout_ms: i64,
+    min_profit_threshold: f64,
+    stop_loss_threshold: f64,
+    throttle_interval_secs: u64,
+}
 
-
-async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str, env: AppEnv) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str, env: AppEnv, cli_config: DualLegCliConfig) -> Result<(), Box<dyn std::error::Error>> {
     info!("--- AlgoPioneer: Initializing Dual-Leg Strategy ({}) ---", strategy_type);
 
     // Initialize components
@@ -330,16 +399,38 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
         }
     };
 
+    let order_size = match Decimal::from_f64(cli_config.order_size) {
+        Some(d) => d,
+        None => {
+            warn!("Invalid order_size '{}', defaulting to 0.00001", cli_config.order_size);
+            dec!(0.00001)
+        }
+    };
+    let min_profit = match Decimal::from_f64(cli_config.min_profit_threshold) {
+        Some(d) => d,
+        None => {
+            warn!("Invalid min_profit_threshold '{}', defaulting to 0.005", cli_config.min_profit_threshold);
+            dec!(0.005)
+        }
+    };
+    let stop_loss = match Decimal::from_f64(cli_config.stop_loss_threshold) {
+        Some(d) => d,
+        None => {
+            warn!("Invalid stop_loss_threshold '{}', defaulting to -0.05", cli_config.stop_loss_threshold);
+            dec!(-0.05)
+        }
+    };
+
     let config = DualLegConfig {
         spot_symbol: leg1_id.to_string(),
         future_symbol: leg2_id.to_string(),
-        order_size: dec!(0.00001),
-        max_tick_age_ms: 2000,
-        execution_timeout_ms: 30000,
-        min_profit_threshold: dec!(0.005),
-        stop_loss_threshold: dec!(-0.05),
+        order_size,
+        max_tick_age_ms: cli_config.max_tick_age_ms,
+        execution_timeout_ms: cli_config.execution_timeout_ms,
+        min_profit_threshold: min_profit,
+        stop_loss_threshold: stop_loss,
         fee_tier: TransactionCostModel::default(),
-        throttle_interval_secs: 5,
+        throttle_interval_secs: cli_config.throttle_interval_secs,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -363,7 +454,7 @@ async fn run_dual_leg_trading(strategy_type: &str, leg1_id: &str, leg2_id: &str,
     // Spawn WebSocket Client
     tokio::spawn(async move {
         if let Err(e) = ws_client.connect_and_subscribe(products, ws_tx).await {
-            eprintln!("WebSocket Error: {}", e);
+            tracing::error!("WebSocket connection failed: {}", e);
         }
     });
 

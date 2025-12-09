@@ -48,8 +48,8 @@ mockall = "0.13.1"
 # These are already in [dependencies] and don't need to be repeated here
 
 [profile.release]
-# OW7: Use jemalloc for better memory allocation performance
-# Uncomment to enable jemalloc (requires jemalloc system package):
-# [target.'cfg(not(target_env = "msvc"))'.dependencies]
-# tikv-jemallocator = "0.5"
+# OW7: Use jemalloc for better memory allocation performance in long-running async apps
 
+# Jemalloc dependency for non-MSVC targets (Linux/macOS)
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.5"

@@ -124,10 +124,18 @@ impl MarketDataProvider for SyntheticProvider {
                         timestamp: chrono::Utc::now().timestamp_millis(),
                     };
                     
-                    // Send without Arc wrapper
-                    if tx.send(tick).await.is_err() {
-                        // Receiver dropped, stop generating
-                        return;
+                    // Non-blocking send with backpressure handling
+                    // In HFT, it's better to drop stale data than process lagged data
+                    match tx.try_send(tick) {
+                        Ok(_) => {},
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            // Channel full: drop tick to maintain real-time sync
+                            // This prevents latency buildup when consumer is slower than producer
+                        },
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            // Receiver dropped, stop generating
+                            return;
+                        }
                     }
                 }
                 
