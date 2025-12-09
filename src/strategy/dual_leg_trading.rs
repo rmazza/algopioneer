@@ -1217,6 +1217,11 @@ impl ExecutionEngine {
         self.circuit_breaker.record_success().await;
         Ok(ExecutionResult::Success)
     }
+    
+    /// Query current position from exchange (for state reconciliation)
+    pub async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        self.client.get_position(symbol).await
+    }
 }
 
 // --- Main Strategy Class ---
@@ -1307,11 +1312,61 @@ impl DualLegStrategy {
             }
         }
     }
+    
+    /// STATE AMNESIA FIX: Reconcile strategy state with actual exchange positions.
+    /// Queries exchange for current holdings and updates state accordingly.
+    /// Should be called at the start of run() before processing any ticks.
+    async fn reconcile_state(&mut self) {
+        info!("Reconciling state with exchange positions...");
+        
+        // Query positions for both legs
+        let leg1_pos = self.execution_engine.get_position(&self.pair.spot_symbol).await;
+        let leg2_pos = self.execution_engine.get_position(&self.pair.future_symbol).await;
+        
+        match (leg1_pos, leg2_pos) {
+            (Ok(leg1_qty), Ok(leg2_qty)) => {
+                // Threshold for considering a position "open" (to handle dust)
+                let threshold = dec!(0.00001);
+                
+                if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
+                    // We have an open position - transition to InPosition
+                    // Use Decimal::ZERO for entry price since exact history is unavailable
+                    info!(
+                        "Detected existing position: leg1={}, leg2={}. Transitioning to InPosition.",
+                        leg1_qty, leg2_qty
+                    );
+                    self.state = StrategyState::InPosition {
+                        leg1_qty,
+                        leg2_qty,
+                        leg1_entry_price: Decimal::ZERO, // Safe fallback - unknown entry
+                        leg2_entry_price: Decimal::ZERO,
+                    };
+                    self.last_state_change_ts = self.clock.now_ts_millis();
+                    
+                    warn!("NOTICE: Entry prices set to 0 due to state recovery. PnL calculations will be inaccurate until position is closed.");
+                } else {
+                    info!("No existing positions detected. Starting in Flat state.");
+                    // Already in Flat, no action needed
+                }
+            }
+            (Err(e1), _) => {
+                error!("Failed to query position for {}: {}. Starting in Flat (RISK: may have orphaned position).", 
+                       self.pair.spot_symbol, e1);
+            }
+            (_, Err(e2)) => {
+                error!("Failed to query position for {}: {}. Starting in Flat (RISK: may have orphaned position).", 
+                       self.pair.future_symbol, e2);
+            }
+        }
+    }
 
     /// Runs the strategy loop.
     #[instrument(skip(self, leg1_rx, leg2_rx), name = "strategy_loop")]
     pub async fn run(&mut self, mut leg1_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>, mut leg2_rx: tokio::sync::mpsc::Receiver<Arc<MarketData>>) {
         info!("Starting Dual-Leg Strategy for {}/{}", self.pair.spot_symbol, self.pair.future_symbol);
+        
+        // STATE AMNESIA FIX: Reconcile position state before processing any ticks
+        self.reconcile_state().await;
 
         let mut latest_leg1: Option<Arc<MarketData>> = None;
         let mut latest_leg2: Option<Arc<MarketData>> = None;

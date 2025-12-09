@@ -317,9 +317,19 @@ impl PortfolioManager {
                             if let Some(senders) = symbol_map.get_mut(&arc_data.symbol) {
                                 senders.retain(|(sender, _)| !sender.is_closed());
                                 
-                                for (sender, _pair_id) in senders {
-                                    if let Err(e) = sender.send(arc_data.clone()).await {
-                                        debug!("Failed to route tick to strategy: {}", e);
+                                for (sender, pair_id) in senders {
+                                    // FIX: Use try_send to prevent latency cascading
+                                    // If one strategy is slow, don't block ticks for all others
+                                    match sender.try_send(arc_data.clone()) {
+                                        Ok(_) => {},
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            // Channel full - strategy is slow, drop tick for this strategy only
+                                            debug!(pair_id = %pair_id, symbol = %arc_data.symbol, "Dropping tick: channel full (strategy backpressure)");
+                                        },
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            // Channel closed - will be cleaned up next iteration
+                                            debug!(pair_id = %pair_id, "Channel closed, will cleanup");
+                                        }
                                     }
                                 }
                             }
