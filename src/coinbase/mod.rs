@@ -129,6 +129,79 @@ impl CoinbaseClient {
         Ok(candles)
     }
 
+    /// Gets product candles with automatic pagination (bypasses 300 limit).
+    /// Fetches multiple batches and stitches them together.
+    pub async fn get_product_candles_paginated(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
+        use chrono::Duration as ChronoDuration;
+        
+        let mut all_candles = Vec::new();
+        let mut current_start = *start;
+        
+        // Calculate hours per candle based on granularity
+        let hours_per_candle: f64 = match granularity {
+            Granularity::OneMinute => 1.0 / 60.0,
+            Granularity::FiveMinute => 5.0 / 60.0,
+            Granularity::FifteenMinute => 0.25,
+            Granularity::ThirtyMinute => 0.5,
+            Granularity::OneHour => 1.0,
+            Granularity::TwoHour => 2.0,
+            Granularity::SixHour => 6.0,
+            Granularity::OneDay => 24.0,
+            _ => 1.0, // Default to 1 hour for unknown
+        };
+        
+        // 300 candles per batch
+        let batch_hours = (300.0 * hours_per_candle) as i64;
+        let batch_duration = ChronoDuration::hours(batch_hours);
+        
+        tracing::debug!(
+            product_id = product_id,
+            batch_hours = batch_hours,
+            "Starting paginated candle fetch"
+        );
+        
+        let mut batch_count = 0;
+        while current_start < *end {
+            let batch_end = (current_start + batch_duration).min(*end);
+            
+            let candles = self.get_product_candles(
+                product_id,
+                &current_start,
+                &batch_end,
+                granularity.clone(),
+            ).await?;
+            
+            if candles.is_empty() {
+                break;
+            }
+            
+            batch_count += 1;
+            tracing::debug!(
+                batch = batch_count,
+                candles = candles.len(),
+                "Fetched candle batch"
+            );
+            
+            all_candles.extend(candles);
+            current_start = batch_end;
+        }
+        
+        tracing::info!(
+            product_id = product_id,
+            total_candles = all_candles.len(),
+            batches = batch_count,
+            "Paginated fetch complete"
+        );
+        
+        Ok(all_candles)
+    }
+
     /// Gets the current position for a symbol.
     /// In paper/sandbox mode returns zero, in live mode would query actual positions.
     pub async fn get_position(&self, _product_id: &str) -> Result<rust_decimal::Decimal, Box<dyn std::error::Error + Send + Sync>> {

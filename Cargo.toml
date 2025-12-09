@@ -53,3 +53,7 @@ mockall = "0.13.1"
 # Jemalloc dependency for non-MSVC targets (Linux/macOS)
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
+
+[[example]]
+name = "optimize_pairs"
+path = "src/examples/optimize_pairs.rs"
