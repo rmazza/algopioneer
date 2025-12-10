@@ -5,7 +5,6 @@ use cbadv::models::product::{Candle, ProductCandleQuery};
 use cbadv::time::Granularity;
 use cbadv::{RestClient, RestClientBuilder};
 use chrono::{DateTime, Utc};
-use std::env;
 use std::sync::Arc;
 // AS5: Rate limiting
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};

@@ -2098,6 +2098,198 @@ impl Drop for DualLegStrategy {
     }
 }
 
+// ============================================================================
+// LIVE STRATEGY WRAPPER (For StrategySupervisor integration)
+// ============================================================================
+
+use crate::strategy::{LiveStrategy, StrategyInput};
+
+/// Configuration for creating a DualLegStrategyLive from config
+#[derive(Debug, Clone)]
+pub struct DualLegLiveConfig {
+    pub dual_leg_config: DualLegConfig,
+    pub window_size: usize,
+    pub entry_z_score: f64,
+    pub exit_z_score: f64,
+    pub strategy_type: DualLegStrategyType,
+}
+
+/// Type of dual-leg strategy to create
+#[derive(Debug, Clone, Copy)]
+pub enum DualLegStrategyType {
+    Basis,
+    Pairs,
+}
+
+/// Live trading wrapper for DualLegStrategy
+/// Implements LiveStrategy trait for use with StrategySupervisor
+pub struct DualLegStrategyLive<E: Executor + 'static> {
+    id: String,
+    config: DualLegLiveConfig,
+    executor: Arc<E>,
+    pnl: Decimal,
+    healthy: bool,
+}
+
+impl<E: Executor + 'static> DualLegStrategyLive<E> {
+    /// Create a new DualLegStrategyLive from configuration
+    pub fn new(id: String, config: DualLegLiveConfig, executor: Arc<E>) -> Self {
+        Self {
+            id,
+            config,
+            executor,
+            pnl: Decimal::ZERO,
+            healthy: true,
+        }
+    }
+
+    /// Build the internal DualLegStrategy with all dependencies
+    fn build_strategy(&self) -> (DualLegStrategy, mpsc::Sender<RecoveryTask>) {
+        let (recovery_tx, recovery_rx) = mpsc::channel(100);
+        let (feedback_tx, feedback_rx) = mpsc::channel(100);
+
+        // Create recovery worker
+        let recovery_worker = RecoveryWorker::new(self.executor.clone(), recovery_rx, feedback_tx);
+        tokio::spawn(async move {
+            recovery_worker.run().await;
+        });
+
+        // Create execution engine
+        let execution_engine = ExecutionEngine::new(
+            self.executor.clone(),
+            recovery_tx.clone(),
+            5,  // max_retries
+            60, // timeout_secs
+        );
+
+        // Create entry manager based on strategy type
+        let entry_manager: Box<dyn EntryStrategy> = match self.config.strategy_type {
+            DualLegStrategyType::Basis => {
+                Box::new(BasisManager::new(
+                    dec!(10.0), // entry_bps
+                    dec!(2.0),  // exit_bps
+                    self.config.dual_leg_config.fee_tier.clone(),
+                ))
+            }
+            DualLegStrategyType::Pairs => {
+                Box::new(PairsManager::new(
+                    self.config.window_size,
+                    self.config.entry_z_score,
+                    self.config.exit_z_score,
+                ))
+            }
+        };
+
+        // Create risk monitor
+        let risk_monitor = RiskMonitor::new(
+            dec!(3.0), // leverage
+            InstrumentType::Linear,
+            HedgeMode::DollarNeutral,
+        );
+
+        let strategy = DualLegStrategy::new(
+            entry_manager,
+            risk_monitor,
+            execution_engine,
+            self.config.dual_leg_config.clone(),
+            feedback_rx,
+            Box::new(SystemClock),
+        );
+
+        (strategy, recovery_tx)
+    }
+}
+
+#[async_trait]
+impl<E: Executor + 'static> LiveStrategy for DualLegStrategyLive<E> {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn subscribed_symbols(&self) -> Vec<String> {
+        vec![
+            self.config.dual_leg_config.spot_symbol.clone(),
+            self.config.dual_leg_config.future_symbol.clone(),
+        ]
+    }
+
+    fn strategy_type(&self) -> &'static str {
+        match self.config.strategy_type {
+            DualLegStrategyType::Basis => "DualLeg-Basis",
+            DualLegStrategyType::Pairs => "DualLeg-Pairs",
+        }
+    }
+
+    fn current_pnl(&self) -> Decimal {
+        self.pnl
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy
+    }
+
+    async fn run(&mut self, mut data_rx: mpsc::Receiver<StrategyInput>) {
+        info!(
+            id = %self.id,
+            strategy_type = self.strategy_type(),
+            spot = %self.config.dual_leg_config.spot_symbol,
+            future = %self.config.dual_leg_config.future_symbol,
+            "Starting DualLegStrategyLive"
+        );
+
+        // Build internal strategy and channels
+        let (mut strategy, _recovery_tx) = self.build_strategy();
+
+        // Create internal channels for the strategy's run() method
+        let (leg1_tx, leg1_rx) = mpsc::channel::<Arc<MarketData>>(100);
+        let (leg2_tx, leg2_rx) = mpsc::channel::<Arc<MarketData>>(100);
+
+        // Spawn the internal strategy run loop
+        let spot_symbol = self.config.dual_leg_config.spot_symbol.clone();
+        let future_symbol = self.config.dual_leg_config.future_symbol.clone();
+
+        let strategy_handle = tokio::spawn(async move {
+            strategy.run(leg1_rx, leg2_rx).await;
+        });
+
+        // Route incoming StrategyInput to the internal channels
+        while let Some(input) = data_rx.recv().await {
+            match input {
+                StrategyInput::Tick(tick) => {
+                    // Route based on symbol
+                    if tick.symbol == spot_symbol {
+                        if leg1_tx.send(tick).await.is_err() {
+                            break;
+                        }
+                    } else if tick.symbol == future_symbol {
+                        if leg2_tx.send(tick).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                StrategyInput::PairedTick { leg1, leg2 } => {
+                    // Send both legs
+                    if leg1_tx.send(leg1).await.is_err() {
+                        break;
+                    }
+                    if leg2_tx.send(leg2).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Cleanup: drop senders to signal strategy to stop
+        drop(leg1_tx);
+        drop(leg2_tx);
+
+        // Wait for strategy to finish
+        let _ = strategy_handle.await;
+
+        info!(id = %self.id, "DualLegStrategyLive stopped");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -242,6 +242,16 @@ impl PortfolioPairConfig {
     }
 }
 
+/// Manages a portfolio of DualLegStrategy instances.
+///
+/// # Deprecated
+/// This struct is deprecated in favor of `StrategySupervisor` with `DualLegStrategyLive`.
+/// `StrategySupervisor` provides a more generic supervisor pattern that works with any
+/// strategy implementing the `LiveStrategy` trait.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use StrategySupervisor with DualLegStrategyLive instead for unified strategy management"
+)]
 pub struct PortfolioManager {
     config_path: String,
     env: AppEnv,
