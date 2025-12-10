@@ -40,9 +40,14 @@ thiserror = "2.0.17"
 governor = "0.6"
 # OW4: Zero-copy string handling
 bytes = "1.5"
+# AS1: Prometheus metrics for observability
+prometheus = "0.13"
+lazy_static = "1.4"
 
 [dev-dependencies]
 mockall = "0.13.1"
+# AS2: Property-based testing for financial math
+proptest = "1.4"
 
 # NP2: Removed duplicate dependencies (axum, tower, dashmap, opentelemetry, etc.)
 # These are already in [dependencies] and don't need to be repeated here

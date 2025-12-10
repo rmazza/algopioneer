@@ -1,5 +1,6 @@
 //! AS10: Health check HTTP endpoint for monitoring
 
+use crate::metrics;
 use crate::resilience::{CircuitBreaker, CircuitState};
 use axum::{routing::get, Json, Router};
 use chrono::Utc; // Added for `chrono::Utc::now()`
@@ -72,9 +73,15 @@ async fn health_check(
     Json(health)
 }
 
+/// AS1: Prometheus metrics endpoint
+async fn metrics_endpoint() -> String {
+    metrics::gather_metrics()
+}
+
 pub async fn run_health_server(port: u16, state: HealthState) {
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/metrics", get(metrics_endpoint))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -93,3 +100,4 @@ pub async fn run_health_server(port: u16, state: HealthState) {
         tracing::error!("Health check server failed: {}", e);
     }
 }
+
