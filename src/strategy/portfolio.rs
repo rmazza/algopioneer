@@ -108,8 +108,11 @@ impl StrategyActor {
 pub struct PortfolioPairConfig {
     #[serde(flatten)]
     pub dual_leg_config: DualLegConfig,
+    /// Rolling window size for z-score calculation (in ticks)
     pub window_size: usize,
+    /// Z-score threshold to enter a position (must be positive)
     pub entry_z_score: f64,
+    /// Z-score threshold to exit a position (must be < entry_z_score)
     pub exit_z_score: f64,
 }
 

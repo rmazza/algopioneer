@@ -32,6 +32,11 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, instrument, warn};
 
+// Re-export shared types for backward compatibility
+pub use crate::types::{MarketData, OrderSide};
+// Re-export Executor from exchange for backward compatibility
+pub use crate::exchange::Executor;
+
 #[derive(Error, Debug)]
 pub enum DualLegError {
     #[error("Invalid input parameters: {0}")]
@@ -71,21 +76,6 @@ impl ExecutionError {
             ExecutionError::OrderRejected(s)
         } else {
             ExecutionError::ExchangeError(s)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum OrderSide {
-    Buy,
-    Sell,
-}
-
-impl std::fmt::Display for OrderSide {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OrderSide::Buy => write!(f, "buy"),
-            OrderSide::Sell => write!(f, "sell"),
         }
     }
 }
@@ -227,19 +217,7 @@ impl Clock for SystemClock {
 }
 
 // --- Domain Models ---
-
-/// Represents a market data update (price tick).
-#[derive(Debug, Clone, PartialEq)]
-pub struct MarketData {
-    /// The trading symbol (e.g., "BTC-USD").
-    pub symbol: String,
-    /// Optional instrument identifier for multi-exchange support (e.g., "coinbase", "binance").
-    pub instrument_id: Option<String>,
-    /// The current price.
-    pub price: Decimal,
-    /// The timestamp of the update.
-    pub timestamp: i64,
-}
+// MarketData is now imported from crate::types
 
 // --- AS2: Market Data Validation ---
 
@@ -723,26 +701,7 @@ pub trait EntryStrategy: Send + Sync {
     async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal;
 }
 
-/// Executor trait for placing orders.
-/// This abstraction allows for easy mocking in tests.
-#[async_trait]
-pub trait Executor: Send + Sync {
-    /// Executes an order.
-    async fn execute_order(
-        &self,
-        symbol: &str,
-        side: OrderSide,
-        quantity: Decimal,
-        price: Option<Decimal>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    /// Gets the current position for a symbol.
-    /// Returns the quantity held (positive for long, negative for short, zero for no position).
-    async fn get_position(
-        &self,
-        symbol: &str,
-    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>>;
-}
+// Executor trait is now imported from crate::exchange
 
 // --- Components ---
 

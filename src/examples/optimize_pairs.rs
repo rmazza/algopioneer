@@ -368,12 +368,47 @@ async fn load_coinbase_data(
     );
 
     // Fetch candles for both legs using paginated method
-    let candles_a = client
+    // Handle API errors gracefully with helpful error messages
+    let candles_a = match client
         .get_product_candles_paginated(leg1, &start, &end, granularity.clone())
-        .await?;
-    let candles_b = client
+        .await
+    {
+        Ok(candles) => candles,
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("INVALID_ARGUMENT") || err_str.contains("ProductID is invalid") {
+                return Err(format!(
+                    "Invalid product ID '{}'. \n\
+                    Common valid pairs: BTC-USD, ETH-USD, SOL-USD, DOGE-USD, etc.\n\
+                    Note: Perpetual futures (e.g., SOL-PERP) are only available on \n\
+                    Coinbase International Exchange for non-US users.\n\
+                    Try: --leg1 SOL-USD --leg2 ETH-USD",
+                    leg1
+                ).into());
+            }
+            return Err(e);
+        }
+    };
+    let candles_b = match client
         .get_product_candles_paginated(leg2, &start, &end, granularity)
-        .await?;
+        .await
+    {
+        Ok(candles) => candles,
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("INVALID_ARGUMENT") || err_str.contains("ProductID is invalid") {
+                return Err(format!(
+                    "Invalid product ID '{}'. \n\
+                    Common valid pairs: BTC-USD, ETH-USD, SOL-USD, DOGE-USD, etc.\n\
+                    Note: Perpetual futures (e.g., SOL-PERP) are only available on \n\
+                    Coinbase International Exchange for non-US users.\n\
+                    Try: --leg1 SOL-USD --leg2 ETH-USD",
+                    leg2
+                ).into());
+            }
+            return Err(e);
+        }
+    };
 
     info!(
         leg1_candles = candles_a.len(),

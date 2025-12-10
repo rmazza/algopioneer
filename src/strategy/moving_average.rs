@@ -220,6 +220,204 @@ impl MovingAverageCrossover {
     }
 }
 
+// ============================================================================
+// LIVE TRADING WRAPPER
+// ============================================================================
+
+use async_trait::async_trait;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+use crate::exchange::Executor;
+use crate::strategy::dual_leg_trading::OrderSide;
+use crate::strategy::{LiveStrategy, StrategyInput};
+
+/// Live trading wrapper for MovingAverageCrossover
+/// Implements LiveStrategy trait for supervision
+pub struct MovingAverageStrategy<E: Executor> {
+    /// Unique identifier for this strategy instance
+    id: String,
+    /// The underlying signal generator
+    strategy: MovingAverageCrossover,
+    /// Symbol to trade
+    symbol: String,
+    /// Order size for trades
+    order_size: Decimal,
+    /// Executor for placing orders
+    executor: Arc<E>,
+    /// Current position status
+    position_open: bool,
+    /// Realized PnL
+    realized_pnl: Decimal,
+    /// Entry price (for PnL calculation)
+    entry_price: Option<Decimal>,
+}
+
+impl<E: Executor + 'static> MovingAverageStrategy<E> {
+    pub fn new(
+        id: String,
+        symbol: String,
+        short_window: usize,
+        long_window: usize,
+        order_size: Decimal,
+        executor: Arc<E>,
+    ) -> Self {
+        Self {
+            id,
+            strategy: MovingAverageCrossover::new(short_window, long_window),
+            symbol,
+            order_size,
+            executor,
+            position_open: false,
+            realized_pnl: Decimal::ZERO,
+            entry_price: None,
+        }
+    }
+
+    /// Warmup the strategy with historical data
+    pub fn warmup(&mut self, prices: &[f64]) {
+        self.strategy.warmup(prices);
+    }
+}
+
+#[async_trait]
+impl<E: Executor + 'static> LiveStrategy for MovingAverageStrategy<E> {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn subscribed_symbols(&self) -> Vec<String> {
+        vec![self.symbol.clone()]
+    }
+
+    fn strategy_type(&self) -> &'static str {
+        "MovingAverageCrossover"
+    }
+
+    fn current_pnl(&self) -> Decimal {
+        self.realized_pnl
+    }
+
+    fn is_healthy(&self) -> bool {
+        true
+    }
+
+    async fn run(&mut self, mut data_rx: mpsc::Receiver<StrategyInput>) {
+        info!(
+            strategy_id = %self.id,
+            symbol = %self.symbol,
+            "MovingAverageStrategy starting"
+        );
+
+        while let Some(input) = data_rx.recv().await {
+            let tick = match input {
+                StrategyInput::Tick(t) => t,
+                StrategyInput::PairedTick { .. } => {
+                    warn!("MovingAverageStrategy received PairedTick, expected single Tick");
+                    continue;
+                }
+            };
+
+            // Only process ticks for our symbol
+            if tick.symbol != self.symbol {
+                continue;
+            }
+
+            // CR-Refactor: Explicit handling instead of unwrap_or(0.0) sentinel
+            let price_f64 = match tick.price.to_f64() {
+                Some(p) if p > 0.0 => p,
+                _ => {
+                    warn!(
+                        strategy_id = %self.id,
+                        price = %tick.price,
+                        "Price conversion failed or invalid, skipping tick"
+                    );
+                    continue;
+                }
+            };
+            let signal = self.strategy.update(price_f64, self.position_open);
+
+            match signal {
+                Signal::Buy if !self.position_open => {
+                    info!(
+                        strategy_id = %self.id,
+                        symbol = %self.symbol,
+                        price = %tick.price,
+                        "Buy signal - placing order"
+                    );
+
+                    match self.executor.execute_order(
+                        &self.symbol,
+                        OrderSide::Buy,
+                        self.order_size,
+                        Some(tick.price),
+                    ).await {
+                        Ok(_) => {
+                            self.position_open = true;
+                            self.entry_price = Some(tick.price);
+                            info!(strategy_id = %self.id, "Buy order executed");
+                        }
+                        Err(e) => {
+                            warn!(strategy_id = %self.id, error = %e, "Buy order failed");
+                        }
+                    }
+                }
+                Signal::Sell if self.position_open => {
+                    info!(
+                        strategy_id = %self.id,
+                        symbol = %self.symbol,
+                        price = %tick.price,
+                        "Sell signal - placing order"
+                    );
+
+                    match self.executor.execute_order(
+                        &self.symbol,
+                        OrderSide::Sell,
+                        self.order_size,
+                        Some(tick.price),
+                    ).await {
+                        Ok(_) => {
+                            // Calculate PnL
+                            if let Some(entry) = self.entry_price {
+                                let pnl = (tick.price - entry) * self.order_size;
+                                self.realized_pnl += pnl;
+                                info!(
+                                    strategy_id = %self.id,
+                                    pnl = %pnl,
+                                    total_pnl = %self.realized_pnl,
+                                    "Position closed"
+                                );
+                            }
+                            self.position_open = false;
+                            self.entry_price = None;
+                        }
+                        Err(e) => {
+                            warn!(strategy_id = %self.id, error = %e, "Sell order failed");
+                        }
+                    }
+                }
+                _ => {
+                    debug!(
+                        strategy_id = %self.id,
+                        signal = ?signal,
+                        price = %tick.price,
+                        "No action"
+                    );
+                }
+            }
+        }
+
+        info!(
+            strategy_id = %self.id,
+            final_pnl = %self.realized_pnl,
+            "MovingAverageStrategy stopped"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,3 +594,4 @@ mod tests {
         assert_eq!(signals[12], Signal::Sell, "Should sell at index 12");
     }
 }
+
