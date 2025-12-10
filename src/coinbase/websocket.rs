@@ -76,8 +76,7 @@ impl CoinbaseWebsocket {
                 }
                 Err(e) => {
                     error!("WebSocket connection failed after {} attempts", max_retries);
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(Box::new(std::io::Error::other(
                         format!("Failed to connect after {} retries: {}", max_retries, e),
                     )));
                 }
@@ -110,7 +109,7 @@ impl CoinbaseWebsocket {
                 Ok(stream) => stream,
                 Err(e) => {
                     error!("Failed to establish WebSocket connection: {}", e);
-                    if reconnect_count >= MAX_RECONNECT_ATTEMPTS {
+                    if reconnect_count == MAX_RECONNECT_ATTEMPTS {
                         return Err(e);
                     }
                     tokio::time::sleep(Duration::from_secs(5)).await;

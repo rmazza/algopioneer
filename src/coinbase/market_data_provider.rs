@@ -25,6 +25,12 @@ pub trait MarketDataProvider: Send + Sync {
 /// Production market data provider using Coinbase WebSocket
 pub struct CoinbaseWebsocketProvider;
 
+impl Default for CoinbaseWebsocketProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoinbaseWebsocketProvider {
     pub fn new() -> Self {
         Self
@@ -41,10 +47,7 @@ impl MarketDataProvider for CoinbaseWebsocketProvider {
 
         // Create new WebSocket connection - convert error to String for Send+Sync
         let ws = CoinbaseWebsocket::new().map_err(|e| -> Box<dyn Error + Send + Sync> {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            Box::new(std::io::Error::other(e.to_string()))
         })?;
 
         // Spawn task to connect and stream data

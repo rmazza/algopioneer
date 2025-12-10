@@ -9,7 +9,7 @@ pub fn save_trade(trade_details: &str) -> Result<(), Box<dyn std::error::Error +
 
     // Add a newline if the file is not empty
     if file.metadata()?.len() > 0 {
-        writeln!(file, "")?;
+        writeln!(file)?;
     }
 
     writeln!(file, "{}", trade_details)?;

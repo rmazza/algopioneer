@@ -284,7 +284,7 @@ impl SimpleTradingEngine {
         config: SimpleTradingConfig,
         state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let client = CoinbaseClient::new(config.env.clone())?;
+        let client = CoinbaseClient::new(config.env)?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
         Ok(Self {
@@ -603,11 +603,11 @@ async fn run_dual_leg_trading(
             tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
             let arc_data = Arc::new(data);
             if arc_data.symbol == leg1_id_clone {
-                if let Err(_) = leg1_tx.send(arc_data.clone()).await {
+                if leg1_tx.send(arc_data.clone()).await.is_err() {
                     break;
                 }
             } else if arc_data.symbol == leg2_id_clone {
-                if let Err(_) = leg2_tx.send(arc_data.clone()).await {
+                if leg2_tx.send(arc_data.clone()).await.is_err() {
                     break;
                 }
             } else {

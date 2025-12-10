@@ -197,6 +197,7 @@ impl MovingAverageCrossover {
         // UPDATE: Removed shift to align with live execution. Signals are now generated
         // immediately when the crossover is detected.
 
+        #[allow(clippy::needless_range_loop)]
         for i in self.long_window..data.height() {
             let short_prev = short_ca.get(i - 1).unwrap_or_default();
             let long_prev = long_ca.get(i - 1).unwrap_or_default();

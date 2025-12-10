@@ -855,7 +855,7 @@ impl EntryStrategy for PairsManager {
 
                 // CF3 FIX: Enforce hard limits on price ratios to prevent precision loss
                 let ratio = v1 / v2;
-                if ratio > MAX_SAFE_PRICE_RATIO || ratio < MIN_SAFE_PRICE_RATIO {
+                if !(MIN_SAFE_PRICE_RATIO..=MAX_SAFE_PRICE_RATIO).contains(&ratio) {
                     // CF3 MONITORING: Increment rejection counter
                     let count = self
                         .precision_rejections
@@ -869,7 +869,7 @@ impl EntryStrategy for PairsManager {
                 }
 
                 // Log warning for ratios approaching the limit (within 2 orders of magnitude)
-                if ratio > MAX_SAFE_PRICE_RATIO / 100.0 || ratio < MIN_SAFE_PRICE_RATIO * 100.0 {
+                if !(MIN_SAFE_PRICE_RATIO * 100.0..=MAX_SAFE_PRICE_RATIO / 100.0).contains(&ratio) {
                     // CF3 MONITORING: Increment warning counter
                     let count = self
                         .precision_warnings
@@ -1263,8 +1263,8 @@ impl ExecutionEngine {
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
 
         // Convert errors to ExecutionError
-        let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
-        let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
+        let spot_res = spot_res.map_err(ExecutionError::from_boxed);
+        let future_res = future_res.map_err(ExecutionError::from_boxed);
 
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
@@ -1332,8 +1332,8 @@ impl ExecutionEngine {
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
 
-        let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
-        let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
+        let spot_res = spot_res.map_err(ExecutionError::from_boxed);
+        let future_res = future_res.map_err(ExecutionError::from_boxed);
 
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
@@ -1400,8 +1400,8 @@ impl ExecutionEngine {
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
 
-        let spot_res = spot_res.map_err(|e| ExecutionError::from_boxed(e));
-        let future_res = future_res.map_err(|e| ExecutionError::from_boxed(e));
+        let spot_res = spot_res.map_err(ExecutionError::from_boxed);
+        let future_res = future_res.map_err(ExecutionError::from_boxed);
 
         if spot_res.is_err() && future_res.is_err() {
             self.circuit_breaker.record_failure().await;
@@ -1738,27 +1738,25 @@ impl DualLegStrategy {
                                 reason
                             );
                             self.transition_state(StrategyState::Reconciling);
-                        } else {
-                            if let StrategyState::Exiting {
+                        } else if let StrategyState::Exiting {
+                            leg1_qty,
+                            leg2_qty,
+                            leg1_entry_price,
+                            leg2_entry_price,
+                        } = self.state
+                        {
+                            info!(
+                                "Exit rejected/failed definitively. Reverting to InPosition."
+                            );
+                            self.transition_state(StrategyState::InPosition {
                                 leg1_qty,
                                 leg2_qty,
                                 leg1_entry_price,
                                 leg2_entry_price,
-                            } = self.state
-                            {
-                                info!(
-                                    "Exit rejected/failed definitively. Reverting to InPosition."
-                                );
-                                self.transition_state(StrategyState::InPosition {
-                                    leg1_qty,
-                                    leg2_qty,
-                                    leg1_entry_price,
-                                    leg2_entry_price,
-                                });
-                            } else {
-                                error!("CRITICAL: State mismatch! Expected Exiting but found {:?}. Transitioning to Reconciling.", self.state);
-                                self.transition_state(StrategyState::Reconciling);
-                            }
+                            });
+                        } else {
+                            error!("CRITICAL: State mismatch! Expected Exiting but found {:?}. Transitioning to Reconciling.", self.state);
+                            self.transition_state(StrategyState::Reconciling);
                         }
                     }
                     _ => {}

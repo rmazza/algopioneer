@@ -30,6 +30,9 @@ const STRATEGY_CHANNEL_BUFFER: usize = 100; // ~100ms buffer per leg
 const RECOVERY_CHANNEL_BUFFER: usize = 100;
 const FEEDBACK_CHANNEL_BUFFER: usize = 100;
 
+/// Type alias for the symbol routing map to reduce type complexity
+type SymbolRouterMap = HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>;
+
 // Reconnection constants
 const MAX_RECONNECT_BACKOFF_SECS: u64 = 30;
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
@@ -116,6 +119,12 @@ pub struct PortfolioPnL {
     total_pnl: Arc<Mutex<Decimal>>,
     // OW5: DashMap for lock-free concurrent access
     strategy_pnls: Arc<DashMap<String, Decimal>>,
+}
+
+impl Default for PortfolioPnL {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PortfolioPnL {
@@ -293,7 +302,7 @@ impl PortfolioManager {
 
         // 2. Initialize Shared Resources
         let client = Arc::new(
-            CoinbaseClient::new(self.env.clone())
+            CoinbaseClient::new(self.env)
                 .map_err(|e| PortfolioError::Infrastructure(e.to_string()))?,
         );
 
@@ -303,8 +312,7 @@ impl PortfolioManager {
 
         // Symbol Map: Symbol -> List of (Sender, PairID)
         // We need PairID to remove stale senders on restart.
-        let mut symbol_map: HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>> =
-            HashMap::new();
+        let mut symbol_map: SymbolRouterMap = HashMap::new();
 
         // OW1: Use HashSet for O(n) instead of O(n²) duplicate checking
         let mut symbols_set: HashSet<String> = HashSet::new();
@@ -505,7 +513,7 @@ impl PortfolioManager {
     #[instrument(skip_all, fields(pair_id = %config.pair_id()))]
     async fn spawn_strategy(
         join_set: &mut JoinSet<String>,
-        symbol_map: &mut HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
+        symbol_map: &mut SymbolRouterMap,
         client: Arc<CoinbaseClient>,
         config: Arc<PortfolioPairConfig>,
     ) {
@@ -575,7 +583,7 @@ impl PortfolioManager {
 
     /// DRY helper: Register a symbol->sender mapping for tick distribution
     fn register_symbol(
-        map: &mut HashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
+        map: &mut SymbolRouterMap,
         symbol: String,
         sender: mpsc::Sender<Arc<MarketData>>,
         pair_id: String,

@@ -18,9 +18,13 @@ use tokio::time::Duration;
 // 1. We define a mock struct with a method that returns a 'static Future.
 // 2. We implement the Executor trait for this mock struct, delegating to the mock method.
 
+/// Type alias the async Result type to reduce complexity warnings
+type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+type ExecuteOrderResult = BoxedFuture<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
 mock! {
     pub ExecutorImpl {
-        fn execute_order_mock(&self, symbol: &str, side: &str, quantity: Decimal) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static>>;
+        fn execute_order_mock(&self, symbol: &str, side: &str, quantity: Decimal) -> ExecuteOrderResult;
     }
 }
 
