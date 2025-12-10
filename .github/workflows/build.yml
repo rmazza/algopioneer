@@ -84,14 +84,28 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+            ${{ runner.os }}-cargo-
+
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out xml --skip-clean
+        run: cargo tarpaulin --out xml --skip-clean --ignore-tests --timeout 300
         env:
           COINBASE_API_KEY: "test-key-ci"
           COINBASE_API_SECRET: "test-secret-ci"
+          # Disable jemalloc during coverage - it conflicts with tarpaulin instrumentation
+          JEMALLOC_SYS_WITH_MALLOC_CONF: ""
 
   # Dependency license and duplicate check
   deny:
