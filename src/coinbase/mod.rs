@@ -30,20 +30,28 @@ impl CoinbaseClient {
     ///
     /// It initializes the connection to the Coinbase Advanced Trade API
     /// using credentials from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error if COINBASE_API_KEY or COINBASE_API_SECRET environment
+    /// variables are not set, or if the REST client fails to build.
     pub fn new(env: AppEnv) -> Result<Self, Box<dyn std::error::Error>> {
         // Retrieve API Key and Secret from environment variables
-        let _api_key = env::var("COINBASE_API_KEY")
-            .expect("COINBASE_API_KEY must be set in .env file or environment.");
-        let _api_secret = env::var("COINBASE_API_SECRET")
-            .expect("COINBASE_API_SECRET must be set in .env file or environment.");
+        let api_key = std::env::var("COINBASE_API_KEY")
+            .map_err(|_| "COINBASE_API_KEY must be set in .env file or environment")?;
+        let api_secret = std::env::var("COINBASE_API_SECRET")
+            .map_err(|_| "COINBASE_API_SECRET must be set in .env file or environment")?;
 
         // Build the REST client, wiring API credentials from the environment
         let client: RestClient = RestClientBuilder::new()
-            .with_authentication(&_api_key, &_api_secret)
+            .with_authentication(&api_key, &api_secret)
             .build()?;
 
         // AS5: Initialize rate limiter (Coinbase Advanced Trade: 10 requests/second)
-        let quota = Quota::per_second(NonZeroU32::new(10).unwrap());
+        // SAFETY: 10 is a non-zero constant, this will never fail
+        const RATE_LIMIT: u32 = 10;
+        let quota = Quota::per_second(
+            NonZeroU32::new(RATE_LIMIT).expect("RATE_LIMIT is non-zero constant"),
+        );
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {
