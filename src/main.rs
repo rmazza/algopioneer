@@ -765,11 +765,11 @@ async fn run_discover_pairs(
         "\n{:<20} | {:<8} | {:<8} | {:<8} | {:<10} | {:>12}",
         "Pair", "Window", "Z-Entry", "Sharpe", "Corr", "Net Profit"
     );
-    println!("{}", "-".repeat(80));
+    println!("--------------------------------------------------------------------------------");
 
     for pair in &results {
         println!(
-            "{:<20} | {:<8} | {:<8.1} | {:<8.2} | {:<10.3} | ${:>11.2}",
+            "{:<20} | {:<8} | {:<8.1} | {:<8.2} | {:<10.3} | ${:>10.2}",
             format!("{}/{}", pair.leg1, pair.leg2),
             pair.window,
             pair.z_entry,
@@ -777,6 +777,20 @@ async fn run_discover_pairs(
             pair.correlation,
             pair.net_profit
         );
+        
+        if pair.sharpe_ratio > 10.0 {
+            warn!(
+                pair = format!("{}/{}", pair.leg1, pair.leg2),
+                sharpe = pair.sharpe_ratio,
+                "Suspiciously high Sharpe ratio (>10.0) - possible overfitting or insufficient trades"
+            );
+        }
+    }
+    
+    // Warn if any Sharpe ratios are extremely high
+    if results.iter().any(|p| p.sharpe_ratio > 10.0) {
+        println!("\nWARNING: Some pairs have Sharpe ratios > 10.0. This may indicate overfitting or insufficient trade count.");
+        println!("         Verify results with a longer lookback period or --paper trading.");
     }
 
     // Convert to PortfolioPairConfig format

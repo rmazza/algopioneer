@@ -139,7 +139,7 @@ impl Position {
 }
 
 /// Trading days per year for Sharpe annualization
-const ANNUALIZATION_FACTOR: f64 = 252.0;
+
 
 /// Calculate annualized Sharpe ratio from trade returns
 fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
@@ -168,12 +168,12 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
     
     let std_dev = variance.sqrt();
 
+    // Per-trade Sharpe ratio (not annualized) to avoid inflation on high-frequency trading
     if std_dev.abs() < f64::EPSILON {
         return 0.0;
     }
 
-    // Annualized Sharpe ratio
-    (mean / std_dev) * ANNUALIZATION_FACTOR.sqrt()
+    mean / std_dev
 }
 
 /// Run backtest simulation for given parameters
@@ -303,7 +303,11 @@ async fn optimize_pair(
 
     best_result.and_then(|result| {
         // Filter by minimum Sharpe ratio
+        // Filter by minimum Sharpe ratio and Net Profit
         if result.sharpe_ratio < config.min_sharpe_ratio {
+            return None;
+        }
+        if result.net_profit < config.min_net_profit {
             return None;
         }
 

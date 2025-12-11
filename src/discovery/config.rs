@@ -49,6 +49,10 @@ pub struct DiscoveryConfig {
     /// Minimum number of trades required for valid backtest
     #[serde(default = "default_min_trades")]
     pub min_trades: u32,
+
+    /// Minimum net profit required (in USD)
+    #[serde(default = "default_min_net_profit")]
+    pub min_net_profit: Decimal,
 }
 
 // Default value functions for serde
@@ -60,6 +64,7 @@ fn default_max_pairs() -> usize { 10 }
 fn default_initial_capital() -> Decimal { dec!(10_000) }
 fn default_taker_fee() -> Decimal { dec!(0.002) }
 fn default_min_trades() -> u32 { 5 }
+fn default_min_net_profit() -> Decimal { dec!(0) }
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
@@ -73,6 +78,7 @@ impl Default for DiscoveryConfig {
             initial_capital: default_initial_capital(),
             taker_fee: default_taker_fee(),
             min_trades: default_min_trades(),
+            min_net_profit: default_min_net_profit(),
         }
     }
 }
