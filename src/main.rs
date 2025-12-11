@@ -800,10 +800,22 @@ async fn run_discover_pairs(
         println!("         Verify results with a longer lookback period or --paper trading.");
     }
 
+    // Calculate allocation per pair (Equal Weight)
+    // Allocation = Initial Capital / Max Pairs (to ensure safety even if fewer pairs are found)
+    let initial_capital_dec = Decimal::from_f64_retain(initial_capital).unwrap_or(dec!(10000));
+    let allocation = initial_capital_dec / Decimal::from(max_pairs);
+    
+    info!(
+        capital = %initial_capital_dec,
+        max_pairs = max_pairs,
+        per_pair = %allocation,
+        "Calculated portfolio allocation"
+    );
+
     // Convert to PortfolioPairConfig format
     let portfolio_configs: Vec<PortfolioPairConfig> = results
         .iter()
-        .map(|p| p.to_portfolio_config())
+        .map(|p| p.to_portfolio_config(allocation))
         .collect();
 
     // Write output file

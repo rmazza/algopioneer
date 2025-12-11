@@ -50,12 +50,12 @@ pub struct OptimizedPair {
 
 impl OptimizedPair {
     /// Convert to PortfolioPairConfig for use with PortfolioManager
-    pub fn to_portfolio_config(&self) -> PortfolioPairConfig {
+    pub fn to_portfolio_config(&self, allocation: Decimal) -> PortfolioPairConfig {
         PortfolioPairConfig {
             dual_leg_config: DualLegConfig {
                 spot_symbol: self.leg1.clone(),
                 future_symbol: self.leg2.clone(),
-                order_size: dec!(10.0), // Default $10 allocation
+                order_size: allocation,
                 max_tick_age_ms: 2000,
                 execution_timeout_ms: 30000,
                 min_profit_threshold: dec!(0.001),
@@ -572,9 +572,10 @@ mod tests {
             half_life_hours: 12.0,
         };
 
-        let config = pair.to_portfolio_config();
+        let config = pair.to_portfolio_config(dec!(100));
         assert_eq!(config.dual_leg_config.spot_symbol, "BTC-USD");
         assert_eq!(config.dual_leg_config.future_symbol, "ETH-USD");
+        assert_eq!(config.dual_leg_config.order_size, dec!(100));
         assert_eq!(config.window_size, 20);
         assert_eq!(config.entry_z_score, 2.0);
     }
