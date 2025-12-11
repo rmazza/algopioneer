@@ -189,6 +189,9 @@ enum Commands {
         /// Output file path for discovered pairs JSON
         #[arg(long, default_value = "discovered_pairs.json")]
         output: String,
+        /// Initial capital for backtests in USD
+        #[arg(long, default_value_t = 10000.0)]
+        initial_capital: f64,
     },
 }
 
@@ -308,6 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             lookback_days,
             max_pairs,
             output,
+            initial_capital,
         } => {
             run_discover_pairs(
                 symbols,
@@ -317,6 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *lookback_days,
                 *max_pairs,
                 output,
+                *initial_capital,
             )
             .await?;
         }
@@ -707,6 +712,7 @@ async fn run_discover_pairs(
     lookback_days: u32,
     max_pairs: usize,
     output_path: &str,
+    initial_capital: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use algopioneer::discovery::config::DEFAULT_CANDIDATES;
     use algopioneer::strategy::portfolio::PortfolioPairConfig;
@@ -738,6 +744,7 @@ async fn run_discover_pairs(
         min_sharpe_ratio: min_sharpe,
         lookback_days,
         max_pairs_output: max_pairs,
+        initial_capital: Decimal::from_f64_retain(initial_capital).unwrap_or(dec!(10000)),
         ..Default::default()
     };
 
