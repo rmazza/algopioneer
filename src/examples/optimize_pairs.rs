@@ -126,7 +126,7 @@ impl Position {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     let args = Args::parse();
 

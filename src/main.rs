@@ -18,7 +18,7 @@ use algopioneer::strategy::Signal;
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::Parser;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use polars::prelude::*;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
