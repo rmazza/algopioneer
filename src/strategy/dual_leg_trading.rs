@@ -2166,7 +2166,7 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
                 Box::new(BasisManager::new(
                     dec!(10.0), // entry_bps
                     dec!(2.0),  // exit_bps
-                    self.config.dual_leg_config.fee_tier.clone(),
+                    self.config.dual_leg_config.fee_tier,
                 ))
             }
             DualLegStrategyType::Pairs => Box::new(PairsManager::new(
@@ -2252,15 +2252,16 @@ impl<E: Executor + 'static> LiveStrategy for DualLegStrategyLive<E> {
         while let Some(input) = data_rx.recv().await {
             match input {
                 StrategyInput::Tick(tick) => {
-                    // Route based on symbol
-                    if tick.symbol == spot_symbol {
-                        if leg1_tx.send(tick).await.is_err() {
-                            break;
-                        }
+                    // Route based on symbol - check symbol first, then send
+                    let send_failed = if tick.symbol == spot_symbol {
+                        leg1_tx.send(tick).await.is_err()
                     } else if tick.symbol == future_symbol {
-                        if leg2_tx.send(tick).await.is_err() {
-                            break;
-                        }
+                        leg2_tx.send(tick).await.is_err()
+                    } else {
+                        false // Unknown symbol, ignore
+                    };
+                    if send_failed {
+                        break;
                     }
                 }
                 StrategyInput::PairedTick { leg1, leg2 } => {

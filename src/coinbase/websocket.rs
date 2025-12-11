@@ -32,8 +32,12 @@ struct WsTicker {
 }
 
 pub struct CoinbaseWebsocket {
-    _api_key: String,
-    _api_secret: String,
+    /// Reserved for authenticated WebSocket connections (signing requests)
+    #[allow(dead_code)]
+    api_key: String,
+    /// Reserved for authenticated WebSocket connections (signing requests)
+    #[allow(dead_code)]
+    api_secret: String,
 }
 
 impl CoinbaseWebsocket {
@@ -41,8 +45,8 @@ impl CoinbaseWebsocket {
         let api_key = env::var("COINBASE_API_KEY")?;
         let api_secret = env::var("COINBASE_API_SECRET")?;
         Ok(Self {
-            _api_key: api_key,
-            _api_secret: api_secret,
+            api_key,
+            api_secret,
         })
     }
 
@@ -84,7 +88,11 @@ impl CoinbaseWebsocket {
             }
         }
 
-        unreachable!()
+        // This should never be reached since the for loop handles all attempts,
+        // but provide a fallback error for safety
+        Err(Box::new(std::io::Error::other(
+            "Connection retry loop exited unexpectedly",
+        )))
     }
 
     pub async fn connect_and_subscribe(

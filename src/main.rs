@@ -388,7 +388,7 @@ impl SimpleTradingEngine {
                             symbol: self.config.product_id.clone(),
                             side: "buy".to_string(),
                             quantity: self.config.order_size,
-                            entry_price: Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0)),
+                            entry_price: Decimal::from_f64(latest_candle.close).unwrap_or(Decimal::ZERO),
                         };
                         self.state.open_position(detail);
 
@@ -412,7 +412,7 @@ impl SimpleTradingEngine {
                         // Close position and log details
                         if let Some(closed) = self.state.close_position(&self.config.product_id) {
                             let exit_price =
-                                Decimal::from_f64(latest_candle.close).unwrap_or(dec!(0));
+                                Decimal::from_f64(latest_candle.close).unwrap_or(Decimal::ZERO);
                             let pnl = (exit_price - closed.entry_price) * closed.quantity;
                             info!(
                                 "Closed position: entry={}, exit={}, pnl={}",

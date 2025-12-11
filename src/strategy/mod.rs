@@ -2,6 +2,7 @@ pub mod dual_leg_trading;
 pub mod moving_average;
 pub mod portfolio;
 pub mod supervisor;
+pub mod tick_router;
 
 use async_trait::async_trait;
 use polars::prelude::*;
