@@ -19,6 +19,11 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 - **Pairs Trading**: Statistical arbitrage with Z-score analysis
 - **Portfolio Mode**: Multi-strategy execution with supervisor pattern
 
+### Research & Discovery
+- **Automated Pair Discovery**: Find cointegrated pairs with correlation and half-life filtering
+- **Parameter Optimization**: Grid search backtesting with Sharpe ratio ranking
+- **Backtest Simulation**: Evaluate strategy performance on historical data
+
 ### Production Features
 - ✅ **Live Trading**: Real-time execution on Coinbase Advanced Trade
 - ✅ **Paper Trading**: Risk-free simulation mode for testing
@@ -65,7 +70,36 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 
 AlgoPioneer uses a CLI interface to manage different modes and strategies.
 
-### 1. Standard Trading (Moving Average Crossover)
+### 1. Pair Discovery (Automated)
+
+Automatically find and optimize cointegrated trading pairs.
+
+```bash
+# Default: Analyze top 20 pairs with default thresholds
+cargo run --release -- discover-pairs
+
+# Custom configuration
+cargo run --release -- discover-pairs \
+  --symbols "BTC-USD,ETH-USD,SOL-USD,AVAX-USD" \
+  --min-correlation 0.85 \
+  --max-half-life 12.0 \
+  --lookback-days 14 \
+  --max-pairs 5 \
+  --output my_pairs.json
+```
+
+**Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--symbols` | `default` | Comma-separated pairs or "default" for top 20 |
+| `--min-correlation` | `0.8` | Minimum Pearson correlation |
+| `--max-half-life` | `24.0` | Maximum mean-reversion half-life (hours) |
+| `--min-sharpe` | `0.5` | Minimum Sharpe ratio filter |
+| `--lookback-days` | `14` | Historical data window |
+| `--max-pairs` | `10` | Number of pairs to output |
+| `--output` | `discovered_pairs.json` | Output file path |
+
+### 2. Standard Trading (Moving Average Crossover)
 
 Run the standard trading bot on a specific product.
 
@@ -79,7 +113,7 @@ cargo run --release -- trade --product-id BTC-USD --duration 60
 cargo run --release -- trade --product-id BTC-USD --paper
 ```
 
-### 2. Dual-Leg Trading (Basis & Pairs)
+### 3. Dual-Leg Trading (Basis & Pairs)
 
 Run dual-leg strategies using the `dual-leg` command.
 
@@ -93,7 +127,16 @@ cargo run --release -- dual-leg --strategy basis --symbols BTC-USD,BTC-USDT --pa
 cargo run --release -- dual-leg --strategy pairs --symbols BTC-USD,ETH-USD --paper
 ```
 
-### 3. Backtesting
+### 4. Portfolio Mode
+
+Run multiple pairs from a configuration file.
+
+```bash
+# Use discovered pairs
+cargo run --release -- portfolio --config discovered_pairs.json --paper
+```
+
+### 5. Backtesting
 
 Run a backtest using historical data (currently configured for the Moving Average strategy).
 
@@ -112,22 +155,35 @@ algopioneer/
 │   │   ├── mod.rs             # Coinbase API client with position querying
 │   │   ├── websocket.rs       # Real-time WebSocket data streaming
 │   │   └── market_data_provider.rs  # Abstracted data sources (live + synthetic)
+│   ├── discovery/             # NEW: Automated pair discovery
+│   │   ├── mod.rs             # Module exports
+│   │   ├── config.rs          # DiscoveryConfig with serde support
+│   │   ├── error.rs           # Typed errors with thiserror
+│   │   ├── filter.rs          # Correlation + half-life filtering
+│   │   └── optimizer.rs       # Grid search parameter optimization
 │   ├── strategy/
 │   │   ├── dual_leg_trading.rs  # Main arbitrage strategy with state machine
 │   │   ├── moving_average.rs    # Moving average crossover strategy
-│   │   └── portfolio.rs         # Portfolio manager with supervisor pattern
+│   │   ├── portfolio.rs         # Portfolio manager with supervisor pattern
+│   │   ├── supervisor.rs        # Strategy supervisor for multi-strategy
+│   │   └── tick_router.rs       # Market data routing with backpressure
+│   ├── resilience/
+│   │   ├── mod.rs             # Resilience patterns
+│   │   └── circuit_breaker.rs # Circuit breaker with RwLock
 │   ├── health.rs               # HTTP health check endpoint (/health)
 │   ├── observability.rs        # OpenTelemetry tracing integration
-│   └── bin/
-│       └── find_pairs.rs       # Pairs discovery utility
+│   └── examples/
+│       └── optimize_pairs.rs   # Pairs optimization example
 ├── tests/
-│   └── integration_test.rs     # Integration tests with mock executor
+│   ├── integration_test.rs     # Integration tests with mock executor
+│   └── proptest_financial.rs   # Property-based tests for financial math
 ├── Cargo.toml                  # Dependencies and project metadata
 └── .env                        # API credentials (not committed)
 ```
 
 ### Key Components
 
+- **Discovery**: Automated pair finding with correlation, half-life, and Sharpe filtering
 - **Strategies**: Modular trading logic with trait-based abstraction
 - **Execution Engine**: Order placement with circuit breaker and retry logic
 - **Recovery System**: Queue-based recovery with exponential backoff
@@ -155,3 +211,4 @@ cargo clippy
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
