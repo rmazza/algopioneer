@@ -17,9 +17,9 @@ use super::filter::{filter_candidates, CandidatePair};
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -147,10 +147,10 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
         return 0.0;
     }
 
-    // Convert to f64 for statistical calculations
+    // Convert to f64 for statistical calculations (using ToPrimitive)
     let float_returns: Vec<f64> = returns
         .iter()
-        .filter_map(|d| d.to_string().parse::<f64>().ok())
+        .filter_map(|d| d.to_f64())
         .collect();
 
     if float_returns.len() < 2 {
@@ -193,22 +193,21 @@ async fn run_backtest(
     let mut trades = 0u32;
     let mut trade_returns: Vec<Decimal> = Vec::with_capacity(timestamps.len() / 10);
 
-    // Pre-allocate symbol strings (optimization)
-    let symbol_a: Arc<str> = Arc::from("A");
-    let symbol_b: Arc<str> = Arc::from("B");
+    // Symbol strings are only used for logging in PairsManager.analyze()
+    // Since we're backtesting, we don't need real symbol names
 
     for i in 0..timestamps.len() {
         let p_a = prices_a[i];
         let p_b = prices_b[i];
 
         let leg1 = MarketData {
-            symbol: symbol_a.to_string(),
+            symbol: String::from("A"), // Static symbol for backtesting
             price: p_a,
             instrument_id: None,
             timestamp: timestamps[i],
         };
         let leg2 = MarketData {
-            symbol: symbol_b.to_string(),
+            symbol: String::from("B"), // Static symbol for backtesting
             price: p_b,
             instrument_id: None,
             timestamp: timestamps[i],

@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+/// Fallback half-life for non-stationary or invalid spreads (hours)
+const NON_STATIONARY_HALF_LIFE: f64 = 1000.0;
+
 /// A candidate pair that passed initial filtering
 #[derive(Debug, Clone)]
 pub struct CandidatePair {
@@ -102,7 +105,7 @@ pub fn analyze_spread(spread: &[f64]) -> (f64, f64) {
     let half_life = if rho > 0.0 && rho < 1.0 {
         -2.0f64.ln() / rho.ln()
     } else {
-        1000.0 // Non-stationary or invalid
+        NON_STATIONARY_HALF_LIFE // Non-stationary or invalid
     };
 
     (std_dev, half_life)
