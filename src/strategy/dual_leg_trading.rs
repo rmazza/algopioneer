@@ -1828,7 +1828,13 @@ impl DualLegStrategy {
                     return;
                 }
 
-                let leg1_qty = self.config.order_size;
+                // FIX: Interpret order_size as USD Allocation.
+                // Quantity = Allocation / Price
+                if leg1.price.is_zero() {
+                    warn!("Invalid price 0.0 for {}", leg1.symbol);
+                    return;
+                }
+                let leg1_qty = self.config.order_size / leg1.price;
                 if let Ok(hedge_qty) = self
                     .risk_monitor
                     .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
@@ -1876,7 +1882,13 @@ impl DualLegStrategy {
                     return;
                 }
 
-                let leg1_qty = self.config.order_size;
+                // FIX: Interpret order_size as USD Allocation.
+                // Quantity = Allocation / Price
+                if leg1.price.is_zero() {
+                    warn!("Invalid price 0.0 for {}", leg1.symbol);
+                    return;
+                }
+                let leg1_qty = self.config.order_size / leg1.price;
                 if let Ok(hedge_qty) = self
                     .risk_monitor
                     .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
