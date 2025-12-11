@@ -7,6 +7,7 @@ use tikv_jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 use algopioneer::coinbase::websocket::CoinbaseWebsocket;
+use algopioneer::discovery::{discover_and_optimize, DiscoveryConfig};
 use algopioneer::exchange::coinbase::{AppEnv, CoinbaseClient};
 use algopioneer::strategy::dual_leg_trading::{
     BasisManager, DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType,
@@ -165,6 +166,30 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         paper: bool,
     },
+    /// Discover and optimize cointegrated trading pairs automatically
+    DiscoverPairs {
+        /// Symbols to analyze (comma-separated, or "default" for top 20 pairs)
+        #[arg(long, default_value = "default")]
+        symbols: String,
+        /// Minimum Pearson correlation threshold
+        #[arg(long, default_value_t = 0.8)]
+        min_correlation: f64,
+        /// Maximum half-life in hours for mean reversion
+        #[arg(long, default_value_t = 24.0)]
+        max_half_life: f64,
+        /// Minimum Sharpe ratio to include in results
+        #[arg(long, default_value_t = 0.5)]
+        min_sharpe: f64,
+        /// Historical lookback period in days
+        #[arg(long, default_value_t = 14)]
+        lookback_days: u32,
+        /// Maximum number of pairs to output
+        #[arg(long, default_value_t = 10)]
+        max_pairs: usize,
+        /// Output file path for discovered pairs JSON
+        #[arg(long, default_value = "discovered_pairs.json")]
+        output: String,
+    },
 }
 
 // --- Main Application Logic ---
@@ -274,6 +299,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
             let mut manager = PortfolioManager::new(config, env);
             manager.run().await?;
+        }
+        Commands::DiscoverPairs {
+            symbols,
+            min_correlation,
+            max_half_life,
+            min_sharpe,
+            lookback_days,
+            max_pairs,
+            output,
+        } => {
+            run_discover_pairs(
+                symbols,
+                *min_correlation,
+                *max_half_life,
+                *min_sharpe,
+                *lookback_days,
+                *max_pairs,
+                output,
+            )
+            .await?;
         }
     }
 
@@ -648,6 +693,110 @@ async fn run_dual_leg_trading(
 
     // Run strategy
     strategy.run(leg1_rx, leg2_rx).await;
+
+    Ok(())
+}
+
+// --- Pair Discovery Logic ---
+
+async fn run_discover_pairs(
+    symbols_arg: &str,
+    min_correlation: f64,
+    max_half_life: f64,
+    min_sharpe: f64,
+    lookback_days: u32,
+    max_pairs: usize,
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use algopioneer::discovery::config::DEFAULT_CANDIDATES;
+    use algopioneer::strategy::portfolio::PortfolioPairConfig;
+
+    info!("--- AlgoPioneer: Pair Discovery Pipeline ---");
+
+    // Parse symbols
+    let candidates: Vec<String> = if symbols_arg == "default" {
+        info!("Using default top-20 candidate pairs");
+        DEFAULT_CANDIDATES.iter().map(|s| s.to_string()).collect()
+    } else {
+        symbols_arg.split(',').map(|s| s.trim().to_string()).collect()
+    };
+
+    info!(
+        candidates = candidates.len(),
+        min_corr = min_correlation,
+        max_hl = max_half_life,
+        min_sharpe = min_sharpe,
+        lookback = lookback_days,
+        "Configuration loaded"
+    );
+
+    // Build discovery config
+    let config = DiscoveryConfig {
+        candidates,
+        min_correlation,
+        max_half_life_hours: max_half_life,
+        min_sharpe_ratio: min_sharpe,
+        lookback_days,
+        max_pairs_output: max_pairs,
+        ..Default::default()
+    };
+
+    // Initialize Coinbase client
+    let mut client = CoinbaseClient::new(AppEnv::Live)?;
+
+    // Run discovery pipeline
+    info!("Starting discovery and optimization...");
+    let results = match discover_and_optimize(&mut client, &config).await {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            error!("Discovery failed: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    if results.is_empty() {
+        warn!("No pairs found matching criteria");
+        return Ok(());
+    }
+
+    // Display results
+    info!("\n=== DISCOVERED PAIRS ===");
+    println!(
+        "\n{:<20} | {:<8} | {:<8} | {:<8} | {:<10} | {:>12}",
+        "Pair", "Window", "Z-Entry", "Sharpe", "Corr", "Net Profit"
+    );
+    println!("{}", "-".repeat(80));
+
+    for pair in &results {
+        println!(
+            "{:<20} | {:<8} | {:<8.1} | {:<8.2} | {:<10.3} | ${:>11.2}",
+            format!("{}/{}", pair.leg1, pair.leg2),
+            pair.window,
+            pair.z_entry,
+            pair.sharpe_ratio,
+            pair.correlation,
+            pair.net_profit
+        );
+    }
+
+    // Convert to PortfolioPairConfig format
+    let portfolio_configs: Vec<PortfolioPairConfig> = results
+        .iter()
+        .map(|p| p.to_portfolio_config())
+        .collect();
+
+    // Write output file
+    let json = serde_json::to_string_pretty(&portfolio_configs)?;
+    std::fs::write(output_path, &json)?;
+
+    info!(
+        output = output_path,
+        pairs = results.len(),
+        "Configuration saved"
+    );
+
+    println!("\n✓ Saved {} pairs to {}", results.len(), output_path);
+    println!("  Run with: cargo run -- portfolio --config {}", output_path);
 
     Ok(())
 }
