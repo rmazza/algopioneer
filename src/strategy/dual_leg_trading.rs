@@ -1704,9 +1704,7 @@ impl DualLegStrategy {
                             leg2_entry_price,
                         } = self.state
                         {
-                            info!(
-                                "Exit rejected/failed definitively. Reverting to InPosition."
-                            );
+                            info!("Exit rejected/failed definitively. Reverting to InPosition.");
                             self.transition_state(StrategyState::InPosition {
                                 leg1_qty,
                                 leg2_qty,
@@ -2171,13 +2169,11 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
                     self.config.dual_leg_config.fee_tier.clone(),
                 ))
             }
-            DualLegStrategyType::Pairs => {
-                Box::new(PairsManager::new(
-                    self.config.window_size,
-                    self.config.entry_z_score,
-                    self.config.exit_z_score,
-                ))
-            }
+            DualLegStrategyType::Pairs => Box::new(PairsManager::new(
+                self.config.window_size,
+                self.config.entry_z_score,
+                self.config.exit_z_score,
+            )),
         };
 
         // Create risk monitor

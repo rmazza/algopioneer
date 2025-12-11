@@ -100,4 +100,3 @@ pub async fn run_health_server(port: u16, state: HealthState) {
         tracing::error!("Health check server failed: {}", e);
     }
 }
-

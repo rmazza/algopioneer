@@ -27,10 +27,10 @@ impl CoinbaseWebSocketProvider {
 
     /// Create from environment variables (legacy compatibility)
     pub fn from_env() -> Result<Self, Box<dyn Error>> {
-        let api_key = std::env::var("COINBASE_API_KEY")
-            .map_err(|_| "COINBASE_API_KEY must be set")?;
-        let api_secret = std::env::var("COINBASE_API_SECRET")
-            .map_err(|_| "COINBASE_API_SECRET must be set")?;
+        let api_key =
+            std::env::var("COINBASE_API_KEY").map_err(|_| "COINBASE_API_KEY must be set")?;
+        let api_secret =
+            std::env::var("COINBASE_API_SECRET").map_err(|_| "COINBASE_API_SECRET must be set")?;
 
         Ok(Self {
             api_key,

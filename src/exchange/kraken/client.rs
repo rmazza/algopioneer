@@ -26,10 +26,8 @@ impl KrakenExchangeClient {
     /// Normalize a standard symbol (e.g., "BTC-USD") to Kraken format (e.g., "XXBTZUSD")
     pub fn normalize_to_kraken(symbol: &str) -> String {
         // Common Kraken symbol mappings
-        let normalized = symbol
-            .replace("BTC", "XBT")
-            .replace("-", "");
-        
+        let normalized = symbol.replace("BTC", "XBT").replace("-", "");
+
         // Kraken uses X prefix for crypto and Z prefix for fiat
         if normalized.starts_with("XBT") || normalized.starts_with("ETH") {
             format!("X{}", normalized)
@@ -47,7 +45,11 @@ impl KrakenExchangeClient {
             .chars()
             .enumerate()
             .map(|(i, c)| {
-                if i == 3 { format!("-{}", c) } else { c.to_string() }
+                if i == 3 {
+                    format!("-{}", c)
+                } else {
+                    c.to_string()
+                }
             })
             .collect()
     }
@@ -65,10 +67,7 @@ impl Executor for KrakenExchangeClient {
         unimplemented!("Kraken order execution not yet implemented. Add 'krakenex' crate and implement API calls.")
     }
 
-    async fn get_position(
-        &self,
-        _symbol: &str,
-    ) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
+    async fn get_position(&self, _symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
         unimplemented!("Kraken position query not yet implemented")
     }
 }
@@ -114,7 +113,13 @@ mod tests {
 
     #[test]
     fn test_symbol_normalization() {
-        assert_eq!(KrakenExchangeClient::normalize_to_kraken("BTC-USD"), "XXBTUSD");
-        assert_eq!(KrakenExchangeClient::normalize_to_kraken("ETH-USD"), "XETHUSD");
+        assert_eq!(
+            KrakenExchangeClient::normalize_to_kraken("BTC-USD"),
+            "XXBTUSD"
+        );
+        assert_eq!(
+            KrakenExchangeClient::normalize_to_kraken("ETH-USD"),
+            "XETHUSD"
+        );
     }
 }

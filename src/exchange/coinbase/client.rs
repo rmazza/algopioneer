@@ -69,10 +69,7 @@ impl Executor for CoinbaseExchangeClient {
             .await
     }
 
-    async fn get_position(
-        &self,
-        symbol: &str,
-    ) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
         self.inner.get_position(symbol).await
     }
 }

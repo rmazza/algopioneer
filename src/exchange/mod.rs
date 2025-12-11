@@ -116,10 +116,7 @@ pub trait Executor: Send + Sync {
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 
     /// Get current position for a symbol
-    async fn get_position(
-        &self,
-        symbol: &str,
-    ) -> Result<Decimal, Box<dyn Error + Send + Sync>>;
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>>;
 }
 
 /// Extended exchange client trait with full capabilities
@@ -188,7 +185,10 @@ impl std::str::FromStr for ExchangeId {
         match s.to_lowercase().as_str() {
             "coinbase" => Ok(ExchangeId::Coinbase),
             "kraken" => Ok(ExchangeId::Kraken),
-            _ => Err(format!("Unknown exchange: {}. Valid options: coinbase, kraken", s)),
+            _ => Err(format!(
+                "Unknown exchange: {}. Valid options: coinbase, kraken",
+                s
+            )),
         }
     }
 }
@@ -233,8 +233,14 @@ mod tests {
 
     #[test]
     fn test_exchange_id_from_str() {
-        assert_eq!("coinbase".parse::<ExchangeId>().unwrap(), ExchangeId::Coinbase);
-        assert_eq!("Coinbase".parse::<ExchangeId>().unwrap(), ExchangeId::Coinbase);
+        assert_eq!(
+            "coinbase".parse::<ExchangeId>().unwrap(),
+            ExchangeId::Coinbase
+        );
+        assert_eq!(
+            "Coinbase".parse::<ExchangeId>().unwrap(),
+            ExchangeId::Coinbase
+        );
         assert_eq!("kraken".parse::<ExchangeId>().unwrap(), ExchangeId::Kraken);
         assert!("binance".parse::<ExchangeId>().is_err());
     }

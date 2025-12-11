@@ -384,7 +384,8 @@ async fn load_coinbase_data(
                     Coinbase International Exchange for non-US users.\n\
                     Try: --leg1 SOL-USD --leg2 ETH-USD",
                     leg1
-                ).into());
+                )
+                .into());
             }
             return Err(e);
         }
@@ -404,7 +405,8 @@ async fn load_coinbase_data(
                     Coinbase International Exchange for non-US users.\n\
                     Try: --leg1 SOL-USD --leg2 ETH-USD",
                     leg2
-                ).into());
+                )
+                .into());
             }
             return Err(e);
         }

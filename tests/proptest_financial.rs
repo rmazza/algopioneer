@@ -12,11 +12,11 @@ fn compute_z_score(history: &[f64], current_spread: f64) -> Option<f64> {
     if history.len() < 2 {
         return None;
     }
-    
+
     let n = history.len() as f64;
     let sum: f64 = history.iter().sum();
     let mean = sum / n;
-    
+
     let variance: f64 = history
         .iter()
         .map(|val| {
@@ -25,13 +25,13 @@ fn compute_z_score(history: &[f64], current_spread: f64) -> Option<f64> {
         })
         .sum::<f64>()
         / n;
-    
+
     let std_dev = variance.sqrt();
-    
+
     if std_dev == 0.0 || !std_dev.is_finite() {
         return Some(0.0);
     }
-    
+
     let z = (current_spread - mean) / std_dev;
     if z.is_finite() {
         Some(z)
@@ -70,7 +70,7 @@ proptest! {
         history in prop::collection::vec(1.0f64..100.0f64, 10..50)
     ) {
         let mean: f64 = history.iter().sum::<f64>() / history.len() as f64;
-        
+
         if let Some(z) = compute_z_score(&history, mean) {
             prop_assert!(z.abs() < 0.01, "Z-score of mean should be ~0, got: {}", z);
         }
@@ -83,13 +83,13 @@ proptest! {
         offset in 1.0f64..50.0f64
     ) {
         let mean: f64 = history.iter().sum::<f64>() / history.len() as f64;
-        
+
         let z_above = compute_z_score(&history, mean + offset);
         let z_below = compute_z_score(&history, mean - offset);
-        
+
         if let (Some(za), Some(zb)) = (z_above, z_below) {
             prop_assert!(
-                (za + zb).abs() < 0.01, 
+                (za + zb).abs() < 0.01,
                 "Z-scores should be symmetric: {} vs {}", za, zb
             );
         }
@@ -105,7 +105,7 @@ proptest! {
         let quantity = Decimal::new(qty, 3);
         let leg1_price = Decimal::new(p1, 2);
         let leg2_price = Decimal::new(p2, 2);
-        
+
         if let Some(ratio) = compute_hedge_ratio_dollar_neutral(quantity, leg1_price, leg2_price) {
             prop_assert!(ratio > Decimal::ZERO, "Hedge ratio should be positive: {}", ratio);
         }
@@ -119,12 +119,12 @@ proptest! {
     ) {
         let leg1_price = Decimal::new(p1, 2);
         let leg2_price = Decimal::new(p2, 2);
-        
+
         if let Some(ratio) = compute_hedge_ratio_dollar_neutral(dec!(1.0), leg1_price, leg2_price) {
             // For dollar-neutral: leg1_price * 1 should equal leg2_price * ratio
             let leg1_value = leg1_price;
             let leg2_value = leg2_price * ratio;
-            
+
             // They should be equal (within precision)
             let diff = (leg1_value - leg2_value).abs();
             prop_assert!(

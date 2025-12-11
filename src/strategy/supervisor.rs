@@ -77,10 +77,7 @@ impl PortfolioPnL {
     }
 
     pub fn total(&self) -> Decimal {
-        self.strategy_pnl
-            .iter()
-            .map(|entry| *entry.value())
-            .sum()
+        self.strategy_pnl.iter().map(|entry| *entry.value()).sum()
     }
 
     pub fn get(&self, strategy_id: &str) -> Decimal {
@@ -210,9 +207,7 @@ impl StrategySupervisor {
 
         for mut strategy in self.strategies.drain(..) {
             let id = strategy.id();
-            let rx = strategy_receivers
-                .remove(&id)
-                .expect("Receiver must exist");
+            let rx = strategy_receivers.remove(&id).expect("Receiver must exist");
             let pnl_tracker = self.pnl_tracker.clone();
 
             join_set.spawn(async move {

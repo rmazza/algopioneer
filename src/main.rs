@@ -240,11 +240,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             throttle_interval_secs,
         } => {
             // Parse exchange ID
-            let exchange_id: algopioneer::exchange::ExchangeId = exchange.parse().map_err(|e: String| {
-                error!("{}", e);
-                std::io::Error::other(e)
-            })?;
-            
+            let exchange_id: algopioneer::exchange::ExchangeId =
+                exchange.parse().map_err(|e: String| {
+                    error!("{}", e);
+                    std::io::Error::other(e)
+                })?;
+
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
             let parts: Vec<&str> = symbols.split(',').collect();
             if parts.len() != 2 {
@@ -259,7 +260,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stop_loss_threshold: *stop_loss_threshold,
                 throttle_interval_secs: *throttle_interval_secs,
             };
-            run_dual_leg_trading(strategy, parts[0], parts[1], env, exchange_id, dual_leg_config).await?;
+            run_dual_leg_trading(
+                strategy,
+                parts[0],
+                parts[1],
+                env,
+                exchange_id,
+                dual_leg_config,
+            )
+            .await?;
         }
         Commands::Portfolio { config, paper } => {
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
@@ -488,7 +497,7 @@ async fn run_dual_leg_trading(
 
     // Initialize exchange client using factory
     let _exchange_config = algopioneer::exchange::ExchangeConfig::from_env(exchange_id)?;
-    
+
     // For now, we still use CoinbaseClient for the execution engine since strategies
     // depend on the Executor trait from dual_leg_trading module.
     // The abstraction allows switching once Kraken is fully implemented.
@@ -496,7 +505,7 @@ async fn run_dual_leg_trading(
     if exchange_id == algopioneer::exchange::ExchangeId::Kraken {
         warn!("Kraken exchange selected but not fully implemented yet. Falling back to Coinbase for execution.");
     }
-    
+
     let client = Arc::new(CoinbaseClient::new(env)?);
 
     // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure

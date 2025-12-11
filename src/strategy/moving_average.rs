@@ -225,8 +225,8 @@ impl MovingAverageCrossover {
 // ============================================================================
 
 use async_trait::async_trait;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -349,12 +349,16 @@ impl<E: Executor + 'static> LiveStrategy for MovingAverageStrategy<E> {
                         "Buy signal - placing order"
                     );
 
-                    match self.executor.execute_order(
-                        &self.symbol,
-                        OrderSide::Buy,
-                        self.order_size,
-                        Some(tick.price),
-                    ).await {
+                    match self
+                        .executor
+                        .execute_order(
+                            &self.symbol,
+                            OrderSide::Buy,
+                            self.order_size,
+                            Some(tick.price),
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             self.position_open = true;
                             self.entry_price = Some(tick.price);
@@ -373,12 +377,16 @@ impl<E: Executor + 'static> LiveStrategy for MovingAverageStrategy<E> {
                         "Sell signal - placing order"
                     );
 
-                    match self.executor.execute_order(
-                        &self.symbol,
-                        OrderSide::Sell,
-                        self.order_size,
-                        Some(tick.price),
-                    ).await {
+                    match self
+                        .executor
+                        .execute_order(
+                            &self.symbol,
+                            OrderSide::Sell,
+                            self.order_size,
+                            Some(tick.price),
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             // Calculate PnL
                             if let Some(entry) = self.entry_price {
@@ -594,4 +602,3 @@ mod tests {
         assert_eq!(signals[12], Signal::Sell, "Should sell at index 12");
     }
 }
-

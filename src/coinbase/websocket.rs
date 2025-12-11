@@ -76,9 +76,10 @@ impl CoinbaseWebsocket {
                 }
                 Err(e) => {
                     error!("WebSocket connection failed after {} attempts", max_retries);
-                    return Err(Box::new(std::io::Error::other(
-                        format!("Failed to connect after {} retries: {}", max_retries, e),
-                    )));
+                    return Err(Box::new(std::io::Error::other(format!(
+                        "Failed to connect after {} retries: {}",
+                        max_retries, e
+                    ))));
                 }
             }
         }

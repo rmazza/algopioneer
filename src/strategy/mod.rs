@@ -94,4 +94,3 @@ pub trait LiveStrategy: Send {
     /// Get strategy type for logging/display
     fn strategy_type(&self) -> &'static str;
 }
-
