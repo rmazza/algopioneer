@@ -41,7 +41,7 @@ governor = "0.6"
 # OW4: Zero-copy string handling
 bytes = "1.5"
 # AS1: Prometheus metrics for observability
-prometheus = "0.13"
+prometheus = "0.14"
 lazy_static = "1.4"
 
 [dev-dependencies]
