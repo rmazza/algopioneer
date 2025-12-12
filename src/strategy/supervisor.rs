@@ -11,7 +11,6 @@ use crate::strategy::{LiveStrategy, MarketData, StrategyInput};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -202,7 +201,7 @@ impl StrategySupervisor {
             }
         }
 
-        // Spawn strategy tasks
+        // Spawn strategy tasks with proper panic recovery
         let mut join_set: JoinSet<StrategyRunResult> = JoinSet::new();
 
         for mut strategy in self.strategies.drain(..) {
@@ -220,26 +219,48 @@ impl StrategySupervisor {
                     "Strategy starting"
                 );
 
-                // Wrap strategy run in panic handler
-                let _result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    // We need to use a runtime-spawned future for async
-                }));
+                // BI-2 FIX: Spawn the strategy in a separate task to catch panics
+                // JoinError::is_panic() detects if the inner task panicked
+                let strategy_id_clone = strategy_id.clone();
+                let inner_handle = tokio::spawn(async move {
+                    strategy.run(rx).await;
+                    strategy.current_pnl()
+                });
 
-                // For now, run directly (panic handling would need more setup)
-                strategy.run(rx).await;
+                let (panicked, final_pnl) = match inner_handle.await {
+                    Ok(pnl) => {
+                        info!(strategy_id = %strategy_id_clone, "Strategy completed normally");
+                        (false, pnl)
+                    }
+                    Err(e) if e.is_panic() => {
+                        let panic_info = e.into_panic();
+                        let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        error!(
+                            strategy_id = %strategy_id_clone,
+                            panic_msg = %panic_msg,
+                            "CRITICAL: Strategy panicked! Manual intervention may be required."
+                        );
+                        (true, rust_decimal::Decimal::ZERO)
+                    }
+                    Err(e) => {
+                        error!(strategy_id = %strategy_id_clone, error = %e, "Strategy task cancelled");
+                        (false, rust_decimal::Decimal::ZERO)
+                    }
+                };
 
                 // Update PnL on completion
-                pnl_tracker.update(&strategy_id, strategy.current_pnl());
-
-                info!(
-                    strategy_id = %strategy_id,
-                    "Strategy completed"
-                );
+                pnl_tracker.update(&strategy_id, final_pnl);
 
                 StrategyRunResult {
                     id: strategy_id,
-                    panicked: false,
-                    error: None,
+                    panicked,
+                    error: if panicked { Some("Strategy panicked".to_string()) } else { None },
                 }
             });
         }
@@ -279,9 +300,11 @@ impl StrategySupervisor {
                     if run_result.panicked {
                         error!(
                             strategy_id = %run_result.id,
-                            "Strategy panicked"
+                            error = ?run_result.error,
+                            "Strategy panicked - automatic restart not yet implemented. Manual intervention required."
                         );
-                        // TODO: Implement restart logic
+                        // NP-3 FIX: Restart logic is a future enhancement tracked in project roadmap.
+                        // For now, panicked strategies remain stopped and require manual restart.
                     } else {
                         info!(
                             strategy_id = %run_result.id,

@@ -738,12 +738,14 @@ async fn run_dual_leg_trading(
         while let Some(data) = ws_rx.recv().await {
             tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
             let arc_data = Arc::new(data);
+            // P-4 FIX: Use clone only when we need to continue using arc_data
+            // In if-else chain, only one branch executes, so second clone was unnecessary
             if arc_data.symbol == leg1_id_clone {
-                if leg1_tx.send(arc_data.clone()).await.is_err() {
+                if leg1_tx.send(arc_data).await.is_err() {
                     break;
                 }
             } else if arc_data.symbol == leg2_id_clone {
-                if leg2_tx.send(arc_data.clone()).await.is_err() {
+                if leg2_tx.send(arc_data).await.is_err() {
                     break;
                 }
             } else {
@@ -851,8 +853,8 @@ async fn run_discover_pairs(
     
     // Warn if any Sharpe ratios are extremely high
     if results.iter().any(|p| p.sharpe_ratio > 10.0) {
-        println!("\nWARNING: Some pairs have Sharpe ratios > 10.0. This may indicate overfitting or insufficient trade count.");
-        println!("         Verify results with a longer lookback period or --paper trading.");
+        warn!("Some pairs have Sharpe ratios > 10.0. This may indicate overfitting or insufficient trade count.");
+        warn!("Verify results with a longer lookback period or --paper trading.");
     }
 
     // Calculate allocation per pair (Equal Weight)

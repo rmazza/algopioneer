@@ -46,11 +46,13 @@ impl CoinbaseClient {
             .build()?;
 
         // AS5: Initialize rate limiter (Coinbase Advanced Trade: 10 requests/second)
-        // SAFETY: 10 is a non-zero constant, this will never fail
-        const RATE_LIMIT: u32 = 10;
-        let quota = Quota::per_second(
-            NonZeroU32::new(RATE_LIMIT).expect("RATE_LIMIT is non-zero constant"),
-        );
+        // BI-1 FIX: Use compile-time const to eliminate panic risk in constructor
+        // SAFETY: RATE_LIMIT_NZ is a compile-time constant of 10, guaranteed non-zero
+        const RATE_LIMIT_NZ: NonZeroU32 = match NonZeroU32::new(10) {
+            Some(v) => v,
+            None => panic!("RATE_LIMIT must be non-zero"), // Compile-time panic only
+        };
+        let quota = Quota::per_second(RATE_LIMIT_NZ);
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {

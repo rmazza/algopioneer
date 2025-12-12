@@ -82,6 +82,10 @@ impl ExecutionError {
 
 const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
 
+// NP-1 FIX: Extract magic number to named constant
+/// Maximum number of recovery attempts before abandoning and requiring manual intervention
+const MAX_RECOVERY_ATTEMPTS: u32 = 5;
+
 // CF3: Precision Safety Constants
 // Conservative bounds for f64 price ratio conversions to prevent precision loss
 // in statistical arbitrage calculations. Ratios outside these bounds will be rejected.
@@ -620,23 +624,45 @@ impl DualLegConfigBuilder {
     }
 }
 
+// AS-1 FIX: Explicit position direction tracking
+/// Direction of the position (Long or Short)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionDirection {
+    /// Long position: Bought leg1, Sold leg2
+    Long,
+    /// Short position: Sold leg1, Bought leg2
+    Short,
+}
+
+impl std::fmt::Display for PositionDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PositionDirection::Long => write!(f, "Long"),
+            PositionDirection::Short => write!(f, "Short"),
+        }
+    }
+}
+
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrategyState {
     Flat,
     Entering {
+        direction: PositionDirection, // AS-1: Track entry direction
         leg1_qty: Decimal,
         leg2_qty: Decimal,
         leg1_entry_price: Decimal,
         leg2_entry_price: Decimal,
     },
     InPosition {
+        direction: PositionDirection, // AS-1: Track position direction
         leg1_qty: Decimal,
         leg2_qty: Decimal,
         leg1_entry_price: Decimal,
         leg2_entry_price: Decimal,
     },
     Exiting {
+        direction: PositionDirection, // AS-1: Track exit direction (for proper order sides)
         leg1_qty: Decimal,
         leg2_qty: Decimal,
         leg1_entry_price: Decimal,
@@ -651,9 +677,9 @@ impl std::fmt::Display for StrategyState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StrategyState::Flat => write!(f, "Flat"),
-            StrategyState::Entering { .. } => write!(f, "Entering"),
-            StrategyState::InPosition { .. } => write!(f, "InPosition"),
-            StrategyState::Exiting { .. } => write!(f, "Exiting"),
+            StrategyState::Entering { direction, .. } => write!(f, "Entering({})", direction),
+            StrategyState::InPosition { direction, .. } => write!(f, "InPosition({})", direction),
+            StrategyState::Exiting { direction, .. } => write!(f, "Exiting({})", direction),
             StrategyState::Halted => write!(f, "Halted"),
             StrategyState::Reconciling => write!(f, "Reconciling"),
         }
@@ -1061,8 +1087,8 @@ impl RecoveryWorker {
                                 );
                             }
 
-                            if task.attempts >= 5 {
-                                error!("CRITICAL: Recovery abandoned for {} after 5 attempts. MANUAL INTERVENTION REQUIRED.", task.symbol);
+                            if task.attempts >= MAX_RECOVERY_ATTEMPTS {
+                                error!("CRITICAL: Recovery abandoned for {} after {} attempts. MANUAL INTERVENTION REQUIRED.", task.symbol, MAX_RECOVERY_ATTEMPTS);
                                 let _ = feedback_tx
                                     .send(RecoveryResult::Failed(task.symbol.clone()))
                                     .await;
@@ -1496,6 +1522,7 @@ impl DualLegStrategy {
     /// STATE AMNESIA FIX: Reconcile strategy state with actual exchange positions.
     /// Queries exchange for current holdings and updates state accordingly.
     /// Should be called at the start of run() before processing any ticks.
+    /// BI-3 FIX: Now halts on failure and includes direction tracking.
     async fn reconcile_state(&mut self) {
         info!("Reconciling state with exchange positions...");
 
@@ -1516,32 +1543,52 @@ impl DualLegStrategy {
 
                 if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
                     // We have an open position - transition to InPosition
-                    // Use Decimal::ZERO for entry price since exact history is unavailable
+                    // BI-3 FIX: Infer direction from leg1 quantity sign
+                    // Long = positive leg1 (bought spot), Short = negative leg1 (sold spot)
+                    let direction = if leg1_qty >= Decimal::ZERO {
+                        PositionDirection::Long
+                    } else {
+                        PositionDirection::Short
+                    };
+                    
                     info!(
-                        "Detected existing position: leg1={}, leg2={}. Transitioning to InPosition.",
-                        leg1_qty, leg2_qty
+                        "Detected existing position: leg1={}, leg2={}, direction={}. Transitioning to InPosition.",
+                        leg1_qty, leg2_qty, direction
                     );
                     self.state = StrategyState::InPosition {
-                        leg1_qty,
-                        leg2_qty,
-                        leg1_entry_price: Decimal::ZERO, // Safe fallback - unknown entry
+                        direction,
+                        leg1_qty: leg1_qty.abs(), // Store absolute quantities
+                        leg2_qty: leg2_qty.abs(),
+                        leg1_entry_price: Decimal::ZERO, // BI-3: Unknown entry price
                         leg2_entry_price: Decimal::ZERO,
                     };
                     self.last_state_change_ts = self.clock.now_ts_millis();
 
-                    warn!("NOTICE: Entry prices set to 0 due to state recovery. PnL calculations will be inaccurate until position is closed.");
+                    warn!(
+                        "BI-3 WARNING: Entry prices set to 0 due to state recovery. \
+                        PnL/exit policy calculations will be inaccurate until position is closed. \
+                        Consider manual intervention for precise risk management."
+                    );
                 } else {
                     info!("No existing positions detected. Starting in Flat state.");
                     // Already in Flat, no action needed
                 }
             }
             (Err(e1), _) => {
-                error!("Failed to query position for {}: {}. Starting in Flat (RISK: may have orphaned position).", 
-                       self.pair.spot_symbol, e1);
+                error!(
+                    "CRITICAL: Failed to query position for {}: {}. \
+                    Transitioning to Halted to prevent trading with unknown state.",
+                    self.pair.spot_symbol, e1
+                );
+                self.state = StrategyState::Halted;
             }
             (_, Err(e2)) => {
-                error!("Failed to query position for {}: {}. Starting in Flat (RISK: may have orphaned position).", 
-                       self.pair.future_symbol, e2);
+                error!(
+                    "CRITICAL: Failed to query position for {}: {}. \
+                    Transitioning to Halted to prevent trading with unknown state.",
+                    self.pair.future_symbol, e2
+                );
+                self.state = StrategyState::Halted;
             }
         }
     }
@@ -1605,6 +1652,7 @@ impl DualLegStrategy {
                     Signal::Buy => {
                         info!("Entry Successful. Transitioning to InPosition.");
                         if let StrategyState::Entering {
+                            direction,
                             leg1_qty,
                             leg2_qty,
                             leg1_entry_price,
@@ -1612,6 +1660,7 @@ impl DualLegStrategy {
                         } = self.state
                         {
                             self.transition_state(StrategyState::InPosition {
+                                direction,
                                 leg1_qty,
                                 leg2_qty,
                                 leg1_entry_price,
@@ -1628,6 +1677,7 @@ impl DualLegStrategy {
                         // CF1 FIX: Short Entry Successful
                         info!("Short Entry Successful. Transitioning to InPosition.");
                         if let StrategyState::Entering {
+                            direction,
                             leg1_qty,
                             leg2_qty,
                             leg1_entry_price,
@@ -1635,6 +1685,7 @@ impl DualLegStrategy {
                         } = self.state
                         {
                             self.transition_state(StrategyState::InPosition {
+                                direction,
                                 leg1_qty,
                                 leg2_qty,
                                 leg1_entry_price,
@@ -1698,6 +1749,7 @@ impl DualLegStrategy {
                             );
                             self.transition_state(StrategyState::Reconciling);
                         } else if let StrategyState::Exiting {
+                            direction,
                             leg1_qty,
                             leg2_qty,
                             leg1_entry_price,
@@ -1706,6 +1758,7 @@ impl DualLegStrategy {
                         {
                             info!("Exit rejected/failed definitively. Reverting to InPosition.");
                             self.transition_state(StrategyState::InPosition {
+                                direction,
                                 leg1_qty,
                                 leg2_qty,
                                 leg1_entry_price,
@@ -1841,6 +1894,7 @@ impl DualLegStrategy {
                 {
                     info!("Long Entry Signal! Transitioning to Entering state and spawning execution...");
                     self.transition_state(StrategyState::Entering {
+                        direction: PositionDirection::Long, // AS-1: Track Long entry
                         leg1_qty,
                         leg2_qty: hedge_qty,
                         leg1_entry_price: leg1.price,
@@ -1895,6 +1949,7 @@ impl DualLegStrategy {
                 {
                     info!("Short Entry Signal! Transitioning to Entering state and spawning execution...");
                     self.transition_state(StrategyState::Entering {
+                        direction: PositionDirection::Short, // AS-1: Track Short entry
                         leg1_qty,
                         leg2_qty: hedge_qty,
                         leg1_entry_price: leg1.price,
@@ -1952,14 +2007,30 @@ impl DualLegStrategy {
             Signal::Exit => {
                 // CF2 FIX: Handle Exit Signal (Mean Reversion)
                 if let StrategyState::InPosition {
+                    direction,
                     leg1_qty,
                     leg2_qty,
                     leg1_entry_price,
                     leg2_entry_price,
                 } = self.state
                 {
-                    let leg1_pnl = (leg1.price - leg1_entry_price) * leg1_qty;
-                    let leg2_pnl = (leg2_entry_price - leg2.price) * leg2_qty;
+                    // AS-1: Use direction for PnL calculation
+                    // Long: PnL = (exit - entry) for leg1, (entry - exit) for leg2
+                    // Short: PnL = (entry - exit) for leg1, (exit - entry) for leg2
+                    let (leg1_pnl, leg2_pnl) = match direction {
+                        PositionDirection::Long => {
+                            (
+                                (leg1.price - leg1_entry_price) * leg1_qty,
+                                (leg2_entry_price - leg2.price) * leg2_qty,
+                            )
+                        }
+                        PositionDirection::Short => {
+                            (
+                                (leg1_entry_price - leg1.price) * leg1_qty,
+                                (leg2.price - leg2_entry_price) * leg2_qty,
+                            )
+                        }
+                    };
                     let gross_pnl = leg1_pnl + leg2_pnl;
 
                     let total_volume = (leg1_entry_price * leg1_qty)
@@ -1989,6 +2060,7 @@ impl DualLegStrategy {
 
                     info!("Exit Signal! Net PnL: {:.6} (Gross: {:.6}, Fees: {:.6}, Slippage: {:.6}). Transitioning to Exiting...", net_pnl, gross_pnl, estimated_fees, slippage_cost);
                     self.transition_state(StrategyState::Exiting {
+                        direction, // AS-1: Carry direction to Exiting state
                         leg1_qty,
                         leg2_qty,
                         leg1_entry_price,
@@ -2000,43 +2072,10 @@ impl DualLegStrategy {
                     let tx = self.report_tx.clone();
                     let slippage_factor = self.config.fee_tier.slippage_bps / dec!(10000.0);
 
-                    // Determine exit sides based on position type (Long vs Short)
-                    // Currently StrategyState doesn't track if we are Long or Short, just quantities.
-                    // But we can infer from entry prices? No.
-                    // Wait, if we are Long: Bought L1, Sold L2. Exit: Sell L1, Buy L2.
-                    // If we are Short: Sold L1, Bought L2. Exit: Buy L1, Sell L2.
-                    //
-                    // CRITICAL: We need to know if we are Long or Short to exit correctly!
-                    // StrategyState needs to track direction or we assume Long-only?
-                    // The current state `InPosition` has `leg1_qty` (Decimal). If it's unsigned, we don't know direction.
-                    // `Decimal` is signed!
-                    // If `leg1_qty` is positive -> Long (Bought L1).
-                    // If `leg1_qty` is negative -> Short (Sold L1).
-                    //
-                    // Let's check how `Entering` sets quantities.
-                    // `leg1_qty` is `self.config.order_size` (positive).
-                    // So currently it assumes Long.
-                    //
-                    // For Short Entry, we should probably make `leg1_qty` negative in the state?
-                    // Or add a `Side` field to `StrategyState`.
-                    //
-                    // Let's check `StrategyState` definition.
-                    // It's in this file.
-
-                    // For now, I will assume we need to update `StrategyState` to track direction or use signed quantities.
-                    // Using signed quantities is elegant.
-                    // Long Entry: leg1_qty = +1.0
-                    // Short Entry: leg1_qty = -1.0
-
-                    // So in Short Entry block above, I should set `leg1_qty` to `-self.config.order_size`.
-
-                    // Let's update the Short Entry logic to use negative quantity.
-
-                    // And here in Exit logic:
-                    // If leg1_qty > 0: Sell L1, Buy L2 (Standard Exit)
-                    // If leg1_qty < 0: Buy L1, Sell L2 (Short Exit)
-
-                    let is_long = leg1_qty > Decimal::ZERO;
+                    // AS-1 FIX: Use explicit direction for exit order sides
+                    // Long: Sell L1, Buy L2
+                    // Short: Buy L1, Sell L2
+                    let is_long = direction == PositionDirection::Long;
 
                     let p1_limit = if is_long {
                         leg1.price * (dec!(1.0) - slippage_factor)
@@ -2154,7 +2193,8 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
     }
 
     /// Build the internal DualLegStrategy with all dependencies
-    fn build_strategy(&self) -> (DualLegStrategy, mpsc::Sender<RecoveryTask>) {
+    /// NP-4 FIX: recovery_tx is kept internal, not returned
+    fn build_strategy(&self) -> DualLegStrategy {
         let (recovery_tx, recovery_rx) = mpsc::channel(100);
         let (feedback_tx, feedback_rx) = mpsc::channel(100);
 
@@ -2204,7 +2244,9 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
             Box::new(SystemClock),
         );
 
-        (strategy, recovery_tx)
+        // NP-4: recovery_tx stays in scope for execution_engine, not returned
+        drop(recovery_tx); // Explicitly drop to show it's not needed externally
+        strategy
     }
 }
 
@@ -2246,7 +2288,7 @@ impl<E: Executor + 'static> LiveStrategy for DualLegStrategyLive<E> {
         );
 
         // Build internal strategy and channels
-        let (mut strategy, _recovery_tx) = self.build_strategy();
+        let mut strategy = self.build_strategy();
 
         // Create internal channels for the strategy's run() method
         let (leg1_tx, leg1_rx) = mpsc::channel::<Arc<MarketData>>(100);
