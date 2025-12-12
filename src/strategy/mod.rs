@@ -1,6 +1,6 @@
 pub mod dual_leg_trading;
 pub mod moving_average;
-pub mod portfolio;
+
 pub mod supervisor;
 pub mod tick_router;
 

@@ -14,7 +14,6 @@ use algopioneer::strategy::dual_leg_trading::{
     PairsManager, RecoveryWorker, RiskMonitor, SystemClock, TransactionCostModel,
 };
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
-use algopioneer::strategy::portfolio::PortfolioManager;
 use algopioneer::strategy::Signal;
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -299,9 +298,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Commands::Portfolio { config, paper } => {
+            use algopioneer::discovery::config::PortfolioPairConfig;
+            use algopioneer::exchange::coinbase::CoinbaseWebSocketProvider;
+            use algopioneer::strategy::dual_leg_trading::{
+                DualLegLiveConfig, DualLegStrategyLive, DualLegStrategyType,
+            };
+            use algopioneer::strategy::supervisor::StrategySupervisor;
+            use std::fs::File;
+            use std::io::BufReader;
+
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
-            let mut manager = PortfolioManager::new(config, env);
-            manager.run().await?;
+            info!("--- AlgoPioneer: Portfolio Supervisor Mode ---");
+            info!("Loading configuration from: {}", config);
+
+            // Load Config
+            let file = File::open(&config)?;
+            let reader = BufReader::new(file);
+            let config_list: Vec<PortfolioPairConfig> = serde_json::from_reader(reader)?;
+
+            if config_list.is_empty() {
+                error!("No pairs found in configuration.");
+                return Ok(());
+            }
+
+            // Initialize Shared Resources
+            let client = Arc::new(CoinbaseClient::new(env)?);
+            // Use CoinbaseWebSocketProvider which implements WebSocketProvider trait
+            let ws_client = Box::new(CoinbaseWebSocketProvider::from_env()?);
+
+            // Initialize Supervisor
+            let mut supervisor = StrategySupervisor::new();
+
+            for (idx, json_config) in config_list.into_iter().enumerate() {
+                let pair_id = format!(
+                    "{}-{}",
+                    json_config.dual_leg_config.spot_symbol,
+                    json_config.dual_leg_config.future_symbol
+                );
+
+                // Convert to Live Config
+                let live_config = DualLegLiveConfig {
+                    dual_leg_config: json_config.dual_leg_config,
+                    window_size: json_config.window_size,
+                    entry_z_score: json_config.entry_z_score,
+                    exit_z_score: json_config.exit_z_score,
+                    strategy_type: DualLegStrategyType::Pairs, // Legacy portfolio only supported Pairs
+                };
+
+                // Create Strategy
+                // StrategySupervisor requires Box<dyn LiveStrategy>
+                // DualLegStrategyLive<CoinbaseClient> implements LiveStrategy
+                let strategy = DualLegStrategyLive::new(pair_id.clone(), live_config, client.clone());
+
+                supervisor.add_strategy(Box::new(strategy));
+                info!("Added strategy #{} ({})", idx + 1, pair_id);
+            }
+
+            // Run Supervisor (blocks until completion)
+            if let Err(e) = supervisor.run(ws_client).await {
+                error!("Supervisor terminated with error: {}", e);
+            }
         }
         Commands::DiscoverPairs {
             symbols,
@@ -714,8 +770,7 @@ async fn run_discover_pairs(
     output_path: &str,
     initial_capital: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use algopioneer::discovery::config::DEFAULT_CANDIDATES;
-    use algopioneer::strategy::portfolio::PortfolioPairConfig;
+    use algopioneer::discovery::config::{DEFAULT_CANDIDATES, PortfolioPairConfig};
 
     info!("--- AlgoPioneer: Pair Discovery Pipeline ---");
 

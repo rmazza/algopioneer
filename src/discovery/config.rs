@@ -1,8 +1,23 @@
 //! Configuration for pair discovery and optimization
 
+use crate::strategy::dual_leg_trading::DualLegConfig;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+
+/// Configuration for a specific pair in the portfolio (matching legacy format)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioPairConfig {
+    #[serde(flatten)]
+    pub dual_leg_config: DualLegConfig,
+    /// Rolling window size for z-score calculation (in ticks)
+    pub window_size: usize,
+    /// Z-score threshold to enter a position (must be positive)
+    pub entry_z_score: f64,
+    /// Z-score threshold to exit a position (must be < entry_z_score)
+    pub exit_z_score: f64,
+}
+
 
 /// Default top-volume trading pairs on Coinbase
 pub const DEFAULT_CANDIDATES: &[&str] = &[

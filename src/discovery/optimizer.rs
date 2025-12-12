@@ -7,10 +7,8 @@ use crate::coinbase::CoinbaseClient;
 use crate::strategy::dual_leg_trading::{
     DualLegConfig, EntryStrategy, MarketData, PairsManager, TransactionCostModel,
 };
-use crate::strategy::portfolio::PortfolioPairConfig;
 use crate::strategy::Signal;
-
-use super::config::{DiscoveryConfig, GridSearchConfig};
+use super::config::{DiscoveryConfig, GridSearchConfig, PortfolioPairConfig};
 use super::error::DiscoveryError;
 use super::filter::{filter_candidates, CandidatePair};
 
