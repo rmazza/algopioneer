@@ -312,7 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Loading configuration from: {}", config);
 
             // Load Config
-            let file = File::open(&config)?;
+            let file = File::open(config)?;
             let reader = BufReader::new(file);
             let config_list: Vec<PortfolioPairConfig> = serde_json::from_reader(reader)?;
 
@@ -762,6 +762,9 @@ async fn run_dual_leg_trading(
 
 // --- Pair Discovery Logic ---
 
+/// Run pair discovery pipeline.
+/// Note: Many arguments are acceptable for CLI entry points as they map to CLI flags.
+#[allow(clippy::too_many_arguments)]
 async fn run_discover_pairs(
     symbols_arg: &str,
     min_correlation: f64,

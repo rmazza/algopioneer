@@ -28,9 +28,15 @@ use tracing::{debug, instrument};
 /// // Route ticks (non-blocking)
 /// router.route(Arc::new(tick));
 /// ```
+/// Type alias for route entries: (Sender, PairID)
+type RouteEntry = (mpsc::Sender<Arc<MarketData>>, String);
+
+/// Type alias for routes map to reduce complexity
+type RoutesMap = DashMap<String, Vec<RouteEntry>>;
+
 pub struct TickRouter {
     /// Symbol -> List of (Sender, PairID)
-    routes: DashMap<String, Vec<(mpsc::Sender<Arc<MarketData>>, String)>>,
+    routes: RoutesMap,
 }
 
 impl Default for TickRouter {

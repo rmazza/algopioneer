@@ -79,6 +79,23 @@ struct BacktestResult {
     trades: u32,
 }
 
+/// Configuration for backtest simulation (clippy: reduces argument count)
+#[derive(Debug, Clone)]
+struct BacktestConfig {
+    initial_capital: Decimal,
+    taker_fee: Decimal,
+    window: usize,
+    z_entry: f64,
+    z_exit: f64,
+}
+
+/// Market data for backtest (clippy: reduces argument count)
+struct BacktestData<'a> {
+    timestamps: &'a [i64],
+    prices_a: &'a [Decimal],
+    prices_b: &'a [Decimal],
+}
+
 /// Position state for PnL tracking (Decimal-based for financial integrity)
 #[derive(Debug, Clone)]
 struct Position {
@@ -136,9 +153,7 @@ impl Position {
     }
 }
 
-/// Trading days per year for Sharpe annualization
-
-
+/// Trading days per year for Sharpe annualization (unused, Sharpe calculated per-trade)
 /// Calculate annualized Sharpe ratio from trade returns
 fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
     if returns.len() < 2 {
@@ -177,38 +192,32 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
 /// Run backtest simulation for given parameters
 async fn run_backtest(
     manager: &PairsManager,
-    timestamps: &[i64],
-    prices_a: &[Decimal],
-    prices_b: &[Decimal],
-    initial_capital: Decimal,
-    taker_fee: Decimal,
-    window: usize,
-    z_entry: f64,
-    z_exit: f64,
+    data: BacktestData<'_>,
+    config: &BacktestConfig,
 ) -> BacktestResult {
-    let mut capital = initial_capital;
+    let mut capital = config.initial_capital;
     let mut position: Option<Position> = None;
     let mut trades = 0u32;
-    let mut trade_returns: Vec<Decimal> = Vec::with_capacity(timestamps.len() / 10);
+    let mut trade_returns: Vec<Decimal> = Vec::with_capacity(data.timestamps.len() / 10);
 
     // Symbol strings are only used for logging in PairsManager.analyze()
     // Since we're backtesting, we don't need real symbol names
 
-    for i in 0..timestamps.len() {
-        let p_a = prices_a[i];
-        let p_b = prices_b[i];
+    for i in 0..data.timestamps.len() {
+        let p_a = data.prices_a[i];
+        let p_b = data.prices_b[i];
 
         let leg1 = MarketData {
             symbol: String::from("A"), // Static symbol for backtesting
             price: p_a,
             instrument_id: None,
-            timestamp: timestamps[i],
+            timestamp: data.timestamps[i],
         };
         let leg2 = MarketData {
             symbol: String::from("B"), // Static symbol for backtesting
             price: p_b,
             instrument_id: None,
-            timestamp: timestamps[i],
+            timestamp: data.timestamps[i],
         };
 
         // Get signal from PairsManager
@@ -217,15 +226,15 @@ async fn run_backtest(
         match (&signal, &position) {
             // Entry: Long spread (Buy A, Sell B)
             (Signal::Buy, None) => {
-                position = Some(Position::open(1, p_a, p_b, &mut capital, taker_fee));
+                position = Some(Position::open(1, p_a, p_b, &mut capital, config.taker_fee));
             }
             // Entry: Short spread (Sell A, Buy B)
             (Signal::Sell, None) => {
-                position = Some(Position::open(-1, p_a, p_b, &mut capital, taker_fee));
+                position = Some(Position::open(-1, p_a, p_b, &mut capital, config.taker_fee));
             }
             // Exit: Close position
             (Signal::Exit, Some(pos)) => {
-                let spread_return = pos.close(p_a, p_b, &mut capital, taker_fee);
+                let spread_return = pos.close(p_a, p_b, &mut capital, config.taker_fee);
                 trade_returns.push(spread_return);
                 trades += 1;
                 position = None;
@@ -236,12 +245,12 @@ async fn run_backtest(
     }
 
     let sharpe_ratio = calculate_sharpe_ratio(&trade_returns);
-    let net_profit = capital - initial_capital;
+    let net_profit = capital - config.initial_capital;
 
     BacktestResult {
-        window,
-        z_entry,
-        z_exit,
+        window: config.window,
+        z_entry: config.z_entry,
+        z_exit: config.z_exit,
         net_profit,
         sharpe_ratio,
         trades,
@@ -264,18 +273,20 @@ async fn optimize_pair(
             // Create fresh manager for each parameter combination
             let manager = PairsManager::new(window, z_entry, grid.z_exit);
 
-            let result = run_backtest(
-                &manager,
+            let backtest_data = BacktestData {
                 timestamps,
                 prices_a,
                 prices_b,
-                config.initial_capital,
-                config.taker_fee,
+            };
+            let backtest_config = BacktestConfig {
+                initial_capital: config.initial_capital,
+                taker_fee: config.taker_fee,
                 window,
                 z_entry,
-                grid.z_exit,
-            )
-            .await;
+                z_exit: grid.z_exit,
+            };
+
+            let result = run_backtest(&manager, backtest_data, &backtest_config).await;
 
             // Filter by minimum trades
             if result.trades < config.min_trades {
