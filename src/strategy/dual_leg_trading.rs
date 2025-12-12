@@ -853,17 +853,21 @@ impl EntryStrategy for PairsManager {
                     return Signal::Hold; // Hard rejection - do not trade on degraded precision
                 }
 
-                // Log warning for ratios approaching the limit (within 2 orders of magnitude)
-                if !(MIN_SAFE_PRICE_RATIO * 100.0..=MAX_SAFE_PRICE_RATIO / 100.0).contains(&ratio) {
+                // Log warning for ratios approaching the limit (within 1 order of magnitude)
+                // Throttle warnings to max 1 per 1000 occurrences to avoid log spam
+                if !(MIN_SAFE_PRICE_RATIO * 10.0..=MAX_SAFE_PRICE_RATIO / 10.0).contains(&ratio) {
                     // CF3 MONITORING: Increment warning counter
                     let count = self
                         .precision_warnings
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
-                    warn!(
-                        "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation. (Total warnings: {})",
-                        ratio, count
-                    );
+                    // Only log every 1000th warning to reduce noise
+                    if count == 1 || count % 1000 == 0 {
+                        warn!(
+                            "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation. (Total warnings: {})",
+                            ratio, count
+                        );
+                    }
                 }
 
                 (v1, v2)
