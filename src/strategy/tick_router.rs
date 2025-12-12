@@ -57,12 +57,7 @@ impl TickRouter {
     ///
     /// Multiple senders can be registered for the same symbol,
     /// allowing fan-out to multiple strategies.
-    pub fn register(
-        &self,
-        symbol: String,
-        sender: mpsc::Sender<Arc<MarketData>>,
-        pair_id: String,
-    ) {
+    pub fn register(&self, symbol: String, sender: mpsc::Sender<Arc<MarketData>>, pair_id: String) {
         self.routes
             .entry(symbol)
             .or_default()

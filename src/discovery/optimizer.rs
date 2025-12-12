@@ -3,19 +3,19 @@
 //! Implements parameter optimization through historical backtesting
 //! with proper Decimal-based financial calculations.
 
+use super::config::{DiscoveryConfig, GridSearchConfig, PortfolioPairConfig};
+use super::error::DiscoveryError;
+use super::filter::{filter_candidates, CandidatePair};
 use crate::coinbase::CoinbaseClient;
 use crate::strategy::dual_leg_trading::{
     DualLegConfig, EntryStrategy, MarketData, PairsManager, TransactionCostModel,
 };
 use crate::strategy::Signal;
-use super::config::{DiscoveryConfig, GridSearchConfig, PortfolioPairConfig};
-use super::error::DiscoveryError;
-use super::filter::{filter_candidates, CandidatePair};
 
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use tokio::time::sleep;
@@ -111,11 +111,17 @@ struct Position {
 
 impl Position {
     /// Open a new position, deducting entry fees
-    fn open(direction: i8, price_a: Decimal, price_b: Decimal, capital: &mut Decimal, fee: Decimal) -> Self {
+    fn open(
+        direction: i8,
+        price_a: Decimal,
+        price_b: Decimal,
+        capital: &mut Decimal,
+        fee: Decimal,
+    ) -> Self {
         // Fee on both legs (entry)
         let entry_fee = *capital * fee * dec!(2);
         *capital -= entry_fee;
-        
+
         Self {
             direction,
             entry_price_a: price_a,
@@ -125,7 +131,13 @@ impl Position {
     }
 
     /// Close position, calculate PnL and update capital
-    fn close(&self, exit_price_a: Decimal, exit_price_b: Decimal, capital: &mut Decimal, fee: Decimal) -> Decimal {
+    fn close(
+        &self,
+        exit_price_a: Decimal,
+        exit_price_b: Decimal,
+        capital: &mut Decimal,
+        fee: Decimal,
+    ) -> Decimal {
         // Calculate returns for each leg
         let (return_a, return_b) = match self.direction {
             1 => {
@@ -144,11 +156,11 @@ impl Position {
 
         let spread_return = return_a - return_b;
         let gross_pnl = self.capital_at_entry * spread_return;
-        
+
         // Fee on both legs (exit)
         let exit_fee = *capital * fee * dec!(2);
         *capital += gross_pnl - exit_fee;
-        
+
         spread_return
     }
 }
@@ -161,10 +173,7 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
     }
 
     // Convert to f64 for statistical calculations (using ToPrimitive)
-    let float_returns: Vec<f64> = returns
-        .iter()
-        .filter_map(|d| d.to_f64())
-        .collect();
+    let float_returns: Vec<f64> = returns.iter().filter_map(|d| d.to_f64()).collect();
 
     if float_returns.len() < 2 {
         return 0.0;
@@ -172,13 +181,14 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
 
     let n = float_returns.len() as f64;
     let mean = float_returns.iter().sum::<f64>() / n;
-    
+
     // Sample variance (n-1 denominator)
     let variance = float_returns
         .iter()
         .map(|r| (r - mean).powi(2))
-        .sum::<f64>() / (n - 1.0);
-    
+        .sum::<f64>()
+        / (n - 1.0);
+
     let std_dev = variance.sqrt();
 
     // Per-trade Sharpe ratio (not annualized) to avoid inflation on high-frequency trading
@@ -356,7 +366,7 @@ async fn fetch_candle_data(
 
     for symbol in symbols {
         info!(symbol = %symbol, "Fetching candles");
-        
+
         match client
             .get_product_candles_paginated(symbol, &start, &end, Granularity::OneHour)
             .await
@@ -368,10 +378,8 @@ async fn fetch_candle_data(
                 }
 
                 // Extract timestamps and close prices
-                let data: Vec<(i64, f64)> = candles
-                    .iter()
-                    .map(|c| (c.start as i64, c.close))
-                    .collect();
+                let data: Vec<(i64, f64)> =
+                    candles.iter().map(|c| (c.start as i64, c.close)).collect();
 
                 let timestamps: HashSet<i64> = data.iter().map(|(t, _)| *t).collect();
 
@@ -385,7 +393,8 @@ async fn fetch_candle_data(
             }
             Err(e) => {
                 let err_str = e.to_string();
-                if err_str.contains("INVALID_ARGUMENT") || err_str.contains("ProductID is invalid") {
+                if err_str.contains("INVALID_ARGUMENT") || err_str.contains("ProductID is invalid")
+                {
                     warn!(symbol = %symbol, "Invalid product ID, skipping");
                     continue;
                 }
@@ -415,11 +424,7 @@ async fn fetch_candle_data(
         let price_map: HashMap<i64, f64> = data.into_iter().collect();
         let aligned: Vec<Decimal> = sorted_timestamps
             .iter()
-            .filter_map(|ts| {
-                price_map.get(ts).and_then(|p| {
-                    Decimal::from_f64_retain(*p)
-                })
-            })
+            .filter_map(|ts| price_map.get(ts).and_then(|p| Decimal::from_f64_retain(*p)))
             .collect();
 
         if aligned.len() == sorted_timestamps.len() {
@@ -470,13 +475,15 @@ pub async fn discover_and_optimize(
     );
 
     // Step 1: Fetch data
-    let (timestamps, prices_decimal) = fetch_candle_data(client, &config.candidates, config.lookback_days).await?;
+    let (timestamps, prices_decimal) =
+        fetch_candle_data(client, &config.candidates, config.lookback_days).await?;
 
     // Step 2: Convert to f64 for correlation filtering
     let prices_f64: HashMap<String, Vec<f64>> = prices_decimal
         .iter()
         .map(|(k, v)| {
-            let floats: Vec<f64> = v.iter()
+            let floats: Vec<f64> = v
+                .iter()
                 .filter_map(|d| d.to_string().parse().ok())
                 .collect();
             (k.clone(), floats)
@@ -497,7 +504,10 @@ pub async fn discover_and_optimize(
         });
     }
 
-    info!(viable_pairs = viable_pairs.len(), "Running parameter optimization");
+    info!(
+        viable_pairs = viable_pairs.len(),
+        "Running parameter optimization"
+    );
 
     // Step 4: Optimize each pair
     let grid = GridSearchConfig::default();
@@ -524,10 +534,7 @@ pub async fn discover_and_optimize(
     // Step 6: Truncate to max pairs
     results.truncate(config.max_pairs_output);
 
-    info!(
-        optimized_pairs = results.len(),
-        "Discovery complete"
-    );
+    info!(optimized_pairs = results.len(), "Discovery complete");
 
     Ok(results)
 }
@@ -547,7 +554,13 @@ mod tests {
     #[test]
     fn test_sharpe_ratio_positive() {
         // Positive mean with low variance = positive Sharpe
-        let returns = vec![dec!(0.01), dec!(0.02), dec!(0.015), dec!(0.018), dec!(0.012)];
+        let returns = vec![
+            dec!(0.01),
+            dec!(0.02),
+            dec!(0.015),
+            dec!(0.018),
+            dec!(0.012),
+        ];
         let sharpe = calculate_sharpe_ratio(&returns);
         assert!(sharpe > 0.0);
     }

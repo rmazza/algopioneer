@@ -176,7 +176,11 @@ fn compute_spread_bps(spot: Decimal, future: Decimal) -> Option<Decimal> {
 }
 
 /// Helper function to compute net spread (mirrors TransactionCostModel::calc_net_spread)
-fn compute_net_spread(gross_bps: Decimal, taker_fee_bps: Decimal, slippage_bps: Decimal) -> Decimal {
+fn compute_net_spread(
+    gross_bps: Decimal,
+    taker_fee_bps: Decimal,
+    slippage_bps: Decimal,
+) -> Decimal {
     // Net = Gross - (4 * Fees) - Slippage
     let total_fees = taker_fee_bps * dec!(4.0);
     gross_bps - total_fees - slippage_bps
@@ -202,9 +206,9 @@ proptest! {
     ) {
         let spot_price = Decimal::new(spot, 2);
         let future_price = Decimal::new(spot + premium, 2);
-        
+
         if let Some(spread) = compute_spread_bps(spot_price, future_price) {
-            prop_assert!(spread > Decimal::ZERO, 
+            prop_assert!(spread > Decimal::ZERO,
                 "Spread should be positive when future > spot: got {} for spot={}, future={}",
                 spread, spot_price, future_price);
         }
@@ -218,9 +222,9 @@ proptest! {
     ) {
         let spot_price = Decimal::new(future + discount, 2);
         let future_price = Decimal::new(future, 2);
-        
+
         if let Some(spread) = compute_spread_bps(spot_price, future_price) {
-            prop_assert!(spread < Decimal::ZERO, 
+            prop_assert!(spread < Decimal::ZERO,
                 "Spread should be negative when future < spot: got {} for spot={}, future={}",
                 spread, spot_price, future_price);
         }
@@ -236,9 +240,9 @@ proptest! {
         let gross = Decimal::new(gross_bps, 2);
         let fee = Decimal::new(taker_fee, 2);
         let slip = Decimal::new(slippage, 2);
-        
+
         let net = compute_net_spread(gross, fee, slip);
-        
+
         prop_assert!(net <= gross,
             "Net spread {} should be <= gross spread {} (fee={}, slip={})",
             net, gross, fee, slip);
@@ -254,10 +258,10 @@ proptest! {
         let gross = Decimal::new(gross_bps, 2);
         let fee = Decimal::new(taker_fee, 2);
         let slip = Decimal::new(slippage, 2);
-        
+
         let net = compute_net_spread(gross, fee, slip);
         let expected = gross - (fee * dec!(4.0)) - slip;
-        
+
         prop_assert_eq!(net, expected,
             "Net calculation mismatch: got {} expected {}", net, expected);
     }

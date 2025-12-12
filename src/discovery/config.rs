@@ -18,13 +18,28 @@ pub struct PortfolioPairConfig {
     pub exit_z_score: f64,
 }
 
-
 /// Default top-volume trading pairs on Coinbase
 pub const DEFAULT_CANDIDATES: &[&str] = &[
-    "BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "DOGE-USD",
-    "AVAX-USD", "SHIB-USD", "DOT-USD", "MATIC-USD", "LTC-USD",
-    "UNI-USD", "LINK-USD", "XLM-USD", "BCH-USD", "ALGO-USD",
-    "ATOM-USD", "FIL-USD", "VET-USD", "ICP-USD", "AXS-USD",
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "ADA-USD",
+    "DOGE-USD",
+    "AVAX-USD",
+    "SHIB-USD",
+    "DOT-USD",
+    "MATIC-USD",
+    "LTC-USD",
+    "UNI-USD",
+    "LINK-USD",
+    "XLM-USD",
+    "BCH-USD",
+    "ALGO-USD",
+    "ATOM-USD",
+    "FIL-USD",
+    "VET-USD",
+    "ICP-USD",
+    "AXS-USD",
 ];
 
 /// Configuration for the discovery pipeline
@@ -32,35 +47,35 @@ pub const DEFAULT_CANDIDATES: &[&str] = &[
 pub struct DiscoveryConfig {
     /// Candidate symbols to analyze
     pub candidates: Vec<String>,
-    
+
     /// Minimum Pearson correlation threshold (0.0-1.0)
     #[serde(default = "default_min_correlation")]
     pub min_correlation: f64,
-    
+
     /// Maximum half-life for mean reversion (hours)
     #[serde(default = "default_max_half_life")]
     pub max_half_life_hours: f64,
-    
+
     /// Minimum Sharpe ratio to include pair in results
     #[serde(default = "default_min_sharpe")]
     pub min_sharpe_ratio: f64,
-    
+
     /// Historical lookback period in days
     #[serde(default = "default_lookback_days")]
     pub lookback_days: u32,
-    
+
     /// Maximum number of pairs to output
     #[serde(default = "default_max_pairs")]
     pub max_pairs_output: usize,
-    
+
     /// Initial capital for backtests (in USD)
     #[serde(default = "default_initial_capital")]
     pub initial_capital: Decimal,
-    
+
     /// Taker fee as decimal (e.g., 0.002 = 0.2%)
     #[serde(default = "default_taker_fee")]
     pub taker_fee: Decimal,
-    
+
     /// Minimum number of trades required for valid backtest
     #[serde(default = "default_min_trades")]
     pub min_trades: u32,
@@ -71,15 +86,33 @@ pub struct DiscoveryConfig {
 }
 
 // Default value functions for serde
-fn default_min_correlation() -> f64 { 0.8 }
-fn default_max_half_life() -> f64 { 24.0 }
-fn default_min_sharpe() -> f64 { 0.5 }
-fn default_lookback_days() -> u32 { 14 }
-fn default_max_pairs() -> usize { 10 }
-fn default_initial_capital() -> Decimal { dec!(10_000) }
-fn default_taker_fee() -> Decimal { dec!(0.002) }
-fn default_min_trades() -> u32 { 5 }
-fn default_min_net_profit() -> Decimal { dec!(0) }
+fn default_min_correlation() -> f64 {
+    0.8
+}
+fn default_max_half_life() -> f64 {
+    24.0
+}
+fn default_min_sharpe() -> f64 {
+    0.5
+}
+fn default_lookback_days() -> u32 {
+    14
+}
+fn default_max_pairs() -> usize {
+    10
+}
+fn default_initial_capital() -> Decimal {
+    dec!(10_000)
+}
+fn default_taker_fee() -> Decimal {
+    dec!(0.002)
+}
+fn default_min_trades() -> u32 {
+    5
+}
+fn default_min_net_profit() -> Decimal {
+    dec!(0)
+}
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {

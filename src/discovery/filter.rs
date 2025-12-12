@@ -56,7 +56,7 @@ pub fn calculate_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
     }
 
     let correlation = covariance / (var_a.sqrt() * var_b.sqrt());
-    
+
     if correlation.is_finite() {
         Some(correlation)
     } else {
@@ -79,7 +79,7 @@ pub fn analyze_spread(spread: &[f64]) -> (f64, f64) {
 
     let n = spread.len() as f64;
     let mean = spread.iter().sum::<f64>() / n;
-    
+
     // Population variance (for z-score calculation)
     let variance = spread.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
     let std_dev = variance.sqrt();

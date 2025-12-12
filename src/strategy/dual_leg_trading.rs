@@ -1550,7 +1550,7 @@ impl DualLegStrategy {
                     } else {
                         PositionDirection::Short
                     };
-                    
+
                     info!(
                         "Detected existing position: leg1={}, leg2={}, direction={}. Transitioning to InPosition.",
                         leg1_qty, leg2_qty, direction
@@ -2018,18 +2018,14 @@ impl DualLegStrategy {
                     // Long: PnL = (exit - entry) for leg1, (entry - exit) for leg2
                     // Short: PnL = (entry - exit) for leg1, (exit - entry) for leg2
                     let (leg1_pnl, leg2_pnl) = match direction {
-                        PositionDirection::Long => {
-                            (
-                                (leg1.price - leg1_entry_price) * leg1_qty,
-                                (leg2_entry_price - leg2.price) * leg2_qty,
-                            )
-                        }
-                        PositionDirection::Short => {
-                            (
-                                (leg1_entry_price - leg1.price) * leg1_qty,
-                                (leg2.price - leg2_entry_price) * leg2_qty,
-                            )
-                        }
+                        PositionDirection::Long => (
+                            (leg1.price - leg1_entry_price) * leg1_qty,
+                            (leg2_entry_price - leg2.price) * leg2_qty,
+                        ),
+                        PositionDirection::Short => (
+                            (leg1_entry_price - leg1.price) * leg1_qty,
+                            (leg2.price - leg2_entry_price) * leg2_qty,
+                        ),
                     };
                     let gross_pnl = leg1_pnl + leg2_pnl;
 

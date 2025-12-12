@@ -348,7 +348,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Create Strategy
                 // StrategySupervisor requires Box<dyn LiveStrategy>
                 // DualLegStrategyLive<CoinbaseClient> implements LiveStrategy
-                let strategy = DualLegStrategyLive::new(pair_id.clone(), live_config, client.clone());
+                let strategy =
+                    DualLegStrategyLive::new(pair_id.clone(), live_config, client.clone());
 
                 supervisor.add_strategy(Box::new(strategy));
                 info!("Added strategy #{} ({})", idx + 1, pair_id);
@@ -494,7 +495,8 @@ impl SimpleTradingEngine {
                             symbol: self.config.product_id.clone(),
                             side: "buy".to_string(),
                             quantity: self.config.order_size,
-                            entry_price: Decimal::from_f64(latest_candle.close).unwrap_or(Decimal::ZERO),
+                            entry_price: Decimal::from_f64(latest_candle.close)
+                                .unwrap_or(Decimal::ZERO),
                         };
                         self.state.open_position(detail);
 
@@ -775,7 +777,7 @@ async fn run_discover_pairs(
     output_path: &str,
     initial_capital: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use algopioneer::discovery::config::{DEFAULT_CANDIDATES, PortfolioPairConfig};
+    use algopioneer::discovery::config::{PortfolioPairConfig, DEFAULT_CANDIDATES};
 
     info!("--- AlgoPioneer: Pair Discovery Pipeline ---");
 
@@ -784,7 +786,10 @@ async fn run_discover_pairs(
         info!("Using default top-20 candidate pairs");
         DEFAULT_CANDIDATES.iter().map(|s| s.to_string()).collect()
     } else {
-        symbols_arg.split(',').map(|s| s.trim().to_string()).collect()
+        symbols_arg
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect()
     };
 
     info!(
@@ -844,7 +849,7 @@ async fn run_discover_pairs(
             pair.correlation,
             pair.net_profit
         );
-        
+
         if pair.sharpe_ratio > 10.0 {
             warn!(
                 pair = format!("{}/{}", pair.leg1, pair.leg2),
@@ -853,7 +858,7 @@ async fn run_discover_pairs(
             );
         }
     }
-    
+
     // Warn if any Sharpe ratios are extremely high
     if results.iter().any(|p| p.sharpe_ratio > 10.0) {
         warn!("Some pairs have Sharpe ratios > 10.0. This may indicate overfitting or insufficient trade count.");
@@ -864,7 +869,7 @@ async fn run_discover_pairs(
     // Allocation = Initial Capital / Max Pairs (to ensure safety even if fewer pairs are found)
     let initial_capital_dec = Decimal::from_f64_retain(initial_capital).unwrap_or(dec!(10000));
     let allocation = initial_capital_dec / Decimal::from(max_pairs);
-    
+
     info!(
         capital = %initial_capital_dec,
         max_pairs = max_pairs,
@@ -889,7 +894,10 @@ async fn run_discover_pairs(
     );
 
     println!("\n✓ Saved {} pairs to {}", results.len(), output_path);
-    println!("  Run with: cargo run -- portfolio --config {}", output_path);
+    println!(
+        "  Run with: cargo run -- portfolio --config {}",
+        output_path
+    );
 
     Ok(())
 }
