@@ -31,6 +31,10 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
+// Paper trade logging
+use algopioneer::logging::PaperTradeLogger;
+use std::path::PathBuf;
+
 // --- Constants ---
 const STATE_FILE: &str = "trade_state.json";
 
@@ -248,7 +252,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            let mut engine = SimpleTradingEngine::new(config, state_tx).await?;
+            // Create paper logger if in paper mode
+            let paper_logger = if *paper {
+                let (logger, task) = PaperTradeLogger::new(PathBuf::from("paper_trades.csv"));
+                tokio::spawn(task.run());
+                Some(logger)
+            } else {
+                None
+            };
+
+            let mut engine = SimpleTradingEngine::new(config, state_tx, paper_logger).await?;
             engine.run().await?;
         }
         Commands::Backtest => {
@@ -322,7 +335,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Initialize Shared Resources
-            let client = Arc::new(CoinbaseClient::new(env)?);
+            // Create paper logger if in paper mode
+            let paper_logger = if *paper {
+                let (logger, task) = PaperTradeLogger::new(PathBuf::from("paper_trades.csv"));
+                tokio::spawn(task.run());
+                Some(logger)
+            } else {
+                None
+            };
+            let client = Arc::new(CoinbaseClient::new(env, paper_logger)?);
             // Use CoinbaseWebSocketProvider which implements WebSocketProvider trait
             let ws_client = Box::new(CoinbaseWebSocketProvider::from_env()?);
 
@@ -409,8 +430,9 @@ impl SimpleTradingEngine {
     async fn new(
         config: SimpleTradingConfig,
         state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
+        paper_logger: Option<PaperTradeLogger>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let client = CoinbaseClient::new(config.env)?;
+        let client = CoinbaseClient::new(config.env, paper_logger)?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
         Ok(Self {
@@ -614,7 +636,15 @@ async fn run_dual_leg_trading(
         warn!("Kraken exchange selected but not fully implemented yet. Falling back to Coinbase for execution.");
     }
 
-    let client = Arc::new(CoinbaseClient::new(env)?);
+    // Create paper logger if in paper mode
+    let paper_logger = if _paper {
+        let (logger, task) = PaperTradeLogger::new(PathBuf::from("paper_trades.csv"));
+        tokio::spawn(task.run());
+        Some(logger)
+    } else {
+        None
+    };
+    let client = Arc::new(CoinbaseClient::new(env, paper_logger)?);
 
     // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure
     // This prevents unbounded queuing and ensures recovery tasks are never dropped
@@ -813,8 +843,8 @@ async fn run_discover_pairs(
         ..Default::default()
     };
 
-    // Initialize Coinbase client
-    let mut client = CoinbaseClient::new(AppEnv::Live)?;
+    // Initialize Coinbase client (discovery always uses Live mode, no paper trading)
+    let mut client = CoinbaseClient::new(AppEnv::Live, None)?;
 
     // Run discovery pipeline
     info!("Starting discovery and optimization...");

@@ -862,7 +862,7 @@ impl EntryStrategy for PairsManager {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
                     // Only log every 1000th warning to reduce noise
-                    if count == 1 || count % 1000 == 0 {
+                    if count == 1 || count.is_multiple_of(1000) {
                         warn!(
                             "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation. (Total warnings: {})",
                             ratio, count

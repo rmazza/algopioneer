@@ -347,7 +347,7 @@ async fn load_coinbase_data(
 
     info!("Connecting to Coinbase API...");
 
-    let mut client = CoinbaseClient::new(AppEnv::Live)?;
+    let mut client = CoinbaseClient::new(AppEnv::Live, None)?;
 
     // Parse end date or use now
     let end = match end_date {

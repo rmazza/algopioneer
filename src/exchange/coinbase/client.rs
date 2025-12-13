@@ -31,7 +31,7 @@ impl CoinbaseExchangeClient {
             AppEnv::Live
         };
 
-        let inner = CoinbaseClient::new(env)?;
+        let inner = CoinbaseClient::new(env, None)?;
         Ok(Self { inner, config })
     }
 
@@ -40,7 +40,7 @@ impl CoinbaseExchangeClient {
         std::env::set_var("COINBASE_API_KEY", &config.api_key);
         std::env::set_var("COINBASE_API_SECRET", &config.api_secret);
 
-        let inner = CoinbaseClient::new(AppEnv::Paper)?;
+        let inner = CoinbaseClient::new(AppEnv::Paper, None)?;
         Ok(Self { inner, config })
     }
 

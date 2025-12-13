@@ -1,5 +1,6 @@
 pub mod market_data_provider;
 pub mod websocket;
+use crate::logging::PaperTradeLogger;
 use crate::sandbox;
 use cbadv::models::product::{Candle, ProductCandleQuery};
 use cbadv::time::Granularity;
@@ -22,6 +23,8 @@ pub struct CoinbaseClient {
     mode: AppEnv,
     // AS5: Rate limiter for API calls (10 req/sec for Coinbase Advanced Trade)
     rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
+    // Thread-safe paper trade logger (None if not in Paper mode)
+    paper_logger: Option<PaperTradeLogger>,
 }
 
 impl CoinbaseClient {
@@ -30,10 +33,14 @@ impl CoinbaseClient {
     /// It initializes the connection to the Coinbase Advanced Trade API
     /// using credentials from environment variables.
     ///
+    /// # Arguments
+    /// * `env` - The environment mode (Live, Sandbox, or Paper)
+    /// * `paper_logger` - Optional logger for paper trades (required for Paper mode)
+    ///
     /// # Errors
     /// Returns an error if COINBASE_API_KEY or COINBASE_API_SECRET environment
     /// variables are not set, or if the REST client fails to build.
-    pub fn new(env: AppEnv) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(env: AppEnv, paper_logger: Option<PaperTradeLogger>) -> Result<Self, Box<dyn std::error::Error>> {
         // Retrieve API Key and Secret from environment variables
         let api_key = std::env::var("COINBASE_API_KEY")
             .map_err(|_| "COINBASE_API_KEY must be set in .env file or environment")?;
@@ -59,6 +66,7 @@ impl CoinbaseClient {
             client,
             mode: env,
             rate_limiter,
+            paper_logger,
         })
     }
 
@@ -108,30 +116,20 @@ impl CoinbaseClient {
                 let price_str = price
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "MARKET".to_string());
-                let msg = format!(
-                    "-- PAPER TRADE: {} {} of {} @ {} --",
-                    side, size, product_id, price_str
+                tracing::info!(
+                    product_id = product_id,
+                    side = side,
+                    size = %size,
+                    price = %price_str,
+                    "PAPER TRADE executed"
                 );
-                tracing::info!("{}", msg);
 
-                // Log to CSV
-                use std::fs::OpenOptions;
-                use std::io::Write;
-
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("paper_trades.csv")?;
-
-                writeln!(
-                    file,
-                    "{},{},{},{},{}",
-                    Utc::now(),
-                    product_id,
-                    side,
-                    size,
-                    price_str
-                )?;
+                // Log to CSV via channel-based logger (thread-safe, no race conditions)
+                if let Some(ref logger) = self.paper_logger {
+                    logger.log_trade(product_id, side, size, price);
+                } else {
+                    tracing::warn!("Paper trading without logger - trades not being recorded");
+                }
                 Ok(())
             }
         }
