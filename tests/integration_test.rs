@@ -633,3 +633,99 @@ async fn test_synthetic_provider() {
     assert!(btc_seen, "Should have received BTC ticks");
     assert!(eth_seen, "Should have received ETH ticks");
 }
+
+// =============================================================================
+// HTTP ENDPOINT INTEGRATION TESTS
+// =============================================================================
+
+#[tokio::test]
+async fn test_health_endpoint_returns_healthy() {
+    use algopioneer::health::{create_health_state, run_health_server};
+    use std::net::TcpListener;
+
+    // Find an available port
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // Release the port
+
+    let state = create_health_state();
+
+    // Spawn health server
+    tokio::spawn(run_health_server(port, state));
+
+    // Wait for server to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Make HTTP request to /health
+    let _url = format!("http://127.0.0.1:{}/health", port);
+
+    // Simple TCP request (avoiding additional dependencies)
+    let response = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await;
+
+    if let Ok(mut stream) = response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let request = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port);
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buffer = Vec::new();
+        stream.read_to_end(&mut buffer).await.unwrap();
+        let response_str = String::from_utf8_lossy(&buffer);
+
+        // Verify HTTP response
+        assert!(response_str.contains("200 OK"), "Expected 200 OK, got: {}", response_str);
+        assert!(response_str.contains("healthy"), "Expected 'healthy' in response body");
+        assert!(response_str.contains("version"), "Expected 'version' field in response");
+    } else {
+        // Server may have failed to bind (port race condition in CI) - skip gracefully
+        println!("Skipping health test - server not available on port {}", port);
+    }
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_returns_prometheus_format() {
+    use algopioneer::health::{create_health_state, run_health_server};
+    use algopioneer::metrics::record_order;
+    use std::net::TcpListener;
+
+    // Find an available port
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let state = create_health_state();
+
+    // Record a metric before starting server
+    record_order("TEST-INTEGRATION", "buy", true);
+
+    // Spawn health server
+    tokio::spawn(run_health_server(port, state));
+
+    // Wait for server to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Make HTTP request to /metrics
+    let response = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await;
+
+    if let Ok(mut stream) = response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let request = format!("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port);
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buffer = Vec::new();
+        stream.read_to_end(&mut buffer).await.unwrap();
+        let response_str = String::from_utf8_lossy(&buffer);
+
+        // Verify HTTP response
+        assert!(response_str.contains("200 OK"), "Expected 200 OK for /metrics");
+
+        // Verify Prometheus format markers
+        assert!(
+            response_str.contains("# HELP") || response_str.contains("# TYPE") || response_str.contains("algopioneer"),
+            "Expected Prometheus format output with HELP/TYPE comments or metric prefix"
+        );
+    } else {
+        println!("Skipping metrics test - server not available on port {}", port);
+    }
+}

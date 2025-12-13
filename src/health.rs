@@ -1,4 +1,53 @@
-//! AS10: Health check HTTP endpoint for monitoring
+//! Health Check HTTP Endpoint for Monitoring
+//!
+//! Provides HTTP endpoints for operational monitoring and container orchestration.
+//!
+//! # Endpoints
+//!
+//! * `GET /health` - Returns JSON health status with circuit breaker state
+//! * `GET /metrics` - Returns Prometheus-format metrics for scraping
+//!
+//! # Kubernetes Integration
+//!
+//! ## Liveness Probe
+//!
+//! Use `/health` to determine if the application is alive. The probe should
+//! restart the container if it returns non-2xx or times out.
+//!
+//! ```yaml
+//! livenessProbe:
+//!   httpGet:
+//!     path: /health
+//!     port: 8080
+//!   initialDelaySeconds: 10
+//!   periodSeconds: 30
+//!   timeoutSeconds: 5
+//!   failureThreshold: 3
+//! ```
+//!
+//! ## Readiness Probe
+//!
+//! Use `/health` with status field validation for traffic routing. The
+//! application reports `"degraded"` when circuit breaker is half-open and
+//! `"critical"` when fully open.
+//!
+//! ```yaml
+//! readinessProbe:
+//!   httpGet:
+//!     path: /health
+//!     port: 8080
+//!   initialDelaySeconds: 5
+//!   periodSeconds: 10
+//!   # Note: Consider using exec probe to check status != "critical"
+//! ```
+//!
+//! # Status Values
+//!
+//! | Status | Meaning | Circuit Breaker |
+//! |--------|---------|-----------------|
+//! | `healthy` | Normal operation | Closed |
+//! | `degraded` | Testing recovery | HalfOpen |
+//! | `critical` | Blocking requests | Open |
 
 use crate::metrics;
 use crate::resilience::{CircuitBreaker, CircuitState};
