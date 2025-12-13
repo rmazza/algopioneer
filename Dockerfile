@@ -4,10 +4,11 @@
 
 # ------------------------------------------------------------------------------
 # Stage 1: Chef (Prepares the recipe)
+# Note: polars 0.51.0 requires Rust nightly due to unstable features (let chains)
 # ------------------------------------------------------------------------------
-FROM rust:1.83-bookworm AS chef
-# Install cargo-chef globally (pinned for Rust 1.83 compatibility)
-RUN cargo install cargo-chef --locked --version 0.1.68
+FROM rustlang/rust:nightly-bookworm AS chef
+# Install cargo-chef globally
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
 # ------------------------------------------------------------------------------
