@@ -161,10 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. The Optimization Loop
     for window in windows {
         for z_entry in z_entries.clone() {
-            let manager = PairsManager::new(window, z_entry, z_exit);
+            let mut manager = PairsManager::new(window, z_entry, z_exit);
 
             let result = run_simulation(
-                &manager, &dates, &prices_a, &prices_b, window, z_entry, z_exit,
+                &mut manager,
+                &dates,
+                &prices_a,
+                &prices_b,
+                window,
+                z_entry,
+                z_exit,
             )
             .await;
 
@@ -202,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Simulates the Pairs Trading strategy on historical arrays
 async fn run_simulation(
-    manager: &PairsManager,
+    manager: &mut PairsManager,
     dates: &[i64],
     prices_a: &[f64],
     prices_b: &[f64],
