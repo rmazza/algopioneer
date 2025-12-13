@@ -25,7 +25,7 @@ async-trait = "0.1.89"
 rand = "0.9.2"
 rust_decimal = { version = "1.33", features = ["serde"] }
 rust_decimal_macros = "1.33"
-tokio-tungstenite = { version = "0.26.1", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26.1", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3.31"
 url = "2.5.4"
 hmac = "0.12.1"

@@ -1,0 +1,49 @@
+# Build artifacts
+target/
+debug/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Environment and secrets (NEVER include in image)
+.env
+.env.*
+!.env.example
+
+# Development files
+*.log
+*.csv
+*.json
+!pairs_config.json.example
+Cargo.lock.bak
+
+# Documentation
+*.md
+!README.md
+LICENSE
+
+# Temporary files
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+tests/
+test_*.rs
+
+# Agent and workflow files
+.agent/
+.github/
+
+# Other non-essential files
+deny.toml
+check_error.log
