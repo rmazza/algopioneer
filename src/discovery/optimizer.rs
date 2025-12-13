@@ -201,7 +201,7 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
 
 /// Run backtest simulation for given parameters
 async fn run_backtest(
-    manager: &PairsManager,
+    manager: &mut PairsManager,
     data: BacktestData<'_>,
     config: &BacktestConfig,
 ) -> BacktestResult {
@@ -281,7 +281,7 @@ async fn optimize_pair(
     for &window in &grid.windows {
         for &z_entry in &grid.z_entries {
             // Create fresh manager for each parameter combination
-            let manager = PairsManager::new(window, z_entry, grid.z_exit);
+            let mut manager = PairsManager::new(window, z_entry, grid.z_exit);
 
             let backtest_data = BacktestData {
                 timestamps,
@@ -296,7 +296,7 @@ async fn optimize_pair(
                 z_exit: grid.z_exit,
             };
 
-            let result = run_backtest(&manager, backtest_data, &backtest_config).await;
+            let result = run_backtest(&mut manager, backtest_data, &backtest_config).await;
 
             // Filter by minimum trades
             if result.trades < config.min_trades {

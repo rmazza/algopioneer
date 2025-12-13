@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, instrument, warn};
 
@@ -722,9 +722,11 @@ pub struct RecoveryTask {
 /// Trait for entry logic strategies.
 /// Allows for swapping different entry algorithms (e.g., simple threshold vs. statistical arbitrage).
 #[async_trait]
-pub trait EntryStrategy: Send + Sync {
+pub trait EntryStrategy: Send {
     /// Analyzes the market data for Leg 1 and Leg 2 to generate a trading signal.
-    async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal;
+    /// Uses `&mut self` to allow implementations to update internal state (e.g., sliding window)
+    /// without requiring internal synchronization.
+    async fn analyze(&mut self, leg1: &MarketData, leg2: &MarketData) -> Signal;
 }
 
 // Executor trait is now imported from crate::exchange
@@ -755,7 +757,7 @@ impl BasisManager {
 #[async_trait]
 impl EntryStrategy for BasisManager {
     #[instrument(skip(self))]
-    async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal {
+    async fn analyze(&mut self, leg1: &MarketData, leg2: &MarketData) -> Signal {
         let spread = Spread::new(leg1.price, leg2.price);
         let net_spread = self.cost_model.calc_net_spread(spread.value_bps);
         debug!(
@@ -775,11 +777,20 @@ impl EntryStrategy for BasisManager {
 
 /// Statistical Arbitrage (Pairs Trading) Manager.
 /// Uses Z-Score of the log-spread to generate signals.
+///
+/// # Performance
+/// Uses O(1) sliding window statistics via running sums instead of O(n) iteration.
+/// This eliminates per-tick iteration and removes Mutex contention.
 pub struct PairsManager {
     window_size: usize,
     entry_z_score: f64,
     exit_z_score: f64,
-    spread_history: Mutex<std::collections::VecDeque<f64>>,
+    /// Sliding window of log-spreads (no Mutex - uses &mut self)
+    spread_history: std::collections::VecDeque<f64>,
+    /// Running sum for O(1) mean calculation
+    running_sum: f64,
+    /// Running sum of squares for O(1) variance calculation
+    running_sq_sum: f64,
     // CF3 FIX: Precision monitoring metrics
     precision_rejections: std::sync::atomic::AtomicU64,
     precision_warnings: std::sync::atomic::AtomicU64,
@@ -791,7 +802,9 @@ impl PairsManager {
             window_size,
             entry_z_score,
             exit_z_score,
-            spread_history: Mutex::new(std::collections::VecDeque::with_capacity(window_size)),
+            spread_history: std::collections::VecDeque::with_capacity(window_size),
+            running_sum: 0.0,
+            running_sq_sum: 0.0,
             // CF3 FIX: Initialize precision monitoring counters
             precision_rejections: std::sync::atomic::AtomicU64::new(0),
             precision_warnings: std::sync::atomic::AtomicU64::new(0),
@@ -812,7 +825,7 @@ impl PairsManager {
 #[async_trait]
 impl EntryStrategy for PairsManager {
     #[instrument(skip(self))]
-    async fn analyze(&self, leg1: &MarketData, leg2: &MarketData) -> Signal {
+    async fn analyze(&mut self, leg1: &MarketData, leg2: &MarketData) -> Signal {
         // CF3 DOCUMENTATION: Decimal → f64 precision loss
         // ================================================
         // For statistical arbitrage, we convert Decimal prices to f64 for natural log calculations.
@@ -883,37 +896,38 @@ impl EntryStrategy for PairsManager {
 
         let spread = p1.ln() - p2.ln();
 
-        let z_score = {
-            let mut history = self.spread_history.lock().await;
-            history.push_back(spread);
-            if history.len() > self.window_size {
-                history.pop_front();
+        // O(1) sliding window statistics via running sums
+        // Add new value to running sums
+        self.running_sum += spread;
+        self.running_sq_sum += spread * spread;
+        self.spread_history.push_back(spread);
+
+        // Remove oldest value if window is full
+        if self.spread_history.len() > self.window_size {
+            if let Some(old_spread) = self.spread_history.pop_front() {
+                self.running_sum -= old_spread;
+                self.running_sq_sum -= old_spread * old_spread;
             }
+        }
 
-            if history.len() < self.window_size {
-                return Signal::Hold; // Not enough data
-            }
+        // Not enough data yet
+        if self.spread_history.len() < self.window_size {
+            return Signal::Hold;
+        }
 
-            let n = history.len() as f64;
-            let sum: f64 = history.iter().sum();
-            let mean = sum / n;
+        // O(1) mean and variance calculation
+        let n = self.spread_history.len() as f64;
+        let mean = self.running_sum / n;
 
-            let variance: f64 = history
-                .iter()
-                .map(|val| {
-                    let diff = mean - val;
-                    diff * diff
-                })
-                .sum::<f64>()
-                / n;
+        // Variance = E[X^2] - E[X]^2
+        // Clamp to 0.0 to handle floating-point precision issues
+        let variance = (self.running_sq_sum / n - mean * mean).max(0.0);
+        let std_dev = variance.sqrt();
 
-            let std_dev = variance.sqrt();
-
-            if std_dev == 0.0 {
-                0.0
-            } else {
-                (spread - mean) / std_dev
-            }
+        let z_score = if std_dev == 0.0 {
+            0.0
+        } else {
+            (spread - mean) / std_dev
         };
 
         debug!("Pairs Spread: {:.6}, Z-Score: {:.4}", spread, z_score);
@@ -2357,7 +2371,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_z_score_calculation() {
-        let manager = PairsManager::new(5, 1.9, 0.1);
+        let mut manager = PairsManager::new(5, 1.9, 0.1);
         for _ in 0..5 {
             let _ = manager
                 .analyze(
@@ -2435,7 +2449,7 @@ mod tests {
     #[tokio::test]
     async fn test_basis_manager_signals() {
         let cost_model = TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0));
-        let manager = BasisManager::new(dec!(10.0), dec!(2.0), cost_model);
+        let mut manager = BasisManager::new(dec!(10.0), dec!(2.0), cost_model);
 
         let signal = manager
             .analyze(
