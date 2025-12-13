@@ -40,7 +40,10 @@ impl CoinbaseClient {
     /// # Errors
     /// Returns an error if COINBASE_API_KEY or COINBASE_API_SECRET environment
     /// variables are not set, or if the REST client fails to build.
-    pub fn new(env: AppEnv, paper_logger: Option<PaperTradeLogger>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        env: AppEnv,
+        paper_logger: Option<PaperTradeLogger>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Retrieve API Key and Secret from environment variables
         let api_key = std::env::var("COINBASE_API_KEY")
             .map_err(|_| "COINBASE_API_KEY must be set in .env file or environment")?;

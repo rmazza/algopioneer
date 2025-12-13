@@ -62,13 +62,7 @@ impl PaperTradeLogger {
     }
 
     /// Convenience method to log a trade
-    pub fn log_trade(
-        &self,
-        product_id: &str,
-        side: &str,
-        size: Decimal,
-        price: Option<Decimal>,
-    ) {
+    pub fn log_trade(&self, product_id: &str, side: &str, size: Decimal, price: Option<Decimal>) {
         let record = PaperTradeRecord {
             timestamp: Utc::now(),
             product_id: product_id.to_string(),

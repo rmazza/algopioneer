@@ -1,9 +1,9 @@
 pub mod backtest;
 pub mod coinbase;
-pub mod logging;
 pub mod discovery;
 pub mod exchange;
 pub mod health;
+pub mod logging;
 pub mod metrics;
 pub mod observability;
 pub mod resilience;

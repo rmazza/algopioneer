@@ -83,4 +83,3 @@ pub struct MarketData {
     /// The timestamp of the update in milliseconds since Unix epoch.
     pub timestamp: i64,
 }
-

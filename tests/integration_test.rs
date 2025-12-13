@@ -665,7 +665,10 @@ async fn test_health_endpoint_returns_healthy() {
     if let Ok(mut stream) = response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let request = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port);
+        let request = format!(
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            port
+        );
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buffer = Vec::new();
@@ -673,12 +676,25 @@ async fn test_health_endpoint_returns_healthy() {
         let response_str = String::from_utf8_lossy(&buffer);
 
         // Verify HTTP response
-        assert!(response_str.contains("200 OK"), "Expected 200 OK, got: {}", response_str);
-        assert!(response_str.contains("healthy"), "Expected 'healthy' in response body");
-        assert!(response_str.contains("version"), "Expected 'version' field in response");
+        assert!(
+            response_str.contains("200 OK"),
+            "Expected 200 OK, got: {}",
+            response_str
+        );
+        assert!(
+            response_str.contains("healthy"),
+            "Expected 'healthy' in response body"
+        );
+        assert!(
+            response_str.contains("version"),
+            "Expected 'version' field in response"
+        );
     } else {
         // Server may have failed to bind (port race condition in CI) - skip gracefully
-        println!("Skipping health test - server not available on port {}", port);
+        println!(
+            "Skipping health test - server not available on port {}",
+            port
+        );
     }
 }
 
@@ -710,7 +726,10 @@ async fn test_metrics_endpoint_returns_prometheus_format() {
     if let Ok(mut stream) = response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let request = format!("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port);
+        let request = format!(
+            "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            port
+        );
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buffer = Vec::new();
@@ -718,14 +737,22 @@ async fn test_metrics_endpoint_returns_prometheus_format() {
         let response_str = String::from_utf8_lossy(&buffer);
 
         // Verify HTTP response
-        assert!(response_str.contains("200 OK"), "Expected 200 OK for /metrics");
+        assert!(
+            response_str.contains("200 OK"),
+            "Expected 200 OK for /metrics"
+        );
 
         // Verify Prometheus format markers
         assert!(
-            response_str.contains("# HELP") || response_str.contains("# TYPE") || response_str.contains("algopioneer"),
+            response_str.contains("# HELP")
+                || response_str.contains("# TYPE")
+                || response_str.contains("algopioneer"),
             "Expected Prometheus format output with HELP/TYPE comments or metric prefix"
         );
     } else {
-        println!("Skipping metrics test - server not available on port {}", port);
+        println!(
+            "Skipping metrics test - server not available on port {}",
+            port
+        );
     }
 }
