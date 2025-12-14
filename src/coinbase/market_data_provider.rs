@@ -53,7 +53,7 @@ impl MarketDataProvider for CoinbaseWebsocketProvider {
         // Spawn task to connect and stream data
         tokio::spawn(async move {
             if let Err(e) = ws.connect_and_subscribe(symbols, tx).await {
-                eprintln!("Coinbase WebSocket error: {}", e);
+                tracing::error!(error = %e, "Coinbase WebSocket error");
             }
         });
 

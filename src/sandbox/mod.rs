@@ -13,6 +13,6 @@ pub fn save_trade(trade_details: &str) -> Result<(), Box<dyn std::error::Error +
     }
 
     writeln!(file, "{}", trade_details)?;
-    println!("-- Sandbox Mode: Trade saved to sandbox_trades.csv --");
+    tracing::info!("Sandbox Mode: Trade saved to sandbox_trades.csv");
     Ok(())
 }
