@@ -34,16 +34,24 @@ pub struct OptimizedPair {
     pub z_entry: f64,
     /// Z-score exit threshold (mean reversion)
     pub z_exit: f64,
-    /// Annualized Sharpe ratio
+    /// In-sample Sharpe ratio (training period)
     pub sharpe_ratio: f64,
-    /// Net profit in USD
+    /// Net profit in USD (total: train + test)
     pub net_profit: Decimal,
-    /// Total number of trades
+    /// Total number of trades (train + test)
     pub trades: u32,
     /// Pearson correlation
     pub correlation: f64,
     /// Mean-reversion half-life (hours)
     pub half_life_hours: f64,
+    /// ADF cointegration test statistic
+    pub adf_statistic: f64,
+    /// Out-of-sample Sharpe ratio (validation/test period)
+    pub validation_sharpe: f64,
+    /// Number of trades in validation period
+    pub validation_trades: u32,
+    /// Profit per trade (net_profit / trades)
+    pub profit_per_trade: Decimal,
 }
 
 impl OptimizedPair {
@@ -267,7 +275,12 @@ async fn run_backtest(
     }
 }
 
-/// Optimize parameters for a single pair
+/// Optimize parameters for a single pair with walk-forward validation
+///
+/// Uses train/test split to prevent overfitting:
+/// 1. Grid search on TRAIN data (first train_ratio % of data)
+/// 2. Validate best parameters on TEST data (remaining %)
+/// 3. Only accept if validation Sharpe meets threshold
 async fn optimize_pair(
     pair: &CandidatePair,
     timestamps: &[i64],
@@ -276,17 +289,51 @@ async fn optimize_pair(
     config: &DiscoveryConfig,
     grid: &GridSearchConfig,
 ) -> Option<OptimizedPair> {
-    let mut best_result: Option<BacktestResult> = None;
+    let n = timestamps.len();
+    if n < 50 {
+        debug!(
+            pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+            samples = n,
+            "Insufficient data for train/test split"
+        );
+        return None;
+    }
+
+    // Split data: train_ratio for training, rest for validation
+    let split_idx = (n as f64 * config.train_ratio) as usize;
+    let split_idx = split_idx.max(20).min(n - 20); // Ensure both sets have at least 20 samples
+
+    let train_timestamps = &timestamps[..split_idx];
+    let train_prices_a = &prices_a[..split_idx];
+    let train_prices_b = &prices_b[..split_idx];
+
+    let test_timestamps = &timestamps[split_idx..];
+    let test_prices_a = &prices_a[split_idx..];
+    let test_prices_b = &prices_b[split_idx..];
+
+    debug!(
+        pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+        train_samples = train_timestamps.len(),
+        test_samples = test_timestamps.len(),
+        "Train/test split"
+    );
+
+    // Phase 1: Grid search on TRAIN data only
+    let mut best_train_result: Option<BacktestResult> = None;
 
     for &window in &grid.windows {
+        // Skip window sizes larger than training data
+        if window >= train_timestamps.len() {
+            continue;
+        }
+
         for &z_entry in &grid.z_entries {
-            // Create fresh manager for each parameter combination
             let mut manager = PairsManager::new(window, z_entry, grid.z_exit);
 
             let backtest_data = BacktestData {
-                timestamps,
-                prices_a,
-                prices_b,
+                timestamps: train_timestamps,
+                prices_a: train_prices_a,
+                prices_b: train_prices_b,
             };
             let backtest_config = BacktestConfig {
                 initial_capital: config.initial_capital,
@@ -298,50 +345,130 @@ async fn optimize_pair(
 
             let result = run_backtest(&mut manager, backtest_data, &backtest_config).await;
 
-            // Filter by minimum trades
-            if result.trades < config.min_trades {
+            // Require minimum trades even in training
+            if result.trades < (config.min_trades / 2).max(5) {
                 continue;
             }
 
-            // Update best if better Sharpe (or first valid result)
-            let is_better = match &best_result {
+            let is_better = match &best_train_result {
                 Some(best) => result.sharpe_ratio > best.sharpe_ratio,
                 None => true,
             };
 
             if is_better {
-                best_result = Some(result);
+                best_train_result = Some(result);
             }
         }
     }
 
-    debug!(
-        pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
-        "Grid search complete for pair"
+    let train_result = best_train_result?;
+
+    // Phase 2: Validate best parameters on TEST data (out-of-sample)
+    let mut manager = PairsManager::new(
+        train_result.window,
+        train_result.z_entry,
+        train_result.z_exit,
     );
 
-    best_result.and_then(|result| {
-        // Filter by minimum Sharpe ratio
-        // Filter by minimum Sharpe ratio and Net Profit
-        if result.sharpe_ratio < config.min_sharpe_ratio {
-            return None;
-        }
-        if result.net_profit < config.min_net_profit {
-            return None;
-        }
+    let test_data = BacktestData {
+        timestamps: test_timestamps,
+        prices_a: test_prices_a,
+        prices_b: test_prices_b,
+    };
+    let test_config = BacktestConfig {
+        initial_capital: config.initial_capital,
+        taker_fee: config.taker_fee,
+        window: train_result.window,
+        z_entry: train_result.z_entry,
+        z_exit: train_result.z_exit,
+    };
 
-        Some(OptimizedPair {
-            leg1: pair.symbol_a.clone(),
-            leg2: pair.symbol_b.clone(),
-            window: result.window,
-            z_entry: result.z_entry,
-            z_exit: result.z_exit,
-            sharpe_ratio: result.sharpe_ratio,
-            net_profit: result.net_profit,
-            trades: result.trades,
-            correlation: pair.correlation,
-            half_life_hours: pair.half_life_hours,
-        })
+    let validation_result = run_backtest(&mut manager, test_data, &test_config).await;
+
+    debug!(
+        pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+        train_sharpe = format!("{:.2}", train_result.sharpe_ratio),
+        validation_sharpe = format!("{:.2}", validation_result.sharpe_ratio),
+        train_trades = train_result.trades,
+        validation_trades = validation_result.trades,
+        "Walk-forward validation complete"
+    );
+
+    // Phase 3: Apply filters
+    let total_trades = train_result.trades + validation_result.trades;
+    let total_profit = train_result.net_profit + validation_result.net_profit;
+
+    // Filter: minimum total trades
+    if total_trades < config.min_trades {
+        debug!(
+            pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+            trades = total_trades,
+            min = config.min_trades,
+            "Rejected: insufficient trades"
+        );
+        return None;
+    }
+
+    // Filter: validation Sharpe must be reasonable (not just noise)
+    if validation_result.sharpe_ratio < 0.0 {
+        debug!(
+            pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+            validation_sharpe = validation_result.sharpe_ratio,
+            "Rejected: negative validation Sharpe (overfit)"
+        );
+        return None;
+    }
+
+    // Filter: minimum Sharpe (use validation Sharpe as primary metric)
+    if validation_result.sharpe_ratio < config.min_sharpe_ratio * 0.5 {
+        // Allow 50% lower threshold for validation since it's harder
+        debug!(
+            pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+            validation_sharpe = validation_result.sharpe_ratio,
+            threshold = config.min_sharpe_ratio * 0.5,
+            "Rejected: validation Sharpe below threshold"
+        );
+        return None;
+    }
+
+    // Filter: minimum net profit
+    if total_profit < config.min_net_profit {
+        return None;
+    }
+
+    // Warn if train Sharpe is suspiciously high
+    if train_result.sharpe_ratio > config.max_sharpe_ratio {
+        warn!(
+            pair = format!("{}/{}", pair.symbol_a, pair.symbol_b),
+            train_sharpe = format!("{:.2}", train_result.sharpe_ratio),
+            validation_sharpe = format!("{:.2}", validation_result.sharpe_ratio),
+            "High train Sharpe ({:.1}) may indicate overfitting - validation Sharpe is {:.2}",
+            train_result.sharpe_ratio,
+            validation_result.sharpe_ratio
+        );
+    }
+
+    let profit_per_trade = if total_trades > 0 {
+        total_profit / Decimal::from(total_trades)
+    } else {
+        Decimal::ZERO
+    };
+
+    Some(OptimizedPair {
+        leg1: pair.symbol_a.clone(),
+        leg2: pair.symbol_b.clone(),
+        window: train_result.window,
+        z_entry: train_result.z_entry,
+        z_exit: train_result.z_exit,
+        sharpe_ratio: train_result.sharpe_ratio,
+        net_profit: total_profit,
+        trades: total_trades,
+        correlation: pair.correlation,
+        half_life_hours: pair.half_life_hours,
+        adf_statistic: pair.adf_statistic,
+        validation_sharpe: validation_result.sharpe_ratio,
+        validation_trades: validation_result.trades,
+        profit_per_trade,
     })
 }
 
@@ -592,6 +719,10 @@ mod tests {
             trades: 10,
             correlation: 0.85,
             half_life_hours: 12.0,
+            adf_statistic: -3.5,
+            validation_sharpe: 1.2,
+            validation_trades: 5,
+            profit_per_trade: dec!(50),
         };
 
         let config = pair.to_portfolio_config(dec!(100));
@@ -600,5 +731,10 @@ mod tests {
         assert_eq!(config.dual_leg_config.order_size, dec!(100));
         assert_eq!(config.window_size, 20);
         assert_eq!(config.entry_z_score, 2.0);
+
+        // Verify new fields
+        assert_eq!(pair.validation_sharpe, 1.2);
+        assert_eq!(pair.validation_trades, 5);
+        assert_eq!(pair.profit_per_trade, dec!(50));
     }
 }

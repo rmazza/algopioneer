@@ -862,37 +862,42 @@ async fn run_discover_pairs(
     }
 
     // Display results
-    info!("\n=== DISCOVERED PAIRS ===");
+    info!("\n=== DISCOVERED PAIRS (with walk-forward validation) ===");
     println!(
-        "\n{:<20} | {:<8} | {:<8} | {:<8} | {:<10} | {:>12}",
-        "Pair", "Window", "Z-Entry", "Sharpe", "Corr", "Net Profit"
+        "\n{:<20} | {:>6} | {:>7} | {:>8} | {:>8} | {:>6} | {:>10}",
+        "Pair", "Window", "Z-Entry", "Train-SR", "Val-SR", "Trades", "Net Profit"
     );
-    println!("--------------------------------------------------------------------------------");
+    println!("{}", "-".repeat(85));
 
     for pair in &results {
         println!(
-            "{:<20} | {:<8} | {:<8.1} | {:<8.2} | {:<10.3} | ${:>10.2}",
+            "{:<20} | {:>6} | {:>7.1} | {:>8.2} | {:>8.2} | {:>6} | ${:>9.2}",
             format!("{}/{}", pair.leg1, pair.leg2),
             pair.window,
             pair.z_entry,
             pair.sharpe_ratio,
-            pair.correlation,
+            pair.validation_sharpe,
+            pair.trades,
             pair.net_profit
         );
 
-        if pair.sharpe_ratio > 10.0 {
+        // Warn about large gap between train and validation Sharpe (overfitting indicator)
+        let sharpe_gap = pair.sharpe_ratio - pair.validation_sharpe;
+        if sharpe_gap > 2.0 {
             warn!(
                 pair = format!("{}/{}", pair.leg1, pair.leg2),
-                sharpe = pair.sharpe_ratio,
-                "Suspiciously high Sharpe ratio (>10.0) - possible overfitting or insufficient trades"
+                train_sharpe = format!("{:.2}", pair.sharpe_ratio),
+                validation_sharpe = format!("{:.2}", pair.validation_sharpe),
+                "Large train/validation Sharpe gap ({:.1}) - possible overfitting",
+                sharpe_gap
             );
         }
     }
 
-    // Warn if any Sharpe ratios are extremely high
-    if results.iter().any(|p| p.sharpe_ratio > 10.0) {
-        warn!("Some pairs have Sharpe ratios > 10.0. This may indicate overfitting or insufficient trade count.");
-        warn!("Verify results with a longer lookback period or --paper trading.");
+    // Summary: use validation Sharpe threshold instead of unrealistic 10.0
+    if results.iter().any(|p| p.sharpe_ratio > 4.0) {
+        warn!("Some pairs have train Sharpe > 4.0. Check validation Sharpe for true performance.");
+        warn!("A large gap between train and validation Sharpe indicates overfitting.");
     }
 
     // Calculate allocation per pair (Equal Weight)

@@ -83,6 +83,18 @@ pub struct DiscoveryConfig {
     /// Minimum net profit required (in USD)
     #[serde(default = "default_min_net_profit")]
     pub min_net_profit: Decimal,
+
+    /// Maximum Sharpe ratio cap (flag likely overfitting above this)
+    #[serde(default = "default_max_sharpe")]
+    pub max_sharpe_ratio: f64,
+
+    /// Train/test split ratio (0.0-1.0, e.g., 0.7 = 70% train, 30% test)
+    #[serde(default = "default_train_ratio")]
+    pub train_ratio: f64,
+
+    /// Require ADF cointegration test to pass
+    #[serde(default = "default_require_cointegration")]
+    pub require_cointegration: bool,
 }
 
 // Default value functions for serde
@@ -93,7 +105,7 @@ fn default_max_half_life() -> f64 {
     24.0
 }
 fn default_min_sharpe() -> f64 {
-    0.5
+    1.0 // Raised from 0.5 for statistical significance
 }
 fn default_lookback_days() -> u32 {
     14
@@ -108,10 +120,19 @@ fn default_taker_fee() -> Decimal {
     dec!(0.002)
 }
 fn default_min_trades() -> u32 {
-    5
+    30 // Raised from 5 for statistical significance
 }
 fn default_min_net_profit() -> Decimal {
     dec!(0)
+}
+fn default_max_sharpe() -> f64 {
+    4.0 // Cap to flag overfitting (HFT rarely exceeds 3-4)
+}
+fn default_train_ratio() -> f64 {
+    0.7 // 70% train, 30% test for walk-forward validation
+}
+fn default_require_cointegration() -> bool {
+    true // Require ADF test to pass by default
 }
 
 impl Default for DiscoveryConfig {
@@ -127,6 +148,9 @@ impl Default for DiscoveryConfig {
             taker_fee: default_taker_fee(),
             min_trades: default_min_trades(),
             min_net_profit: default_min_net_profit(),
+            max_sharpe_ratio: default_max_sharpe(),
+            train_ratio: default_train_ratio(),
+            require_cointegration: default_require_cointegration(),
         }
     }
 }
