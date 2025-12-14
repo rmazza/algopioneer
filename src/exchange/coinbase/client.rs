@@ -5,10 +5,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::error::Error;
 
 use crate::coinbase::{AppEnv, CoinbaseClient};
-use crate::exchange::{Candle, ExchangeClient, ExchangeConfig, ExchangeId, Executor, Granularity};
+use crate::exchange::{
+    Candle, ExchangeClient, ExchangeConfig, ExchangeError, ExchangeId, Executor, Granularity,
+};
 use crate::strategy::dual_leg_trading::OrderSide;
 
 /// Coinbase exchange client implementing the ExchangeClient trait
@@ -20,7 +21,7 @@ pub struct CoinbaseExchangeClient {
 
 impl CoinbaseExchangeClient {
     /// Create a new CoinbaseExchangeClient from configuration
-    pub fn new(config: ExchangeConfig) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config: ExchangeConfig) -> Result<Self, ExchangeError> {
         // Set environment variables for the inner client (legacy compatibility)
         std::env::set_var("COINBASE_API_KEY", &config.api_key);
         std::env::set_var("COINBASE_API_SECRET", &config.api_secret);
@@ -31,16 +32,18 @@ impl CoinbaseExchangeClient {
             AppEnv::Live
         };
 
-        let inner = CoinbaseClient::new(env, None)?;
+        let inner = CoinbaseClient::new(env, None)
+            .map_err(|e| ExchangeError::Configuration(e.to_string()))?;
         Ok(Self { inner, config })
     }
 
     /// Create with Paper trading mode
-    pub fn new_paper(config: ExchangeConfig) -> Result<Self, Box<dyn Error>> {
+    pub fn new_paper(config: ExchangeConfig) -> Result<Self, ExchangeError> {
         std::env::set_var("COINBASE_API_KEY", &config.api_key);
         std::env::set_var("COINBASE_API_SECRET", &config.api_secret);
 
-        let inner = CoinbaseClient::new(AppEnv::Paper, None)?;
+        let inner = CoinbaseClient::new(AppEnv::Paper, None)
+            .map_err(|e| ExchangeError::Configuration(e.to_string()))?;
         Ok(Self { inner, config })
     }
 
@@ -63,21 +66,28 @@ impl Executor for CoinbaseExchangeClient {
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ) -> Result<(), ExchangeError> {
         self.inner
             .place_order(symbol, &side.to_string(), quantity, price)
             .await
+            .map_err(ExchangeError::from_boxed)
     }
 
-    async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
-        self.inner.get_position(symbol).await
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+        self.inner
+            .get_position(symbol)
+            .await
+            .map_err(ExchangeError::from_boxed)
     }
 }
 
 #[async_trait]
 impl ExchangeClient for CoinbaseExchangeClient {
-    async fn test_connection(&mut self) -> Result<(), Box<dyn Error>> {
-        self.inner.test_connection().await
+    async fn test_connection(&mut self) -> Result<(), ExchangeError> {
+        self.inner
+            .test_connection()
+            .await
+            .map_err(|e| ExchangeError::Network(e.to_string()))
     }
 
     async fn get_candles(
@@ -86,12 +96,13 @@ impl ExchangeClient for CoinbaseExchangeClient {
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
         granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn Error>> {
+    ) -> Result<Vec<Candle>, ExchangeError> {
         let cbadv_granularity: cbadv::time::Granularity = granularity.into();
         let candles = self
             .inner
             .get_product_candles(product_id, start, end, cbadv_granularity)
-            .await?;
+            .await
+            .map_err(|e| ExchangeError::Network(e.to_string()))?;
 
         Ok(candles.into_iter().map(Candle::from).collect())
     }
@@ -102,12 +113,13 @@ impl ExchangeClient for CoinbaseExchangeClient {
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
         granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn Error>> {
+    ) -> Result<Vec<Candle>, ExchangeError> {
         let cbadv_granularity: cbadv::time::Granularity = granularity.into();
         let candles = self
             .inner
             .get_product_candles_paginated(product_id, start, end, cbadv_granularity)
-            .await?;
+            .await
+            .map_err(|e| ExchangeError::Network(e.to_string()))?;
 
         Ok(candles.into_iter().map(Candle::from).collect())
     }

@@ -4,10 +4,9 @@
 //! All methods return `unimplemented!()` - ready for future implementation.
 
 use async_trait::async_trait;
-use std::error::Error;
 use tokio::sync::mpsc;
 
-use crate::exchange::{ExchangeConfig, WebSocketProvider};
+use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
 use crate::strategy::dual_leg_trading::MarketData;
 
 /// Kraken WebSocket provider (stub implementation)
@@ -20,7 +19,7 @@ pub struct KrakenWebSocketProvider {
 
 impl KrakenWebSocketProvider {
     /// Create a new KrakenWebSocketProvider from configuration
-    pub fn new(config: &ExchangeConfig) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config: &ExchangeConfig) -> Result<Self, ExchangeError> {
         Ok(Self {
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
@@ -34,7 +33,9 @@ impl WebSocketProvider for KrakenWebSocketProvider {
         &self,
         _symbols: Vec<String>,
         _sender: mpsc::Sender<MarketData>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        unimplemented!("Kraken WebSocket not yet implemented. Kraken uses wss://ws.kraken.com for public data.")
+    ) -> Result<(), ExchangeError> {
+        Err(ExchangeError::Other(
+            "Kraken WebSocket not yet implemented. Kraken uses wss://ws.kraken.com for public data.".to_string()
+        ))
     }
 }

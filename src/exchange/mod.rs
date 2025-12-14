@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::error::Error;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::mpsc;
 
 // Re-export shared types for convenience
@@ -103,6 +104,93 @@ impl ExchangeConfig {
     }
 }
 
+// --- Typed Error Handling ---
+
+/// Exchange-layer error type for actionable error handling.
+/// Enables strategies to distinguish between retryable and non-retryable errors.
+#[derive(Error, Debug, Clone)]
+pub enum ExchangeError {
+    /// Network connectivity issues (retryable)
+    #[error("Network error: {0}")]
+    Network(String),
+
+    /// Rate limited by exchange (retryable after delay)
+    #[error("Rate limited, retry after {0}ms")]
+    RateLimited(u64),
+
+    /// Order rejected by exchange (not retryable without modification)
+    #[error("Order rejected: {0}")]
+    OrderRejected(String),
+
+    /// Exchange internal error (may be retryable)
+    #[error("Exchange internal error: {0}")]
+    ExchangeInternal(String),
+
+    /// Configuration or setup errors
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+
+    /// Other errors (fallback category)
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ExchangeError {
+    /// Determines if this error type is potentially retryable
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            ExchangeError::Network(_)
+                | ExchangeError::RateLimited(_)
+                | ExchangeError::ExchangeInternal(_)
+        )
+    }
+
+    /// Suggested retry delay in milliseconds (if retryable)
+    pub fn retry_delay_ms(&self) -> Option<u64> {
+        match self {
+            ExchangeError::RateLimited(ms) => Some(*ms),
+            ExchangeError::Network(_) => Some(1000), // 1 second for network errors
+            ExchangeError::ExchangeInternal(_) => Some(5000), // 5 seconds for exchange issues
+            _ => None,
+        }
+    }
+
+    /// Convert from a boxed error (for legacy compatibility)
+    pub fn from_boxed(e: Box<dyn Error + Send + Sync>) -> Self {
+        let s = e.to_string();
+        let lower = s.to_lowercase();
+
+        if lower.contains("network") || lower.contains("timeout") || lower.contains("connection") {
+            ExchangeError::Network(s)
+        } else if lower.contains("rate limit") || lower.contains("too many requests") {
+            ExchangeError::RateLimited(1000) // Default 1 second
+        } else if lower.contains("insufficient funds")
+            || lower.contains("rejected")
+            || lower.contains("invalid")
+        {
+            ExchangeError::OrderRejected(s)
+        } else if lower.contains("internal") || lower.contains("server error") {
+            ExchangeError::ExchangeInternal(s)
+        } else {
+            ExchangeError::Other(s)
+        }
+    }
+}
+
+/// Convenience conversion from string errors
+impl From<String> for ExchangeError {
+    fn from(s: String) -> Self {
+        ExchangeError::Other(s)
+    }
+}
+
+impl From<&str> for ExchangeError {
+    fn from(s: &str) -> Self {
+        ExchangeError::Other(s.to_string())
+    }
+}
+
 /// Core trait for order execution - exchange implementations must provide this
 #[async_trait]
 pub trait Executor: Send + Sync {
@@ -113,17 +201,17 @@ pub trait Executor: Send + Sync {
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+    ) -> Result<(), ExchangeError>;
 
     /// Get current position for a symbol
-    async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>>;
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError>;
 }
 
 /// Extended exchange client trait with full capabilities
 #[async_trait]
 pub trait ExchangeClient: Executor + Send + Sync {
     /// Test API connectivity
-    async fn test_connection(&mut self) -> Result<(), Box<dyn Error>>;
+    async fn test_connection(&mut self) -> Result<(), ExchangeError>;
 
     /// Get historical candles
     async fn get_candles(
@@ -132,7 +220,7 @@ pub trait ExchangeClient: Executor + Send + Sync {
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
         granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn Error>>;
+    ) -> Result<Vec<Candle>, ExchangeError>;
 
     /// Get candles with pagination (for large date ranges)
     async fn get_candles_paginated(
@@ -141,7 +229,7 @@ pub trait ExchangeClient: Executor + Send + Sync {
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
         granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn Error>>;
+    ) -> Result<Vec<Candle>, ExchangeError>;
 
     /// Normalize a symbol to exchange-specific format
     /// e.g., "BTC-USD" -> "XXBTZUSD" for Kraken
@@ -159,7 +247,7 @@ pub trait WebSocketProvider: Send + Sync {
         &self,
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+    ) -> Result<(), ExchangeError>;
 }
 
 /// Exchange identifier for factory/registry
@@ -197,7 +285,7 @@ impl std::str::FromStr for ExchangeId {
 pub fn create_exchange_client(
     exchange: ExchangeId,
     config: ExchangeConfig,
-) -> Result<Arc<dyn ExchangeClient>, Box<dyn Error>> {
+) -> Result<Arc<dyn ExchangeClient>, ExchangeError> {
     match exchange {
         ExchangeId::Coinbase => {
             let client = coinbase::CoinbaseExchangeClient::new(config)?;
@@ -214,7 +302,7 @@ pub fn create_exchange_client(
 pub fn create_websocket_provider(
     exchange: ExchangeId,
     config: &ExchangeConfig,
-) -> Result<Box<dyn WebSocketProvider>, Box<dyn Error>> {
+) -> Result<Box<dyn WebSocketProvider>, ExchangeError> {
     match exchange {
         ExchangeId::Coinbase => {
             let provider = coinbase::CoinbaseWebSocketProvider::new(config)?;

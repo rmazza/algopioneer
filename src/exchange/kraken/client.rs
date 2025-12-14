@@ -6,9 +6,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::error::Error;
 
-use crate::exchange::{Candle, ExchangeClient, ExchangeConfig, ExchangeId, Executor, Granularity};
+use crate::exchange::{
+    Candle, ExchangeClient, ExchangeConfig, ExchangeError, ExchangeId, Executor, Granularity,
+};
 use crate::strategy::dual_leg_trading::OrderSide;
 
 /// Kraken exchange client (stub implementation)
@@ -19,7 +20,7 @@ pub struct KrakenExchangeClient {
 
 impl KrakenExchangeClient {
     /// Create a new KrakenExchangeClient from configuration
-    pub fn new(config: ExchangeConfig) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config: ExchangeConfig) -> Result<Self, ExchangeError> {
         Ok(Self { config })
     }
 
@@ -63,19 +64,25 @@ impl Executor for KrakenExchangeClient {
         _side: OrderSide,
         _quantity: Decimal,
         _price: Option<Decimal>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        unimplemented!("Kraken order execution not yet implemented. Add 'krakenex' crate and implement API calls.")
+    ) -> Result<(), ExchangeError> {
+        Err(ExchangeError::Other(
+            "Kraken order execution not yet implemented".to_string(),
+        ))
     }
 
-    async fn get_position(&self, _symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
-        unimplemented!("Kraken position query not yet implemented")
+    async fn get_position(&self, _symbol: &str) -> Result<Decimal, ExchangeError> {
+        Err(ExchangeError::Other(
+            "Kraken position query not yet implemented".to_string(),
+        ))
     }
 }
 
 #[async_trait]
 impl ExchangeClient for KrakenExchangeClient {
-    async fn test_connection(&mut self) -> Result<(), Box<dyn Error>> {
-        unimplemented!("Kraken connection test not yet implemented")
+    async fn test_connection(&mut self) -> Result<(), ExchangeError> {
+        Err(ExchangeError::Other(
+            "Kraken connection test not yet implemented".to_string(),
+        ))
     }
 
     async fn get_candles(
@@ -84,8 +91,10 @@ impl ExchangeClient for KrakenExchangeClient {
         _start: &DateTime<Utc>,
         _end: &DateTime<Utc>,
         _granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn Error>> {
-        unimplemented!("Kraken candle fetch not yet implemented")
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        Err(ExchangeError::Other(
+            "Kraken candle fetch not yet implemented".to_string(),
+        ))
     }
 
     async fn get_candles_paginated(
@@ -94,8 +103,10 @@ impl ExchangeClient for KrakenExchangeClient {
         _start: &DateTime<Utc>,
         _end: &DateTime<Utc>,
         _granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn Error>> {
-        unimplemented!("Kraken paginated candle fetch not yet implemented")
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        Err(ExchangeError::Other(
+            "Kraken paginated candle fetch not yet implemented".to_string(),
+        ))
     }
 
     fn normalize_symbol(&self, symbol: &str) -> String {

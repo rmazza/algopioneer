@@ -94,7 +94,7 @@ pub fn create_health_state() -> HealthState {
 /// AS2: Update health state from CircuitBreaker for operational visibility
 pub async fn update_from_circuit_breaker(state: &HealthState, breaker: &CircuitBreaker) {
     let mut health = state.write().await;
-    let cb_state = breaker.get_state().await;
+    let cb_state = breaker.get_state();
     health.circuit_breaker_state = Some(format_circuit_state(cb_state));
     health.timestamp = Utc::now().timestamp();
 

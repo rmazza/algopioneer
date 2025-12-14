@@ -20,7 +20,7 @@ use tokio::time::Duration;
 
 /// Type alias the async Result type to reduce complexity warnings
 type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-type ExecuteOrderResult = BoxedFuture<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+type ExecuteOrderResult = BoxedFuture<Result<(), algopioneer::exchange::ExchangeError>>;
 
 mock! {
     pub ExecutorImpl {
@@ -29,14 +29,14 @@ mock! {
 }
 
 #[async_trait]
-impl Executor for MockExecutorImpl {
+impl algopioneer::exchange::Executor for MockExecutorImpl {
     async fn execute_order(
         &self,
         symbol: &str,
         side: OrderSide,
         quantity: Decimal,
         _price: Option<Decimal>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), algopioneer::exchange::ExchangeError> {
         // Delegate to the mock expectation
         self.execute_order_mock(symbol, &side.to_string(), quantity)
             .await
@@ -45,7 +45,7 @@ impl Executor for MockExecutorImpl {
     async fn get_position(
         &self,
         _symbol: &str,
-    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Decimal, algopioneer::exchange::ExchangeError> {
         Ok(Decimal::ZERO)
     }
 }
@@ -540,7 +540,13 @@ async fn test_recovery_worker_retry() {
         .with(eq("BTC-USD"), eq("buy"), always())
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _, _| Box::pin(async { Err(Box::from("Simulated Failure 1")) }));
+        .returning(|_, _, _| {
+            Box::pin(async {
+                Err(algopioneer::exchange::ExchangeError::Other(
+                    "Simulated Failure 1".to_string(),
+                ))
+            })
+        });
 
     mock_executor
         .expect_execute_order_mock()

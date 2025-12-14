@@ -80,6 +80,23 @@ impl ExecutionError {
     }
 }
 
+/// Conversion from ExchangeError to ExecutionError for seamless integration
+impl From<crate::exchange::ExchangeError> for ExecutionError {
+    fn from(e: crate::exchange::ExchangeError) -> Self {
+        use crate::exchange::ExchangeError as EE;
+        match e {
+            EE::Network(s) => ExecutionError::NetworkError(s),
+            EE::RateLimited(ms) => {
+                ExecutionError::NetworkError(format!("Rate limited, retry after {}ms", ms))
+            }
+            EE::OrderRejected(s) => ExecutionError::OrderRejected(s),
+            EE::ExchangeInternal(s) => ExecutionError::ExchangeError(s),
+            EE::Configuration(s) => ExecutionError::CriticalFailure(s),
+            EE::Other(s) => ExecutionError::Unknown(s),
+        }
+    }
+}
+
 const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
 
 // NP-1 FIX: Extract magic number to named constant
@@ -1189,14 +1206,14 @@ impl ExecutionEngine {
                 "EMERGENCY: Failed to queue recovery task! Manual intervention required. Error: {}",
                 send_err
             );
-            self.circuit_breaker.record_failure().await;
+            self.circuit_breaker.record_failure();
             return Err(ExecutionError::CriticalFailure(format!(
                 "Recovery queue failure - {} kill switch failed: {}",
                 context, send_err
             )));
         }
 
-        self.circuit_breaker.record_failure().await;
+        self.circuit_breaker.record_failure();
         Ok(ExecutionResult::PartialFailure(failed_result))
     }
 
@@ -1243,7 +1260,7 @@ impl ExecutionEngine {
         leg2_price: Decimal,
     ) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
-        if self.circuit_breaker.is_open().await {
+        if self.circuit_breaker.is_open() {
             return Err(ExecutionError::CircuitBreakerOpen(
                 "Circuit breaker is OPEN due to recent failures".to_string(),
             ));
@@ -1266,8 +1283,8 @@ impl ExecutionEngine {
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
 
         // Convert errors to ExecutionError
-        let spot_res = spot_res.map_err(ExecutionError::from_boxed);
-        let future_res = future_res.map_err(ExecutionError::from_boxed);
+        let spot_res = spot_res.map_err(ExecutionError::from);
+        let future_res = future_res.map_err(ExecutionError::from);
 
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
@@ -1282,7 +1299,7 @@ impl ExecutionEngine {
                     )
                     .await;
             }
-            self.circuit_breaker.record_failure().await;
+            self.circuit_breaker.record_failure();
             return Ok(ExecutionResult::TotalFailure(e));
         }
 
@@ -1298,7 +1315,7 @@ impl ExecutionEngine {
                 .await;
         }
 
-        self.circuit_breaker.record_success().await;
+        self.circuit_breaker.record_success();
         Ok(ExecutionResult::Success)
     }
 
@@ -1313,7 +1330,7 @@ impl ExecutionEngine {
         leg2_price: Decimal,
     ) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
-        if self.circuit_breaker.is_open().await {
+        if self.circuit_breaker.is_open() {
             return Err(ExecutionError::CircuitBreakerOpen(
                 "Circuit breaker is OPEN due to recent failures".to_string(),
             ));
@@ -1335,8 +1352,8 @@ impl ExecutionEngine {
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
 
-        let spot_res = spot_res.map_err(ExecutionError::from_boxed);
-        let future_res = future_res.map_err(ExecutionError::from_boxed);
+        let spot_res = spot_res.map_err(ExecutionError::from);
+        let future_res = future_res.map_err(ExecutionError::from);
 
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
@@ -1351,7 +1368,7 @@ impl ExecutionEngine {
                     )
                     .await;
             }
-            self.circuit_breaker.record_failure().await;
+            self.circuit_breaker.record_failure();
             return Ok(ExecutionResult::TotalFailure(e));
         }
 
@@ -1367,7 +1384,7 @@ impl ExecutionEngine {
                 .await;
         }
 
-        self.circuit_breaker.record_success().await;
+        self.circuit_breaker.record_success();
         Ok(ExecutionResult::Success)
     }
 
@@ -1381,7 +1398,7 @@ impl ExecutionEngine {
         leg2_price: Decimal,
     ) -> Result<ExecutionResult, ExecutionError> {
         // CR1: Check Circuit Breaker
-        if self.circuit_breaker.is_open().await {
+        if self.circuit_breaker.is_open() {
             return Err(ExecutionError::CircuitBreakerOpen(
                 "Circuit breaker is OPEN due to recent failures".to_string(),
             ));
@@ -1403,11 +1420,11 @@ impl ExecutionEngine {
 
         let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
 
-        let spot_res = spot_res.map_err(ExecutionError::from_boxed);
-        let future_res = future_res.map_err(ExecutionError::from_boxed);
+        let spot_res = spot_res.map_err(ExecutionError::from);
+        let future_res = future_res.map_err(ExecutionError::from);
 
         if spot_res.is_err() && future_res.is_err() {
-            self.circuit_breaker.record_failure().await;
+            self.circuit_breaker.record_failure();
             return Ok(ExecutionResult::TotalFailure(
                 ExecutionError::ExchangeError(format!(
                     "Both legs failed to exit. Spot: {:?}, Future: {:?}",
@@ -1429,13 +1446,13 @@ impl ExecutionEngine {
                     .await?;
             }
 
-            self.circuit_breaker.record_failure().await;
+            self.circuit_breaker.record_failure();
             return Ok(ExecutionResult::PartialFailure(
                 ExecutionError::ExchangeError("Partial Exit Failure".to_string()),
             ));
         }
 
-        self.circuit_breaker.record_success().await;
+        self.circuit_breaker.record_success();
         Ok(ExecutionResult::Success)
     }
 
@@ -1443,7 +1460,7 @@ impl ExecutionEngine {
     pub async fn get_position(
         &self,
         symbol: &str,
-    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Decimal, crate::exchange::ExchangeError> {
         self.client.get_position(symbol).await
     }
 }
@@ -2140,13 +2157,16 @@ impl Executor for CoinbaseClient {
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ) -> Result<(), crate::exchange::ExchangeError> {
         self.place_order(symbol, &side.to_string(), quantity, price)
             .await
+            .map_err(crate::exchange::ExchangeError::from_boxed)
     }
 
-    async fn get_position(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
-        self.get_position(symbol).await
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, crate::exchange::ExchangeError> {
+        CoinbaseClient::get_position(self, symbol)
+            .await
+            .map_err(crate::exchange::ExchangeError::from_boxed)
     }
 }
 
@@ -2502,12 +2522,14 @@ mod tests {
             side: OrderSide,
             quantity: Decimal,
             _price: Option<Decimal>,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<(), crate::exchange::ExchangeError> {
             let mut count = self.call_count.lock().await;
             *count += 1;
 
             if *self.should_fail.lock().await {
-                return Err("Mock execution failure".into());
+                return Err(crate::exchange::ExchangeError::Other(
+                    "Mock execution failure".to_string(),
+                ));
             }
 
             self.executed_orders
@@ -2521,7 +2543,7 @@ mod tests {
         async fn get_position(
             &self,
             _symbol: &str,
-        ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<Decimal, crate::exchange::ExchangeError> {
             Ok(Decimal::ZERO)
         }
     }

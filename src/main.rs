@@ -66,8 +66,20 @@ impl TradeState {
 
     fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = serde_json::to_string_pretty(self)?;
-        let mut file = fs::File::create(STATE_FILE)?;
+        let temp_path = format!("{}.tmp", STATE_FILE);
+
+        // Write to temporary file first
+        let mut file = fs::File::create(&temp_path)?;
         file.write_all(json.as_bytes())?;
+
+        // Sync data to disk before rename (fsync for durability on Linux/Unix)
+        // This ensures the write is fully committed before we make it visible
+        file.sync_all()?;
+
+        // Atomic rename: POSIX guarantees rename is atomic on the same filesystem
+        // If we crash here, either the old file or new file exists - never a partial file
+        fs::rename(&temp_path, STATE_FILE)?;
+
         Ok(())
     }
 
