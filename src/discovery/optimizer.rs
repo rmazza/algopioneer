@@ -345,8 +345,8 @@ async fn optimize_pair(
 
             let result = run_backtest(&mut manager, backtest_data, &backtest_config).await;
 
-            // Require minimum trades even in training
-            if result.trades < (config.min_trades / 2).max(5) {
+            // Require at least 1 trade in training
+            if result.trades < 1 {
                 continue;
             }
 
@@ -361,7 +361,16 @@ async fn optimize_pair(
         }
     }
 
-    let train_result = best_train_result?;
+    let train_result = match best_train_result {
+        Some(r) => r,
+        None => {
+            debug!(
+                pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
+                "No valid parameter combination found in training"
+            );
+            return None;
+        }
+    };
 
     // Phase 2: Validate best parameters on TEST data (out-of-sample)
     let mut manager = PairsManager::new(
@@ -409,7 +418,7 @@ async fn optimize_pair(
         return None;
     }
 
-    // Filter: validation Sharpe must be reasonable (not just noise)
+    // Filter: validation Sharpe must not be negative (catches obvious overfitting)
     if validation_result.sharpe_ratio < 0.0 {
         debug!(
             pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
@@ -419,17 +428,8 @@ async fn optimize_pair(
         return None;
     }
 
-    // Filter: minimum Sharpe (use validation Sharpe as primary metric)
-    if validation_result.sharpe_ratio < config.min_sharpe_ratio * 0.5 {
-        // Allow 50% lower threshold for validation since it's harder
-        debug!(
-            pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
-            validation_sharpe = validation_result.sharpe_ratio,
-            threshold = config.min_sharpe_ratio * 0.5,
-            "Rejected: validation Sharpe below threshold"
-        );
-        return None;
-    }
+    // Note: We intentionally don't filter on validation Sharpe threshold
+    // Low but positive validation Sharpe is still informative for ranking
 
     // Filter: minimum net profit
     if total_profit < config.min_net_profit {

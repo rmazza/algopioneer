@@ -1,7 +1,7 @@
 [
   {
-    "spot_symbol": "SHIB-USD",
-    "future_symbol": "XLM-USD",
+    "spot_symbol": "XLM-USD",
+    "future_symbol": "SOL-USD",
     "order_size": "200",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -13,13 +13,31 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 40,
+    "window_size": 30,
+    "entry_z_score": 1.4,
+    "exit_z_score": 0.2
+  },
+  {
+    "spot_symbol": "LTC-USD",
+    "future_symbol": "SOL-USD",
+    "order_size": "200",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 10,
     "entry_z_score": 1.8,
-    "exit_z_score": 0.1
+    "exit_z_score": 0.2
   },
   {
-    "spot_symbol": "SOL-USD",
-    "future_symbol": "XLM-USD",
+    "spot_symbol": "BCH-USD",
+    "future_symbol": "LINK-USD",
     "order_size": "200",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -31,13 +49,13 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 55,
-    "entry_z_score": 2.2,
-    "exit_z_score": 0.1
+    "window_size": 20,
+    "entry_z_score": 1.8,
+    "exit_z_score": 0.2
   },
   {
-    "spot_symbol": "AVAX-USD",
-    "future_symbol": "XLM-USD",
+    "spot_symbol": "BTC-USD",
+    "future_symbol": "SHIB-USD",
     "order_size": "200",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -49,44 +67,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 60,
-    "entry_z_score": 2.4,
-    "exit_z_score": 0.1
-  },
-  {
-    "spot_symbol": "AXS-USD",
-    "future_symbol": "XLM-USD",
-    "order_size": "200",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 60,
-    "entry_z_score": 1.9,
-    "exit_z_score": 0.1
-  },
-  {
-    "spot_symbol": "SHIB-USD",
-    "future_symbol": "BTC-USD",
-    "order_size": "200",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 25,
-    "entry_z_score": 2.3,
-    "exit_z_score": 0.1
+    "window_size": 20,
+    "entry_z_score": 2.0,
+    "exit_z_score": 0.2
   }
 ]

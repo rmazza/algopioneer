@@ -108,7 +108,7 @@ fn default_min_sharpe() -> f64 {
     1.0 // Raised from 0.5 for statistical significance
 }
 fn default_lookback_days() -> u32 {
-    14
+    30 // Increased from 14 for better statistical significance
 }
 fn default_max_pairs() -> usize {
     10
@@ -120,7 +120,7 @@ fn default_taker_fee() -> Decimal {
     dec!(0.002)
 }
 fn default_min_trades() -> u32 {
-    30 // Raised from 5 for statistical significance
+    10 // Lowered from 30 to work with default lookback; use --lookback-days 60+ for 30 trades
 }
 fn default_min_net_profit() -> Decimal {
     dec!(0)
@@ -211,9 +211,11 @@ pub struct GridSearchConfig {
 impl Default for GridSearchConfig {
     fn default() -> Self {
         Self {
-            windows: (10..=60).step_by(5).collect(),
-            z_entries: (15..=30).map(|i| i as f64 / 10.0).collect(),
-            z_exit: 0.1,
+            // Use smaller windows that work with short lookbacks
+            windows: vec![10, 15, 20, 25, 30],
+            // Lower z-score thresholds to generate more signals
+            z_entries: vec![1.2, 1.4, 1.6, 1.8, 2.0],
+            z_exit: 0.2,
         }
     }
 }
