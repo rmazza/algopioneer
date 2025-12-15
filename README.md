@@ -34,6 +34,8 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 - ✅ **Distributed Tracing**: OpenTelemetry integration for observability
 - ✅ **Panic Recovery**: Supervisor pattern with automatic strategy restart
 - ✅ **WebSocket Stability**: Proper task cleanup preventing resource leaks
+- ✅ **Trade Recording**: Modular trade logging to CSV or DynamoDB (via feature flag)
+- ✅ **Multi-Exchange Architecture**: Extensible design supporting Coinbase and Kraken (Experimental)
 
 ## Prerequisites
 
@@ -64,6 +66,11 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 3.  **Build the Project**:
     ```bash
     cargo build --release
+    ```
+
+    **With DynamoDB Support:**
+    ```bash
+    cargo build --release --features dynamodb
     ```
 
 ## Usage
@@ -151,25 +158,33 @@ algopioneer/
 ├── src/
 │   ├── main.rs                 # CLI entry point with subcommands
 │   ├── lib.rs                  # Library root
-│   ├── coinbase/
-│   │   ├── mod.rs             # Coinbase API client with position querying
-│   │   ├── websocket.rs       # Real-time WebSocket data streaming
-│   │   └── market_data_provider.rs  # Abstracted data sources (live + synthetic)
-│   ├── discovery/             # NEW: Automated pair discovery
-│   │   ├── mod.rs             # Module exports
-│   │   ├── config.rs          # DiscoveryConfig with serde support
-│   │   ├── error.rs           # Typed errors with thiserror
-│   │   ├── filter.rs          # Correlation + half-life filtering
-│   │   └── optimizer.rs       # Grid search parameter optimization
+│   ├── coinbase/               # Legacy Coinbase integration
+│   │   ├── mod.rs              # Coinbase API client
+│   │   ├── websocket.rs        # Real-time WebSocket data streaming
+│   │   └── market_data_provider.rs
+│   ├── exchange/               # Exchange abstraction layer
+│   │   ├── mod.rs              # Traits (Executor, MarketDataProvider)
+│   │   ├── coinbase/           # Coinbase implementation
+│   │   └── kraken/             # Kraken implementation
+│   ├── logging/                # Trade recording and metrics
+│   │   ├── mod.rs              # Logging traits
+│   │   ├── recorder.rs         # Recorder implementations
+│   │   ├── csv_recorder.rs     # CSV file recorder
+│   │   └── dynamodb_recorder.rs # AWS DynamoDB recorder
+│   ├── discovery/              # Automated pair discovery
+│   │   ├── mod.rs              # Module exports
+│   │   ├── config.rs           # DiscoveryConfig with serde support
+│   │   ├── error.rs            # Typed errors with thiserror
+│   │   ├── filter.rs           # Correlation + half-life filtering
+│   │   └── optimizer.rs        # Grid search parameter optimization
 │   ├── strategy/
-│   │   ├── dual_leg_trading.rs  # Main arbitrage strategy with state machine
-│   │   ├── moving_average.rs    # Moving average crossover strategy
-│   │   ├── portfolio.rs         # Portfolio manager with supervisor pattern
-│   │   ├── supervisor.rs        # Strategy supervisor for multi-strategy
-│   │   └── tick_router.rs       # Market data routing with backpressure
+│   │   ├── dual_leg_trading.rs # Main arbitrage strategy with state machine
+│   │   ├── moving_average.rs   # Moving average crossover strategy
+│   │   ├── supervisor.rs       # Strategy supervisor for multi-strategy
+│   │   └── tick_router.rs      # Market data routing with backpressure
 │   ├── resilience/
-│   │   ├── mod.rs             # Resilience patterns
-│   │   └── circuit_breaker.rs # Circuit breaker with RwLock
+│   │   ├── mod.rs              # Resilience patterns
+│   │   └── circuit_breaker.rs  # Circuit breaker with RwLock
 │   ├── health.rs               # HTTP health check endpoint (/health)
 │   ├── observability.rs        # OpenTelemetry tracing integration
 │   └── examples/
