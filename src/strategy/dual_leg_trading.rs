@@ -1066,12 +1066,17 @@ pub enum TaskPriority {
 
 // N2: Named constant instead of magic number
 const MAX_CONCURRENT_RECOVERIES: usize = 5;
+
+/// Worker that processes recovery tasks (failed legs) with structured concurrency.
+///
+/// Uses `tokio::task::JoinSet` to ensure all spawned tasks are properly tracked
+/// and cancelled on shutdown. This prevents "orphaned tasks" that could continue
+/// executing after the worker is dropped.
 pub struct RecoveryWorker {
     client: Arc<dyn Executor>,
     rx: mpsc::Receiver<RecoveryTask>,
     feedback_tx: mpsc::Sender<RecoveryResult>,
     semaphore: Arc<Semaphore>,
-    // throttler: LogThrottle, // Removed unused field
 }
 
 impl RecoveryWorker {
@@ -1084,85 +1089,146 @@ impl RecoveryWorker {
             client,
             rx,
             feedback_tx,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_RECOVERIES)), // Limit to 5 concurrent recoveries
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_RECOVERIES)),
         }
     }
 
+    /// Run the recovery worker with structured concurrency.
+    ///
+    /// Uses `JoinSet` to track all spawned recovery tasks. On shutdown:
+    /// - All pending tasks are automatically cancelled
+    /// - No orphaned tasks continue executing
     #[instrument(skip(self), name = "recovery_worker")]
     pub async fn run(mut self) {
+        use tokio::task::JoinSet;
+        use tracing::Instrument;
+
         info!("Recovery Worker started.");
-        while let Some(mut task) = self.rx.recv().await {
-            let client = self.client.clone();
-            let feedback_tx = self.feedback_tx.clone();
 
-            // CF2 FIX: Use blocking acquire with graceful error handling instead of expect()
-            // This applies backpressure when recovery queue is full, ensuring no orphaned positions
-            let permit = match self.semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(e) => {
-                    // Semaphore closed - this should never happen, but handle gracefully
-                    error!("CRITICAL: Semaphore acquisition failed for recovery task {}: {}. Skipping task - MANUAL INTERVENTION REQUIRED.", task.symbol, e);
-                    let _ = self
-                        .feedback_tx
-                        .send(RecoveryResult::Failed(task.symbol.clone()))
-                        .await;
-                    continue;
-                }
-            };
+        // Structured concurrency: Own all spawned tasks
+        let mut active_recoveries: JoinSet<()> = JoinSet::new();
 
-            info!("Recovery task acquired permit for {}", task.symbol);
+        loop {
+            tokio::select! {
+                // Accept new tasks from the channel
+                task_opt = self.rx.recv() => {
+                    match task_opt {
+                        Some(task) => {
+                            let client = self.client.clone();
+                            let feedback_tx = self.feedback_tx.clone();
+                            let semaphore = self.semaphore.clone();
+                            let span = tracing::info_span!("recovery_task", symbol = %task.symbol);
 
-            tokio::spawn(async move {
-                // Permit is held until dropped at end of scope
-                let _permit = permit;
-                let mut task_throttler = LogThrottle::new(Duration::from_secs(5));
+                            active_recoveries.spawn(
+                                async move {
+                                    // Acquire semaphore permit (RAII: released when dropped)
+                                    let _permit = match semaphore.acquire_owned().await {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            // Semaphore closed - worker shutting down
+                                            return;
+                                        }
+                                    };
 
-                info!("Processing Recovery Task: {:?}", task);
-                let mut backoff = Duration::from_secs(2);
-
-                loop {
-                    task.attempts += 1;
-                    // Recovery uses Market orders (None price)
-                    match client
-                        .execute_order(&task.symbol, task.action, task.quantity, None)
-                        .await
-                    {
-                        Ok(_) => {
-                            info!(
-                                "Recovery Successful for {} on attempt {}",
-                                task.symbol, task.attempts
+                                    perform_recovery_with_backoff(client, task, feedback_tx).await;
+                                }
+                                .instrument(span)
                             );
-                            let _ = feedback_tx
-                                .send(RecoveryResult::Success(task.symbol.clone()))
-                                .await;
-                            break;
                         }
-                        Err(e) => {
-                            if task_throttler.should_log() {
-                                let suppressed = task_throttler.get_and_reset_suppressed_count();
-                                error!(
-                                    "Recovery Failed for {} (Attempt {}): {} (Suppressed: {})",
-                                    task.symbol, task.attempts, e, suppressed
-                                );
-                            }
-
-                            if task.attempts >= MAX_RECOVERY_ATTEMPTS {
-                                error!("CRITICAL: Recovery abandoned for {} after {} attempts. MANUAL INTERVENTION REQUIRED.", task.symbol, MAX_RECOVERY_ATTEMPTS);
-                                let _ = feedback_tx
-                                    .send(RecoveryResult::Failed(task.symbol.clone()))
-                                    .await;
-                                break;
-                            }
-                            tokio::time::sleep(backoff).await;
-                            backoff = std::cmp::min(
-                                backoff * 2,
-                                Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS),
+                        None => {
+                            // Channel closed - initiate graceful shutdown
+                            info!(
+                                "Recovery channel closed. Shutting down {} active tasks.",
+                                active_recoveries.len()
                             );
+                            break;
                         }
                     }
                 }
-            });
-            // End of successful permit block
+
+                // Reap completed tasks (handles panics gracefully)
+                Some(result) = active_recoveries.join_next() => {
+                    if let Err(join_err) = result {
+                        if join_err.is_panic() {
+                            error!("CRITICAL: Recovery task panicked: {:?}", join_err);
+                        }
+                        // Cancelled tasks are expected during shutdown, don't log them
+                    }
+                }
+            }
+        }
+
+        // Graceful Shutdown: Wait for all active recoveries to complete
+        // (or cancel them if the runtime is shutting down)
+        info!(
+            "Waiting for {} active recovery tasks to complete...",
+            active_recoveries.len()
+        );
+        while let Some(result) = active_recoveries.join_next().await {
+            if let Err(join_err) = result {
+                if join_err.is_panic() {
+                    error!("Recovery task panicked during shutdown: {:?}", join_err);
+                }
+            }
+        }
+        info!("Recovery Worker shutdown complete.");
+    }
+}
+
+/// Performs a single recovery with exponential backoff.
+///
+/// This is a pure async function that can be easily unit tested.
+async fn perform_recovery_with_backoff(
+    client: Arc<dyn Executor>,
+    mut task: RecoveryTask,
+    feedback_tx: mpsc::Sender<RecoveryResult>,
+) {
+    let mut backoff = Duration::from_secs(2);
+    let mut task_throttler = LogThrottle::new(Duration::from_secs(5));
+
+    info!("Processing Recovery Task: {:?}", task);
+
+    for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
+        task.attempts = attempt;
+
+        match client
+            .execute_order(&task.symbol, task.action, task.quantity, None)
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    "Recovery Successful for {} on attempt {}",
+                    task.symbol, attempt
+                );
+                let _ = feedback_tx
+                    .send(RecoveryResult::Success(task.symbol.clone()))
+                    .await;
+                return;
+            }
+            Err(e) => {
+                if task_throttler.should_log() {
+                    let suppressed = task_throttler.get_and_reset_suppressed_count();
+                    error!(
+                        "Recovery Failed for {} (Attempt {}): {} (Suppressed: {})",
+                        task.symbol, attempt, e, suppressed
+                    );
+                }
+
+                if attempt >= MAX_RECOVERY_ATTEMPTS {
+                    error!(
+                        "CRITICAL: Recovery abandoned for {} after {} attempts. MANUAL INTERVENTION REQUIRED.",
+                        task.symbol, MAX_RECOVERY_ATTEMPTS
+                    );
+                    let _ = feedback_tx
+                        .send(RecoveryResult::Failed(task.symbol.clone()))
+                        .await;
+                    return;
+                }
+
+                tokio::time::sleep(backoff).await;
+                backoff =
+                    std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
+            }
         }
     }
 }

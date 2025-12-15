@@ -44,10 +44,18 @@ impl CoinbaseWebsocket {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let api_key = env::var("COINBASE_API_KEY")?;
         let api_secret = env::var("COINBASE_API_SECRET")?;
-        Ok(Self {
+        Ok(Self::with_credentials(api_key, api_secret))
+    }
+
+    /// Creates a new CoinbaseWebsocket with explicit credentials (thread-safe).
+    ///
+    /// This constructor does NOT use or mutate environment variables, making it
+    /// safe to use in multi-threaded contexts.
+    pub fn with_credentials(api_key: String, api_secret: String) -> Self {
+        Self {
             api_key,
             api_secret,
-        })
+        }
     }
 
     /// CF2 FIX: Connect with retry logic and exponential backoff

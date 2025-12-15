@@ -26,28 +26,35 @@ pub struct CoinbaseExchangeClient {
 impl CoinbaseExchangeClient {
     /// Create a new CoinbaseExchangeClient from configuration
     pub fn new(config: ExchangeConfig) -> Result<Self, ExchangeError> {
-        // Set environment variables for the inner client (legacy compatibility)
-        std::env::set_var("COINBASE_API_KEY", &config.api_key);
-        std::env::set_var("COINBASE_API_SECRET", &config.api_secret);
-
         let env = if config.sandbox {
             AppEnv::Sandbox
         } else {
             AppEnv::Live
         };
 
-        let inner = CoinbaseClient::new(env, None)
-            .map_err(|e| ExchangeError::Configuration(e.to_string()))?;
+        // Use direct credential injection (thread-safe, no env var mutation)
+        let inner = CoinbaseClient::with_credentials(
+            config.api_key.clone(),
+            config.api_secret.clone(),
+            env,
+            None,
+        )
+        .map_err(|e| ExchangeError::Configuration(e.to_string()))?;
+
         Ok(Self { inner, config })
     }
 
     /// Create with Paper trading mode
     pub fn new_paper(config: ExchangeConfig) -> Result<Self, ExchangeError> {
-        std::env::set_var("COINBASE_API_KEY", &config.api_key);
-        std::env::set_var("COINBASE_API_SECRET", &config.api_secret);
+        // Use direct credential injection (thread-safe, no env var mutation)
+        let inner = CoinbaseClient::with_credentials(
+            config.api_key.clone(),
+            config.api_secret.clone(),
+            AppEnv::Paper,
+            None,
+        )
+        .map_err(|e| ExchangeError::Configuration(e.to_string()))?;
 
-        let inner = CoinbaseClient::new(AppEnv::Paper, None)
-            .map_err(|e| ExchangeError::Configuration(e.to_string()))?;
         Ok(Self { inner, config })
     }
 

@@ -47,11 +47,8 @@ impl WebSocketProvider for CoinbaseWebSocketProvider {
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError> {
-        // Set env vars for legacy CoinbaseWebsocket
-        std::env::set_var("COINBASE_API_KEY", &self.api_key);
-        std::env::set_var("COINBASE_API_SECRET", &self.api_secret);
-
-        let ws = CoinbaseWebsocket::new().map_err(|e| ExchangeError::Network(e.to_string()))?;
+        // Use direct credential injection (thread-safe, no env var mutation)
+        let ws = CoinbaseWebsocket::with_credentials(self.api_key.clone(), self.api_secret.clone());
 
         ws.connect_and_subscribe(symbols, sender)
             .await

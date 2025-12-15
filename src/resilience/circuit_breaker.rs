@@ -53,6 +53,53 @@ impl CircuitState {
     }
 }
 
+/// Trait for providing monotonic time in nanoseconds.
+///
+/// This abstraction allows the CircuitBreaker to be tested deterministically
+/// by injecting a mock clock that can be controlled by the test harness.
+pub trait MonotonicClock: Send + Sync {
+    /// Returns the current elapsed nanoseconds since some fixed reference point.
+    fn elapsed_nanos(&self) -> u64;
+}
+
+/// System monotonic clock using `std::time::Instant`.
+///
+/// This is the default clock used in production.
+#[derive(Debug)]
+pub struct SystemMonotonicClock {
+    creation_time: Instant,
+}
+
+impl SystemMonotonicClock {
+    /// Creates a new clock with `now` as the reference point.
+    pub fn new() -> Self {
+        Self {
+            creation_time: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemMonotonicClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonotonicClock for SystemMonotonicClock {
+    #[inline]
+    fn elapsed_nanos(&self) -> u64 {
+        self.creation_time.elapsed().as_nanos() as u64
+    }
+}
+
+/// Blanket implementation for Arc-wrapped clocks (useful for shared test clocks).
+impl<T: MonotonicClock> MonotonicClock for std::sync::Arc<T> {
+    #[inline]
+    fn elapsed_nanos(&self) -> u64 {
+        (**self).elapsed_nanos()
+    }
+}
+
 /// Lock-free Circuit Breaker implementation for HFT resilience.
 ///
 /// Prevents cascading failures by temporarily blocking requests
@@ -62,23 +109,29 @@ impl CircuitState {
 /// - `is_open()`: Lock-free, O(1) using atomic loads
 /// - `record_success()`: Lock-free, O(1) using atomic stores
 /// - `record_failure()`: Lock-free with CAS for state transition
-pub struct CircuitBreaker {
+///
+/// # Time Injection
+/// The circuit breaker accepts a `MonotonicClock` for time. This allows
+/// deterministic testing by injecting a mock clock.
+pub struct CircuitBreaker<C: MonotonicClock = SystemMonotonicClock> {
     /// Current state: 0=Closed, 1=Open, 2=HalfOpen
     state: AtomicU32,
     /// Consecutive failure count
     failure_count: AtomicU32,
-    /// Last failure time as nanoseconds since `creation_time`
+    /// Last failure time as nanoseconds since clock creation
     last_failure_nanos: AtomicU64,
-    /// Reference time point for computing elapsed time
-    creation_time: Instant,
+    /// Injected clock for time (enables deterministic testing)
+    clock: C,
     /// Number of consecutive failures to trip the breaker (immutable after construction)
     failure_threshold: u32,
     /// Timeout in nanoseconds before transitioning to HalfOpen (immutable after construction)
     timeout_nanos: u64,
 }
 
-impl CircuitBreaker {
+impl CircuitBreaker<SystemMonotonicClock> {
     /// Creates a new CircuitBreaker with the specified failure threshold and reset timeout.
+    ///
+    /// Uses the system monotonic clock. For deterministic testing, use `with_clock`.
     ///
     /// # Arguments
     /// * `failure_threshold` - Number of consecutive failures to trip the breaker.
@@ -90,20 +143,34 @@ impl CircuitBreaker {
     /// let breaker = CircuitBreaker::new(5, Duration::from_secs(60));
     /// ```
     pub fn new(failure_threshold: u32, timeout: std::time::Duration) -> Self {
+        Self::with_clock(failure_threshold, timeout, SystemMonotonicClock::new())
+    }
+}
+
+impl<C: MonotonicClock> CircuitBreaker<C> {
+    /// Creates a new CircuitBreaker with an injected clock.
+    ///
+    /// This allows deterministic testing by providing a mock clock.
+    ///
+    /// # Arguments
+    /// * `failure_threshold` - Number of consecutive failures to trip the breaker.
+    /// * `timeout` - Duration to wait before transitioning to HalfOpen state.
+    /// * `clock` - The clock to use for time measurements.
+    pub fn with_clock(failure_threshold: u32, timeout: std::time::Duration, clock: C) -> Self {
         Self {
             state: AtomicU32::new(CircuitState::Closed as u32),
             failure_count: AtomicU32::new(0),
             last_failure_nanos: AtomicU64::new(0),
-            creation_time: Instant::now(),
+            clock,
             failure_threshold,
             timeout_nanos: timeout.as_nanos() as u64,
         }
     }
 
-    /// Returns the current elapsed nanoseconds since creation.
+    /// Returns the current elapsed nanoseconds from the injected clock.
     #[inline]
     fn elapsed_nanos(&self) -> u64 {
-        self.creation_time.elapsed().as_nanos() as u64
+        self.clock.elapsed_nanos()
     }
 
     /// Returns the current state of the circuit breaker.
@@ -330,5 +397,64 @@ mod tests {
         // With 10 threads * 50 failures = 500 failures, should definitely be open
         assert!(breaker.is_open());
         assert!(breaker.get_failure_count() >= 100);
+    }
+
+    /// Mock clock for deterministic testing
+    struct MockClock {
+        nanos: std::sync::atomic::AtomicU64,
+    }
+
+    impl MockClock {
+        fn new() -> Self {
+            Self {
+                nanos: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+
+        fn advance(&self, duration: Duration) {
+            self.nanos.fetch_add(
+                duration.as_nanos() as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    impl MonotonicClock for MockClock {
+        fn elapsed_nanos(&self) -> u64 {
+            self.nanos.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn test_circuit_breaker_deterministic_with_mock_clock() {
+        use std::sync::Arc;
+
+        // Create a mock clock we can control
+        let clock = Arc::new(MockClock::new());
+        let timeout = Duration::from_secs(60); // 60 second timeout
+
+        // Create breaker with our mock clock
+        // We need to use Arc because MockClock implements MonotonicClock
+        let breaker = CircuitBreaker::with_clock(2, timeout, clock.clone());
+
+        // Trip the breaker
+        breaker.record_failure();
+        breaker.record_failure();
+        assert!(breaker.is_open());
+        assert_eq!(breaker.get_state(), CircuitState::Open);
+
+        // Still open (no time has passed)
+        assert!(breaker.is_open());
+
+        // Advance time to just before timeout
+        clock.advance(Duration::from_secs(59));
+        assert!(breaker.is_open()); // Still open
+
+        // Advance past timeout
+        clock.advance(Duration::from_secs(2));
+
+        // Now should transition to HalfOpen
+        assert!(!breaker.is_open());
+        assert_eq!(breaker.get_state(), CircuitState::HalfOpen);
     }
 }

@@ -50,7 +50,27 @@ impl CoinbaseClient {
         let api_secret = std::env::var("COINBASE_API_SECRET")
             .map_err(|_| "COINBASE_API_SECRET must be set in .env file or environment")?;
 
-        // Build the REST client, wiring API credentials from the environment
+        Self::with_credentials(api_key, api_secret, env, paper_logger)
+    }
+
+    /// Creates a new CoinbaseClient with explicit credentials (thread-safe).
+    ///
+    /// This constructor does NOT use or mutate environment variables, making it
+    /// safe to use in multi-threaded contexts where multiple clients with different
+    /// credentials may be initialized concurrently.
+    ///
+    /// # Arguments
+    /// * `api_key` - The Coinbase API key
+    /// * `api_secret` - The Coinbase API secret
+    /// * `env` - The environment mode (Live, Sandbox, or Paper)
+    /// * `paper_logger` - Optional logger for paper trades
+    pub fn with_credentials(
+        api_key: String,
+        api_secret: String,
+        env: AppEnv,
+        paper_logger: Option<PaperTradeLogger>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Build the REST client with explicit credentials
         let client: RestClient = RestClientBuilder::new()
             .with_authentication(&api_key, &api_secret)
             .build()?;
