@@ -43,6 +43,16 @@ bytes = "1.5"
 # AS1: Prometheus metrics for observability
 prometheus = "0.14"
 lazy_static = "1.4"
+# Trade recording: UUID generation
+uuid = { version = "1.10", features = ["v4"] }
+
+# Optional: AWS SDK for DynamoDB trade recording
+aws-sdk-dynamodb = { version = "1.51", optional = true }
+aws-config = { version = "1.5", optional = true }
+
+[features]
+default = []
+dynamodb = ["aws-sdk-dynamodb", "aws-config"]
 
 [dev-dependencies]
 mockall = "0.13.1"

@@ -1,9 +1,29 @@
-//! Paper Trade Logger Module
+//! Logging and Trade Recording Module
 //!
-//! Thread-safe, channel-based logger for paper trade records.
-//! Uses a dedicated writer task to serialize all file writes,
-//! eliminating race conditions when multiple strategies log concurrently.
+//! Provides multiple backends for recording trades:
+//! - `PaperTradeLogger` - Legacy channel-based CSV logger
+//! - `TradeRecorder` trait - Pluggable recorder interface
+//! - `CsvRecorder` - Synchronous CSV file recorder
+//! - `TracingRecorder` - CloudWatch-compatible structured logs
+//! - `DynamoDbRecorder` - AWS DynamoDB persistence (requires `dynamodb` feature)
 
+// New recorder infrastructure
+pub mod csv_recorder;
+pub mod recorder;
+pub mod tracing_recorder;
+
+#[cfg(feature = "dynamodb")]
+pub mod dynamodb_recorder;
+
+// Re-exports for convenience
+pub use csv_recorder::CsvRecorder;
+pub use recorder::{MultiRecorder, RecordError, TradeRecord, TradeRecorder, TradeSide};
+pub use tracing_recorder::TracingRecorder;
+
+#[cfg(feature = "dynamodb")]
+pub use dynamodb_recorder::DynamoDbRecorder;
+
+// Legacy logger (existing code below)
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::fs::OpenOptions;
