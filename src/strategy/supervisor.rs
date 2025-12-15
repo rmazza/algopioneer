@@ -206,7 +206,17 @@ impl StrategySupervisor {
 
         for mut strategy in self.strategies.drain(..) {
             let id = strategy.id();
-            let rx = strategy_receivers.remove(&id).expect("Receiver must exist");
+            // MC-5 FIX: Graceful handling instead of expect() panic
+            let rx = match strategy_receivers.remove(&id) {
+                Some(r) => r,
+                None => {
+                    error!(
+                        strategy_id = %id,
+                        "BUG: Receiver missing for strategy - skipping. This indicates a logic error in supervisor setup."
+                    );
+                    continue;
+                }
+            };
             let pnl_tracker = self.pnl_tracker.clone();
 
             join_set.spawn(async move {

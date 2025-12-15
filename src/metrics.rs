@@ -16,7 +16,7 @@ lazy_static! {
     pub static ref ORDERS_TOTAL: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_orders_total", "Total orders executed"),
         &["symbol", "side", "status"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register ORDERS_TOTAL metric - check for duplicate registration");
 
     /// Order execution latency in seconds
     pub static ref ORDER_LATENCY: HistogramVec = register_histogram_vec!(
@@ -24,7 +24,7 @@ lazy_static! {
         "Order execution latency",
         &["symbol"],
         vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register ORDER_LATENCY metric - check for duplicate registration");
 
     // --- Strategy Metrics ---
 
@@ -32,13 +32,13 @@ lazy_static! {
     pub static ref STRATEGY_PNL: GaugeVec = register_gauge_vec!(
         opts!("algopioneer_strategy_pnl", "Current strategy PnL"),
         &["strategy_id", "strategy_type"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register STRATEGY_PNL metric - check for duplicate registration");
 
     /// Strategy state transitions
     pub static ref STRATEGY_STATE: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_strategy_state_transitions_total", "Strategy state transitions"),
         &["strategy_id", "from_state", "to_state"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register STRATEGY_STATE metric - check for duplicate registration");
 
     // --- WebSocket Metrics ---
 
@@ -46,19 +46,19 @@ lazy_static! {
     pub static ref WS_TICKS_TOTAL: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_websocket_ticks_total", "WebSocket ticks received"),
         &["symbol"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register WS_TICKS_TOTAL metric - check for duplicate registration");
 
     /// WebSocket ticks dropped (backpressure)
     pub static ref WS_TICKS_DROPPED: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_websocket_ticks_dropped_total", "WebSocket ticks dropped due to backpressure"),
         &["symbol", "reason"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register WS_TICKS_DROPPED metric - check for duplicate registration");
 
     /// WebSocket reconnections
     pub static ref WS_RECONNECTIONS: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_websocket_reconnections_total", "WebSocket reconnection attempts"),
         &["status"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register WS_RECONNECTIONS metric - check for duplicate registration");
 
     // --- Circuit Breaker Metrics ---
 
@@ -66,13 +66,13 @@ lazy_static! {
     pub static ref CIRCUIT_BREAKER_STATE: GaugeVec = register_gauge_vec!(
         opts!("algopioneer_circuit_breaker_state", "Circuit breaker state (0=closed, 1=half_open, 2=open)"),
         &["name"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register CIRCUIT_BREAKER_STATE metric - check for duplicate registration");
 
     /// Circuit breaker trips
     pub static ref CIRCUIT_BREAKER_TRIPS: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_circuit_breaker_trips_total", "Circuit breaker trips"),
         &["name"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register CIRCUIT_BREAKER_TRIPS metric - check for duplicate registration");
 
     // --- Recovery Metrics ---
 
@@ -80,7 +80,7 @@ lazy_static! {
     pub static ref RECOVERY_ATTEMPTS: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_recovery_attempts_total", "Recovery attempts"),
         &["symbol", "status"]
-    ).expect("metric can be created");
+    ).expect("FATAL: Failed to register RECOVERY_ATTEMPTS metric - check for duplicate registration");
 }
 
 /// Record an order execution
@@ -116,12 +116,27 @@ pub fn record_dropped_tick(symbol: &str, reason: &str) {
 }
 
 /// Get metrics as text for /metrics endpoint
+///
+/// CB-3 FIX: Handles encoding errors gracefully instead of panicking
 pub fn gather_metrics() -> String {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer).unwrap()
+
+    // CB-3 FIX: Handle encoding errors gracefully
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        tracing::error!("Failed to encode Prometheus metrics: {}", e);
+        return String::new();
+    }
+
+    // CB-3 FIX: Handle UTF-8 conversion errors gracefully
+    match String::from_utf8(buffer) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Prometheus metrics buffer is not valid UTF-8: {}", e);
+            String::new()
+        }
+    }
 }
 
 #[cfg(test)]

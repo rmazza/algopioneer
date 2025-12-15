@@ -8,11 +8,12 @@ pub mod coinbase;
 pub mod kraken;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::error::Error;
 use std::sync::Arc;
-use thiserror::Error;
+use thiserror::Error as ThisError;
 use tokio::sync::mpsc;
 
 // Re-export shared types for convenience
@@ -23,26 +24,39 @@ pub use coinbase::CoinbaseExchangeClient;
 pub use kraken::KrakenExchangeClient;
 
 /// Exchange-agnostic candle data
+///
+/// All price fields use `Decimal` for financial precision.
+/// Timestamp is derived from the source candle's start time.
 #[derive(Debug, Clone)]
 pub struct Candle {
     pub timestamp: DateTime<Utc>,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: f64,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub volume: Decimal,
 }
 
 /// Convert from cbadv Candle to our Candle
+///
+/// CB-1 FIX: Uses Decimal instead of f64 for financial precision
+/// CB-2 FIX: Uses source candle's `start` timestamp instead of Utc::now()
 impl From<cbadv::models::product::Candle> for Candle {
     fn from(c: cbadv::models::product::Candle) -> Self {
+        // CB-2 FIX: Convert unix timestamp (seconds) to DateTime
+        let timestamp = Utc
+            .timestamp_opt(c.start as i64, 0)
+            .single()
+            .unwrap_or_else(Utc::now); // Fallback only for truly invalid timestamps
+
+        // CB-1 FIX: Convert f64 to Decimal with fallback to ZERO for invalid values
         Self {
-            timestamp: Utc::now(), // cbadv uses unix timestamp, we'll convert in implementation
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-            volume: c.volume,
+            timestamp,
+            open: Decimal::from_f64(c.open).unwrap_or(Decimal::ZERO),
+            high: Decimal::from_f64(c.high).unwrap_or(Decimal::ZERO),
+            low: Decimal::from_f64(c.low).unwrap_or(Decimal::ZERO),
+            close: Decimal::from_f64(c.close).unwrap_or(Decimal::ZERO),
+            volume: Decimal::from_f64(c.volume).unwrap_or(Decimal::ZERO),
         }
     }
 }
@@ -85,16 +99,20 @@ pub struct ExchangeConfig {
 
 impl ExchangeConfig {
     /// Create config from environment variables for the specified exchange
-    pub fn from_env(exchange: ExchangeId) -> Result<Self, Box<dyn Error>> {
+    ///
+    /// MC-2 FIX: Returns typed `ExchangeError` instead of `Box<dyn Error>`
+    pub fn from_env(exchange: ExchangeId) -> Result<Self, ExchangeError> {
         let (key_var, secret_var) = match exchange {
             ExchangeId::Coinbase => ("COINBASE_API_KEY", "COINBASE_API_SECRET"),
             ExchangeId::Kraken => ("KRAKEN_API_KEY", "KRAKEN_API_SECRET"),
         };
 
-        let api_key = std::env::var(key_var)
-            .map_err(|_| format!("{} must be set in environment", key_var))?;
-        let api_secret = std::env::var(secret_var)
-            .map_err(|_| format!("{} must be set in environment", secret_var))?;
+        let api_key = std::env::var(key_var).map_err(|_| {
+            ExchangeError::Configuration(format!("{} must be set in environment", key_var))
+        })?;
+        let api_secret = std::env::var(secret_var).map_err(|_| {
+            ExchangeError::Configuration(format!("{} must be set in environment", secret_var))
+        })?;
 
         Ok(Self {
             api_key,
@@ -108,7 +126,7 @@ impl ExchangeConfig {
 
 /// Exchange-layer error type for actionable error handling.
 /// Enables strategies to distinguish between retryable and non-retryable errors.
-#[derive(Error, Debug, Clone)]
+#[derive(ThisError, Debug, Clone)]
 pub enum ExchangeError {
     /// Network connectivity issues (retryable)
     #[error("Network error: {0}")]
