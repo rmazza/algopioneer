@@ -13,33 +13,67 @@ pub struct PortfolioPairConfig {
     /// Rolling window size for z-score calculation (in ticks)
     pub window_size: usize,
     /// Z-score threshold to enter a position (must be positive)
-    pub entry_z_score: f64,
+    /// CB-2 FIX: Using Decimal for deterministic threshold comparisons
+    pub entry_z_score: Decimal,
     /// Z-score threshold to exit a position (must be < entry_z_score)
-    pub exit_z_score: f64,
+    pub exit_z_score: Decimal,
 }
 
-/// Default top-volume trading pairs on Coinbase
+/// Default top-volume trading pairs on Coinbase (50+ symbols for broader search)
 pub const DEFAULT_CANDIDATES: &[&str] = &[
+    // Major pairs (highest liquidity)
     "BTC-USD",
     "ETH-USD",
     "SOL-USD",
-    "ADA-USD",
+    "XRP-USD",
     "DOGE-USD",
+    "ADA-USD",
     "AVAX-USD",
     "SHIB-USD",
     "DOT-USD",
     "MATIC-USD",
     "LTC-USD",
-    "UNI-USD",
     "LINK-USD",
-    "XLM-USD",
+    "UNI-USD",
     "BCH-USD",
-    "ALGO-USD",
+    "XLM-USD",
     "ATOM-USD",
+    "ALGO-USD",
     "FIL-USD",
-    "VET-USD",
     "ICP-USD",
+    "VET-USD",
+    // Mid-cap pairs (good liquidity)
+    "NEAR-USD",
+    "APT-USD",
+    "ARB-USD",
+    "OP-USD",
+    "INJ-USD",
+    "IMX-USD",
+    "STX-USD",
+    "RNDR-USD",
+    "GRT-USD",
+    "FTM-USD",
+    "AAVE-USD",
+    "MKR-USD",
+    "SNX-USD",
+    "CRV-USD",
+    "LDO-USD",
+    "SAND-USD",
+    "MANA-USD",
     "AXS-USD",
+    "APE-USD",
+    "GALA-USD",
+    // Additional liquid pairs
+    "EOS-USD",
+    "XTZ-USD",
+    "FLOW-USD",
+    "CHZ-USD",
+    "ENJ-USD",
+    "COMP-USD",
+    "ZEC-USD",
+    "DASH-USD",
+    "BAT-USD",
+    "ZRX-USD",
 ];
 
 /// Configuration for the discovery pipeline
@@ -99,16 +133,16 @@ pub struct DiscoveryConfig {
 
 // Default value functions for serde
 fn default_min_correlation() -> f64 {
-    0.8
+    0.8 // High correlation required for pairs trading
 }
 fn default_max_half_life() -> f64 {
-    24.0
+    48.0 // 48 hours (2 days) - reasonable mean reversion speed
 }
 fn default_min_sharpe() -> f64 {
-    1.0 // Raised from 0.5 for statistical significance
+    0.5 // Minimum bar; use validation Sharpe for final selection
 }
 fn default_lookback_days() -> u32 {
-    30 // Increased from 14 for better statistical significance
+    90 // 90 days = ~2160 hourly candles for robust statistical analysis
 }
 fn default_max_pairs() -> usize {
     10
@@ -120,7 +154,7 @@ fn default_taker_fee() -> Decimal {
     dec!(0.002)
 }
 fn default_min_trades() -> u32 {
-    10 // Lowered from 30 to work with default lookback; use --lookback-days 60+ for 30 trades
+    25 // 25+ trades for reasonable statistical significance
 }
 fn default_min_net_profit() -> Decimal {
     dec!(0)

@@ -9,6 +9,10 @@ use tracing::{debug, info, warn};
 /// Fallback half-life for non-stationary or invalid spreads (hours)
 const NON_STATIONARY_HALF_LIFE: f64 = 1000.0;
 
+/// MC-1 FIX: Maximum safe price ratio for correlation calculations
+/// Beyond this ratio, f64 precision loss may affect results
+const MAX_PRICE_RATIO: f64 = 1e9;
+
 /// ADF critical values at 5% significance level (MacKinnon, 1994)
 /// For n > 100 samples, critical value ≈ -2.86
 const ADF_CRITICAL_VALUE_5PCT: f64 = -2.86;
@@ -34,6 +38,9 @@ pub struct CandidatePair {
 ///
 /// Returns a value in [-1.0, 1.0], or None if calculation fails.
 ///
+/// # MC-1 FIX: Precision Guard
+/// Returns None if price ratio exceeds MAX_PRICE_RATIO to prevent f64 precision loss.
+///
 /// # Mathematical Definition
 /// r = Σ[(xi - x̄)(yi - ȳ)] / √[Σ(xi - x̄)² × Σ(yi - ȳ)²]
 pub fn calculate_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
@@ -41,9 +48,21 @@ pub fn calculate_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
         return None;
     }
 
-    let n = a.len() as f64;
-    let mean_a = a.iter().sum::<f64>() / n;
-    let mean_b = b.iter().sum::<f64>() / n;
+    // MC-1 FIX: Check for extreme price ratios that could cause precision loss
+    let mean_a: f64 = a.iter().sum::<f64>() / a.len() as f64;
+    let mean_b: f64 = b.iter().sum::<f64>() / b.len() as f64;
+
+    if mean_b != 0.0 {
+        let ratio = (mean_a / mean_b).abs();
+        if !(1.0 / MAX_PRICE_RATIO..=MAX_PRICE_RATIO).contains(&ratio) {
+            warn!(
+                ratio = format!("{:.2e}", ratio),
+                limit = format!("{:.2e}", MAX_PRICE_RATIO),
+                "Price ratio exceeds safe bounds for correlation calculation"
+            );
+            return None;
+        }
+    }
 
     let mut covariance = 0.0;
     let mut var_a = 0.0;

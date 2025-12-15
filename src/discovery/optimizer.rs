@@ -7,13 +7,14 @@ use super::config::{DiscoveryConfig, GridSearchConfig, PortfolioPairConfig};
 use super::error::DiscoveryError;
 use super::filter::{filter_candidates, CandidatePair};
 use crate::coinbase::CoinbaseClient;
+use crate::strategy::dual_leg_trading::Clock;
 use crate::strategy::dual_leg_trading::{
     DualLegConfig, EntryStrategy, MarketData, PairsManager, TransactionCostModel,
 };
 use crate::strategy::Signal;
 
 use cbadv::time::Granularity;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -56,6 +57,9 @@ pub struct OptimizedPair {
 
 impl OptimizedPair {
     /// Convert to PortfolioPairConfig for use with PortfolioManager
+    ///
+    /// # CB-2 FIX
+    /// Converts f64 z-scores to Decimal for deterministic threshold comparisons.
     pub fn to_portfolio_config(&self, allocation: Decimal) -> PortfolioPairConfig {
         PortfolioPairConfig {
             dual_leg_config: DualLegConfig {
@@ -70,8 +74,9 @@ impl OptimizedPair {
                 throttle_interval_secs: 5,
             },
             window_size: self.window,
-            entry_z_score: self.z_entry,
-            exit_z_score: self.z_exit,
+            // CB-2 FIX: Convert f64 to Decimal for financial precision
+            entry_z_score: Decimal::from_f64_retain(self.z_entry).unwrap_or(dec!(2.0)),
+            exit_z_score: Decimal::from_f64_retain(self.z_exit).unwrap_or(dec!(0.1)),
         }
     }
 }
@@ -473,12 +478,16 @@ async fn optimize_pair(
 }
 
 /// Fetch historical candle data from Coinbase API
+///
+/// # CB-1 Fix
+/// Time is now injected via Clock trait for deterministic discovery and testing.
 async fn fetch_candle_data(
     client: &mut CoinbaseClient,
     symbols: &[String],
     lookback_days: u32,
+    clock: &dyn Clock,
 ) -> Result<(Vec<i64>, HashMap<String, Vec<Decimal>>), DiscoveryError> {
-    let end = Utc::now();
+    let end = clock.now();
     let start = end - ChronoDuration::days(lookback_days as i64);
 
     info!(
@@ -589,9 +598,14 @@ async fn fetch_candle_data(
 /// 2. Filter pairs by correlation and half-life
 /// 3. Run grid search optimization on viable pairs
 /// 4. Return ranked results
+///
+/// # CB-1 Fix
+/// Accepts a `Clock` trait for deterministic time handling, enabling reproducible
+/// discovery runs and proper integration testing.
 pub async fn discover_and_optimize(
     client: &mut CoinbaseClient,
     config: &DiscoveryConfig,
+    clock: &dyn Clock,
 ) -> Result<Vec<OptimizedPair>, DiscoveryError> {
     config.validate().map_err(DiscoveryError::InvalidConfig)?;
 
@@ -603,7 +617,7 @@ pub async fn discover_and_optimize(
 
     // Step 1: Fetch data
     let (timestamps, prices_decimal) =
-        fetch_candle_data(client, &config.candidates, config.lookback_days).await?;
+        fetch_candle_data(client, &config.candidates, config.lookback_days, clock).await?;
 
     // Step 2: Convert to f64 for correlation filtering
     let prices_f64: HashMap<String, Vec<f64>> = prices_decimal
@@ -730,7 +744,7 @@ mod tests {
         assert_eq!(config.dual_leg_config.future_symbol, "ETH-USD");
         assert_eq!(config.dual_leg_config.order_size, dec!(100));
         assert_eq!(config.window_size, 20);
-        assert_eq!(config.entry_z_score, 2.0);
+        assert_eq!(config.entry_z_score, dec!(2.0));
 
         // Verify new fields
         assert_eq!(pair.validation_sharpe, 1.2);

@@ -8,10 +8,12 @@
 //! ```ignore
 //! use algopioneer::discovery::{discover_and_optimize, DiscoveryConfig};
 //! use algopioneer::coinbase::CoinbaseClient;
+//! use algopioneer::strategy::dual_leg_trading::SystemClock;
 //!
 //! let config = DiscoveryConfig::default();
 //! let mut client = CoinbaseClient::new(AppEnv::Live)?;
-//! let results = discover_and_optimize(&mut client, &config).await?;
+//! let clock = SystemClock;
+//! let results = discover_and_optimize(&mut client, &config, &clock).await?;
 //! ```
 
 pub mod config;

@@ -9,9 +9,10 @@ static GLOBAL: Jemalloc = Jemalloc;
 use algopioneer::coinbase::websocket::CoinbaseWebsocket;
 use algopioneer::discovery::{discover_and_optimize, DiscoveryConfig};
 use algopioneer::exchange::coinbase::{AppEnv, CoinbaseClient};
+use algopioneer::strategy::dual_leg_trading::SystemClock;
 use algopioneer::strategy::dual_leg_trading::{
     BasisManager, DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType,
-    PairsManager, RecoveryWorker, RiskMonitor, SystemClock, TransactionCostModel,
+    PairsManager, RecoveryWorker, RiskMonitor, TransactionCostModel,
 };
 use algopioneer::strategy::moving_average::MovingAverageCrossover;
 use algopioneer::strategy::Signal;
@@ -21,7 +22,7 @@ use clap::Parser;
 use dotenvy::dotenv;
 use polars::prelude::*;
 use rust_decimal::prelude::FromPrimitive;
-use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -190,13 +191,13 @@ enum Commands {
         #[arg(long, default_value_t = 0.8)]
         min_correlation: f64,
         /// Maximum half-life in hours for mean reversion
-        #[arg(long, default_value_t = 24.0)]
+        #[arg(long, default_value_t = 48.0)]
         max_half_life: f64,
         /// Minimum Sharpe ratio to include in results
         #[arg(long, default_value_t = 0.5)]
         min_sharpe: f64,
         /// Historical lookback period in days
-        #[arg(long, default_value_t = 14)]
+        #[arg(long, default_value_t = 90)]
         lookback_days: u32,
         /// Maximum number of pairs to output
         #[arg(long, default_value_t = 10)]
@@ -207,6 +208,9 @@ enum Commands {
         /// Initial capital for backtests in USD
         #[arg(long, default_value_t = 10000.0)]
         initial_capital: f64,
+        /// Skip the ADF cointegration test (use for exploratory analysis)
+        #[arg(long, default_value_t = false)]
+        no_cointegration: bool,
     },
 }
 
@@ -370,11 +374,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 // Convert to Live Config
+                // CB-2 FIX: Convert Decimal z-scores from config to f64 for internal use
                 let live_config = DualLegLiveConfig {
                     dual_leg_config: json_config.dual_leg_config,
                     window_size: json_config.window_size,
-                    entry_z_score: json_config.entry_z_score,
-                    exit_z_score: json_config.exit_z_score,
+                    entry_z_score: json_config.entry_z_score.to_f64().unwrap_or(2.0),
+                    exit_z_score: json_config.exit_z_score.to_f64().unwrap_or(0.1),
                     strategy_type: DualLegStrategyType::Pairs, // Legacy portfolio only supported Pairs
                 };
 
@@ -402,6 +407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_pairs,
             output,
             initial_capital,
+            no_cointegration,
         } => {
             run_discover_pairs(
                 symbols,
@@ -412,6 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *max_pairs,
                 output,
                 *initial_capital,
+                *no_cointegration,
             )
             .await?;
         }
@@ -818,6 +825,7 @@ async fn run_discover_pairs(
     max_pairs: usize,
     output_path: &str,
     initial_capital: f64,
+    no_cointegration: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use algopioneer::discovery::config::{PortfolioPairConfig, DEFAULT_CANDIDATES};
 
@@ -840,6 +848,7 @@ async fn run_discover_pairs(
         max_hl = max_half_life,
         min_sharpe = min_sharpe,
         lookback = lookback_days,
+        require_cointegration = !no_cointegration,
         "Configuration loaded"
     );
 
@@ -852,6 +861,7 @@ async fn run_discover_pairs(
         lookback_days,
         max_pairs_output: max_pairs,
         initial_capital: Decimal::from_f64_retain(initial_capital).unwrap_or(dec!(10000)),
+        require_cointegration: !no_cointegration,
         ..Default::default()
     };
 
@@ -860,7 +870,8 @@ async fn run_discover_pairs(
 
     // Run discovery pipeline
     info!("Starting discovery and optimization...");
-    let results = match discover_and_optimize(&mut client, &config).await {
+    let clock = SystemClock;
+    let results = match discover_and_optimize(&mut client, &config, &clock).await {
         Ok(pairs) => pairs,
         Err(e) => {
             error!("Discovery failed: {}", e);
