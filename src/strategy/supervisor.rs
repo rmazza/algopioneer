@@ -29,6 +29,14 @@ pub enum SupervisorError {
 }
 
 /// Policy for restarting crashed strategies
+///
+/// TODO(NP-5): Automatic restart is a planned enhancement. Currently, panicked
+/// strategies remain stopped and require manual intervention. The full restart
+/// implementation will include:
+/// - Exponential backoff with jitter
+/// - Per-strategy restart budgets
+/// - Cooldown periods after repeated failures
+/// - Integration with health monitoring
 #[derive(Debug, Clone)]
 pub struct RestartPolicy {
     /// Maximum restart attempts before giving up

@@ -109,6 +109,9 @@ const MAX_RECOVERY_ATTEMPTS: u32 = 5;
 const MAX_SAFE_PRICE_RATIO: f64 = 1e12; // Conservative limit for f64 precision
 const MIN_SAFE_PRICE_RATIO: f64 = 1e-12; // Reciprocal of max for symmetry
 
+// NP-1 FIX: Extract magic number to named constant for precision warning throttling
+const PRECISION_WARNING_LOG_INTERVAL: u64 = 1000;
+
 // --- Logging Utilities ---
 
 /// A lightweight rate limiter for logging to prevent log storms.
@@ -891,8 +894,8 @@ impl EntryStrategy for PairsManager {
                         .precision_warnings
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
-                    // Only log every 1000th warning to reduce noise
-                    if count == 1 || count.is_multiple_of(1000) {
+                    // NP-1 FIX: Use named constant instead of magic number
+                    if count == 1 || count.is_multiple_of(PRECISION_WARNING_LOG_INTERVAL) {
                         warn!(
                             "PRECISION WARNING: Price ratio {:.2e} approaching safety limits. Monitor for precision degradation. (Total warnings: {})",
                             ratio, count

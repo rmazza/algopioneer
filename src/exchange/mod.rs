@@ -37,10 +37,25 @@ pub struct Candle {
     pub volume: Decimal,
 }
 
+/// Default candle with zero values (used as fallback for conversion failures)
+impl Default for Candle {
+    fn default() -> Self {
+        Self {
+            timestamp: Utc::now(),
+            open: Decimal::ZERO,
+            high: Decimal::ZERO,
+            low: Decimal::ZERO,
+            close: Decimal::ZERO,
+            volume: Decimal::ZERO,
+        }
+    }
+}
+
 /// Convert from cbadv Candle to our Candle
 ///
 /// CB-1 FIX: Uses Decimal instead of f64 for financial precision
 /// CB-2 FIX: Uses source candle's `start` timestamp instead of Utc::now()
+/// MC-2 FIX: Logs warnings for conversion failures instead of silent fallback
 impl From<cbadv::models::product::Candle> for Candle {
     fn from(c: cbadv::models::product::Candle) -> Self {
         // CB-2 FIX: Convert unix timestamp (seconds) to DateTime
@@ -49,14 +64,29 @@ impl From<cbadv::models::product::Candle> for Candle {
             .single()
             .unwrap_or_else(Utc::now); // Fallback only for truly invalid timestamps
 
-        // CB-1 FIX: Convert f64 to Decimal with fallback to ZERO for invalid values
+        // MC-2 FIX: Helper to convert f64 to Decimal with warning on failure
+        let convert_with_warning = |value: f64, field: &str| -> Decimal {
+            match Decimal::from_f64(value) {
+                Some(d) => d,
+                None => {
+                    tracing::warn!(
+                        field = field,
+                        value = value,
+                        "Failed to convert candle {} to Decimal, using ZERO",
+                        field
+                    );
+                    Decimal::ZERO
+                }
+            }
+        };
+
         Self {
             timestamp,
-            open: Decimal::from_f64(c.open).unwrap_or(Decimal::ZERO),
-            high: Decimal::from_f64(c.high).unwrap_or(Decimal::ZERO),
-            low: Decimal::from_f64(c.low).unwrap_or(Decimal::ZERO),
-            close: Decimal::from_f64(c.close).unwrap_or(Decimal::ZERO),
-            volume: Decimal::from_f64(c.volume).unwrap_or(Decimal::ZERO),
+            open: convert_with_warning(c.open, "open"),
+            high: convert_with_warning(c.high, "high"),
+            low: convert_with_warning(c.low, "low"),
+            close: convert_with_warning(c.close, "close"),
+            volume: convert_with_warning(c.volume, "volume"),
         }
     }
 }

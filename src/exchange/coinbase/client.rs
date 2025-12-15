@@ -15,6 +15,10 @@ use crate::strategy::dual_leg_trading::OrderSide;
 /// Coinbase exchange client implementing the ExchangeClient trait
 pub struct CoinbaseExchangeClient {
     inner: CoinbaseClient,
+    /// NP-3 FIX: Config retained for future features:
+    /// - Dynamic API key rotation
+    /// - Sandbox mode switching at runtime  
+    /// - Rate limit configuration per-instance
     #[allow(dead_code)]
     config: ExchangeConfig,
 }
