@@ -112,6 +112,12 @@ const MIN_SAFE_PRICE_RATIO: f64 = 1e-12; // Reciprocal of max for symmetry
 // NP-1 FIX: Extract magic number to named constant for precision warning throttling
 const PRECISION_WARNING_LOG_INTERVAL: u64 = 1000;
 
+// TASK 4: Ghost Position Recovery Marker
+// Used to indicate that an entry price is unknown after state recovery.
+// When process_tick sees this value, it will reset to current market price.
+// Using NEGATIVE_ONE as a marker since prices cannot be negative.
+const UNKNOWN_ENTRY_PRICE: Decimal = dec!(-1.0);
+
 // --- Logging Utilities ---
 
 /// A lightweight rate limiter for logging to prevent log storms.
@@ -1008,6 +1014,21 @@ impl RiskMonitor {
             ));
         }
 
+        // TASK 4: Safety check for invalid/unknown prices
+        // Reject negative prices (including UNKNOWN_ENTRY_PRICE marker) and zero prices
+        if leg1_price <= Decimal::ZERO {
+            return Err(DualLegError::InvalidInput(format!(
+                "Leg 1 price must be positive, got: {}",
+                leg1_price
+            )));
+        }
+        if leg2_price <= Decimal::ZERO {
+            return Err(DualLegError::InvalidInput(format!(
+                "Leg 2 price must be positive, got: {}",
+                leg2_price
+            )));
+        }
+
         match self.hedge_mode {
             HedgeMode::DeltaNeutral => match self.instrument_type {
                 InstrumentType::Linear => Ok(leg1_qty),
@@ -1560,7 +1581,12 @@ impl DualLegStrategy {
     /// STATE AMNESIA FIX: Reconcile strategy state with actual exchange positions.
     /// Queries exchange for current holdings and updates state accordingly.
     /// Should be called at the start of run() before processing any ticks.
-    /// BI-3 FIX: Now halts on failure and includes direction tracking.
+    ///
+    /// ## Task 4 (Ghost Position) Fix:
+    /// When recovering a position without historical fill data, we use a marker value
+    /// (`UNKNOWN_ENTRY_PRICE`) instead of zero. On the first tick, `process_tick`
+    /// detects this marker and resets entry prices to current market prices,
+    /// effectively starting PnL tracking from zero for the recovered session.
     async fn reconcile_state(&mut self) {
         info!("Reconciling state with exchange positions...");
 
@@ -1581,7 +1607,7 @@ impl DualLegStrategy {
 
                 if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
                     // We have an open position - transition to InPosition
-                    // BI-3 FIX: Infer direction from leg1 quantity sign
+                    // Infer direction from leg1 quantity sign
                     // Long = positive leg1 (bought spot), Short = negative leg1 (sold spot)
                     let direction = if leg1_qty >= Decimal::ZERO {
                         PositionDirection::Long
@@ -1593,19 +1619,22 @@ impl DualLegStrategy {
                         "Detected existing position: leg1={}, leg2={}, direction={}. Transitioning to InPosition.",
                         leg1_qty, leg2_qty, direction
                     );
+
+                    // TASK 4 FIX: Use marker value for unknown entry prices
+                    // The process_tick method will detect this and reset to current market prices
                     self.state = StrategyState::InPosition {
                         direction,
                         leg1_qty: leg1_qty.abs(), // Store absolute quantities
                         leg2_qty: leg2_qty.abs(),
-                        leg1_entry_price: Decimal::ZERO, // BI-3: Unknown entry price
-                        leg2_entry_price: Decimal::ZERO,
+                        leg1_entry_price: UNKNOWN_ENTRY_PRICE, // Marker for "needs reset"
+                        leg2_entry_price: UNKNOWN_ENTRY_PRICE,
                     };
                     self.last_state_change_ts = self.clock.now_ts_millis();
 
                     warn!(
-                        "BI-3 WARNING: Entry prices set to 0 due to state recovery. \
-                        PnL/exit policy calculations will be inaccurate until position is closed. \
-                        Consider manual intervention for precise risk management."
+                        "GHOST POSITION RECOVERY: Entry prices unknown after restart. \
+                        PnL will be reset to zero on first market tick. \
+                        Manual cost basis check required for accurate accounting."
                     );
                 } else {
                     info!("No existing positions detected. Starting in Flat state.");
@@ -1909,6 +1938,49 @@ impl DualLegStrategy {
                 warn!("Dropping tick due to sync. Diff: {}ms (Max: {}ms). Leg1 TS: {}, Leg2 TS: {} (Suppressed: {})", diff, self.config.max_tick_age_ms, leg1.timestamp, leg2.timestamp, suppressed);
             }
             return;
+        }
+
+        // TASK 4: Ghost Position Recovery - Reset unknown entry prices to current market prices
+        // This handles the case where we recovered a position after restart without fill history
+        if let StrategyState::InPosition {
+            direction,
+            leg1_qty,
+            leg2_qty,
+            leg1_entry_price,
+            leg2_entry_price,
+        } = &self.state
+        {
+            // Check if entry prices are the unknown marker
+            if *leg1_entry_price == UNKNOWN_ENTRY_PRICE || *leg2_entry_price == UNKNOWN_ENTRY_PRICE
+            {
+                let new_leg1_price = if *leg1_entry_price == UNKNOWN_ENTRY_PRICE {
+                    leg1.price
+                } else {
+                    *leg1_entry_price
+                };
+                let new_leg2_price = if *leg2_entry_price == UNKNOWN_ENTRY_PRICE {
+                    leg2.price
+                } else {
+                    *leg2_entry_price
+                };
+
+                warn!(
+                    "GHOST POSITION PNL RESET: Setting entry prices to current market. \
+                    Leg1: {} -> {}, Leg2: {} -> {}. \
+                    PnL tracking starts from zero. Manual reconciliation required for accurate accounting.",
+                    leg1_entry_price, new_leg1_price,
+                    leg2_entry_price, new_leg2_price
+                );
+
+                // Update state with actual market prices
+                self.state = StrategyState::InPosition {
+                    direction: *direction,
+                    leg1_qty: *leg1_qty,
+                    leg2_qty: *leg2_qty,
+                    leg1_entry_price: new_leg1_price,
+                    leg2_entry_price: new_leg2_price,
+                };
+            }
         }
 
         let signal = self.entry_manager.analyze(leg1, leg2).await;
