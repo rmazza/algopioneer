@@ -1,0 +1,15 @@
+# Terraform Variables Example
+# Copy this file to terraform.tfvars and fill in your values
+# terraform.tfvars is gitignored to protect secrets
+
+# REQUIRED: Your public IP for SSH access (CIDR notation)
+# Find your IP: curl -4 ifconfig.me
+my_ip = "YOUR_IP/32"
+
+# REQUIRED: Name of your EC2 key pair (must exist in AWS)
+# Create one: aws ec2 create-key-pair --key-name trading-key --query 'KeyMaterial' --output text > ~/.ssh/trading-key.pem
+key_name = "trading-key"
+
+# OPTIONAL: Override defaults
+# aws_region    = "us-east-1"
+# instance_type = "t3.micro"
