@@ -51,18 +51,21 @@ impl TradeRecorder for TracingRecorder {
 mod tests {
     use super::*;
     use crate::logging::recorder::TradeSide;
+    use chrono::Utc;
     use rust_decimal_macros::dec;
 
     #[tokio::test]
     async fn test_tracing_recorder_does_not_error() {
         let recorder = TracingRecorder::new();
 
-        let trade = TradeRecord::now(
+        // Use with_timestamp for deterministic testing (avoids deprecated now())
+        let trade = TradeRecord::with_timestamp(
             "ETH-USD".to_string(),
             TradeSide::Sell,
             dec!(1.0),
             None,
             false,
+            Utc::now(), // Explicit timestamp injection
         );
 
         // Should not error

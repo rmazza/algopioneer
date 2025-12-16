@@ -111,9 +111,31 @@ impl TradeRecord {
         self
     }
 
-    /// Format as CSV line
+    /// Format as CSV line (allocates a new String).
+    ///
+    /// For performance-critical paths, prefer `write_csv_to()` which writes
+    /// directly to a buffer without intermediate allocation.
     pub fn to_csv_line(&self) -> String {
         format!(
+            "{},{},{},{},{},{},{},{}",
+            self.trade_id,
+            self.timestamp.to_rfc3339(),
+            self.symbol,
+            self.side,
+            self.size,
+            self.price.map(|p| p.to_string()).unwrap_or_default(),
+            self.strategy.as_deref().unwrap_or(""),
+            self.is_paper,
+        )
+    }
+
+    /// Write CSV line directly to a writer (zero intermediate allocation).
+    ///
+    /// This is more efficient than `to_csv_line()` for high-frequency recording
+    /// as it avoids allocating an intermediate String.
+    pub fn write_csv_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        write!(
+            writer,
             "{},{},{},{},{},{},{},{}",
             self.trade_id,
             self.timestamp.to_rfc3339(),
@@ -197,16 +219,19 @@ impl TradeRecorder for MultiRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use rust_decimal_macros::dec;
 
     #[test]
     fn test_trade_record_csv() {
-        let record = TradeRecord::now(
+        // Use with_timestamp for deterministic testing (avoids deprecated now())
+        let record = TradeRecord::with_timestamp(
             "BTC-USD".to_string(),
             TradeSide::Buy,
             dec!(0.5),
             Some(dec!(50000)),
             true,
+            Utc::now(), // Explicit timestamp injection
         );
         let csv = record.to_csv_line();
         assert!(csv.contains("BTC-USD"));

@@ -55,7 +55,8 @@ impl CsvRecorder {
 impl TradeRecorder for CsvRecorder {
     async fn record(&self, trade: &TradeRecord) -> Result<(), RecordError> {
         let writer = Arc::clone(&self.writer);
-        let csv_line = trade.to_csv_line();
+        // Clone the trade record for the blocking task to avoid lifetime issues
+        let trade = trade.clone();
 
         // Use spawn_blocking to avoid blocking the async runtime with IO or mutex contention
         tokio::task::spawn_blocking(move || {
@@ -63,7 +64,9 @@ impl TradeRecorder for CsvRecorder {
                 .lock()
                 .map_err(|_| RecordError::Io(std::io::Error::other("CSV writer mutex poisoned")))?;
 
-            writeln!(guard, "{}", csv_line).map_err(RecordError::Io)?;
+            // Use write_csv_to for zero-allocation direct buffer write
+            trade.write_csv_to(&mut *guard).map_err(RecordError::Io)?;
+            writeln!(guard).map_err(RecordError::Io)?; // Add newline
 
             // Flush periodically or rely on OS/buffer.
             // For trading logs, we prefer safety over raw throughput, so we flush.
@@ -82,6 +85,7 @@ impl TradeRecorder for CsvRecorder {
 mod tests {
     use super::*;
     use crate::logging::recorder::TradeSide;
+    use chrono::Utc;
     use rust_decimal_macros::dec;
     use tempfile::tempdir;
 
@@ -92,12 +96,14 @@ mod tests {
 
         let recorder = CsvRecorder::new(file_path.clone()).unwrap();
 
-        let trade = TradeRecord::now(
+        // Use with_timestamp for deterministic testing (avoids deprecated now())
+        let trade = TradeRecord::with_timestamp(
             "BTC-USD".to_string(),
             TradeSide::Buy,
             dec!(0.5),
             Some(dec!(50000)),
             true,
+            Utc::now(), // Explicit timestamp injection
         );
 
         recorder.record(&trade).await.unwrap();
