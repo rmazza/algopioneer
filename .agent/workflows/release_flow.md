@@ -84,11 +84,10 @@ This workflow guides you through the process of creating a production release, f
     git push origin develop
     ```
 
-12. **Build Production Binary (Optional)**:
-    Create a highly optimized binary for distribution.
-    ```bash
-    cargo build --release
-    strip target/release/algopioneer # Optional: Reduces file size
-    ```
-    The binary will be located at `target/release/algopioneer`.
+12. **Wait for CI (GitHub Actions)**:
+    The push of the tag `vX.Y.Z` will trigger the release workflow.
+    -   **Action**: Builds Docker image.
+    -   **Registry**: Pushes to AWS ECR (public).
+    
+    Check the [Actions tab](https://github.com/your-repo/actions) for progress.
     ```
