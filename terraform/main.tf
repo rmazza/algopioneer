@@ -199,13 +199,13 @@ resource "aws_instance" "bot" {
 
   tags = merge(local.common_tags, {
     Name        = "${local.name_prefix}-shadow"
-    Environment = "production"
+    Environment = "paper"
   })
 
-  lifecycle {
-    # Prevent accidental destruction of the trading instance
-    prevent_destroy = true
-  }
+  # NOTE: For production, add:
+  # lifecycle {
+  #   prevent_destroy = true
+  # }
 }
 
 # --- Outputs ---
