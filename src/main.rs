@@ -33,7 +33,7 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 // Paper trade logging
-use algopioneer::logging::PaperTradeLogger;
+use algopioneer::logging::{CsvRecorder, TradeRecorder};
 use std::path::PathBuf;
 
 // --- Constants ---
@@ -269,15 +269,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             // Create paper logger if in paper mode
-            let paper_logger = if *paper {
-                let (logger, task) = PaperTradeLogger::new(PathBuf::from("paper_trades.csv"));
-                tokio::spawn(task.run());
-                Some(logger)
+            let recorder: Option<Arc<dyn TradeRecorder>> = if *paper {
+                match CsvRecorder::new(PathBuf::from("paper_trades.csv")) {
+                    Ok(recorder) => Some(Arc::new(recorder)),
+                    Err(e) => {
+                        error!("Failed to initialize CSV recorder: {}", e);
+                        None
+                    }
+                }
             } else {
                 None
             };
 
-            let mut engine = SimpleTradingEngine::new(config, state_tx, paper_logger).await?;
+            let mut engine = SimpleTradingEngine::new(config, state_tx, recorder).await?;
             engine.run().await?;
         }
         Commands::Backtest => {
@@ -352,14 +356,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Initialize Shared Resources
             // Create paper logger if in paper mode
-            let paper_logger = if *paper {
-                let (logger, task) = PaperTradeLogger::new(PathBuf::from("paper_trades.csv"));
-                tokio::spawn(task.run());
-                Some(logger)
+            let recorder: Option<Arc<dyn TradeRecorder>> = if *paper {
+                match CsvRecorder::new(PathBuf::from("paper_trades.csv")) {
+                    Ok(recorder) => Some(Arc::new(recorder)),
+                    Err(e) => {
+                        error!("Failed to initialize CSV recorder: {}", e);
+                        None
+                    }
+                }
             } else {
                 None
             };
-            let client = Arc::new(CoinbaseClient::new(env, paper_logger)?);
+
+            let client = Arc::new(CoinbaseClient::new(env, recorder)?);
             // Use CoinbaseWebSocketProvider which implements WebSocketProvider trait
             let ws_client = Box::new(CoinbaseWebSocketProvider::from_env()?);
 
@@ -449,9 +458,9 @@ impl SimpleTradingEngine {
     async fn new(
         config: SimpleTradingConfig,
         state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
-        paper_logger: Option<PaperTradeLogger>,
+        recorder: Option<Arc<dyn TradeRecorder>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let client = CoinbaseClient::new(config.env, paper_logger)?;
+        let client = CoinbaseClient::new(config.env, recorder)?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
         Ok(Self {
@@ -656,14 +665,19 @@ async fn run_dual_leg_trading(
     }
 
     // Create paper logger if in paper mode
-    let paper_logger = if _paper {
-        let (logger, task) = PaperTradeLogger::new(PathBuf::from("paper_trades.csv"));
-        tokio::spawn(task.run());
-        Some(logger)
+    let recorder: Option<Arc<dyn TradeRecorder>> = if _paper {
+        match CsvRecorder::new(PathBuf::from("paper_trades.csv")) {
+            Ok(recorder) => Some(Arc::new(recorder)),
+            Err(e) => {
+                error!("Failed to initialize CSV recorder: {}", e);
+                None
+            }
+        }
     } else {
         None
     };
-    let client = Arc::new(CoinbaseClient::new(env, paper_logger)?);
+
+    let client = Arc::new(CoinbaseClient::new(env, recorder)?);
 
     // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure
     // This prevents unbounded queuing and ensures recovery tasks are never dropped

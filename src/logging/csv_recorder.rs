@@ -12,63 +12,62 @@ use std::sync::{Arc, Mutex};
 /// CSV file recorder for development/testing
 ///
 /// Uses `spawn_blocking` to avoid blocking the async runtime during file I/O.
+/// CSV file recorder for development/testing
+///
+/// Uses a persistent `BufWriter` protected by a `Mutex` to ensure atomic writes
+/// and minimize syscall overhead.
 pub struct CsvRecorder {
-    file_path: Arc<PathBuf>,
-    /// Mutex to serialize writes and track header state
-    state: Arc<Mutex<CsvState>>,
-}
-
-struct CsvState {
-    header_written: bool,
+    /// Mutex protecting the buffered writer.
+    /// We use std::sync::Mutex because we run inside spawn_blocking.
+    writer: Arc<Mutex<std::io::BufWriter<std::fs::File>>>,
 }
 
 impl CsvRecorder {
     /// Create a new CSV recorder
-    pub fn new(file_path: PathBuf) -> Self {
-        Self {
-            file_path: Arc::new(file_path),
-            state: Arc::new(Mutex::new(CsvState {
-                header_written: false,
-            })),
+    pub fn new(file_path: PathBuf) -> Result<Self, std::io::Error> {
+        let file_exists = file_path.exists();
+        let file_empty = if file_exists {
+            std::fs::metadata(&file_path)?.len() == 0
+        } else {
+            true
+        };
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)?;
+
+        let mut writer = std::io::BufWriter::new(file);
+
+        // Write header if new file or empty
+        if file_empty {
+            writeln!(writer, "{}", TradeRecord::csv_header())?;
+            writer.flush()?;
         }
+
+        Ok(Self {
+            writer: Arc::new(Mutex::new(writer)),
+        })
     }
 }
 
 #[async_trait]
 impl TradeRecorder for CsvRecorder {
     async fn record(&self, trade: &TradeRecord) -> Result<(), RecordError> {
-        let file_path = Arc::clone(&self.file_path);
-        let state = Arc::clone(&self.state);
+        let writer = Arc::clone(&self.writer);
         let csv_line = trade.to_csv_line();
 
-        // Use spawn_blocking to avoid blocking the async runtime
+        // Use spawn_blocking to avoid blocking the async runtime with IO or mutex contention
         tokio::task::spawn_blocking(move || {
-            // Handle mutex poisoning gracefully
-            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = writer
+                .lock()
+                .map_err(|_| RecordError::Io(std::io::Error::other("CSV writer mutex poisoned")))?;
 
-            // Check if header needs to be written
-            if !guard.header_written {
-                let needs_header = !file_path.exists()
-                    || std::fs::metadata(&*file_path)
-                        .map(|m| m.len() == 0)
-                        .unwrap_or(true);
+            writeln!(guard, "{}", csv_line).map_err(RecordError::Io)?;
 
-                if needs_header {
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&*file_path)?;
-                    writeln!(file, "{}", TradeRecord::csv_header())?;
-                }
-                guard.header_written = true;
-            }
-
-            // Write the trade record
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&*file_path)?;
-            writeln!(file, "{}", csv_line)?;
+            // Flush periodically or rely on OS/buffer.
+            // For trading logs, we prefer safety over raw throughput, so we flush.
+            guard.flush().map_err(RecordError::Io)?;
 
             Ok::<(), RecordError>(())
         })
@@ -91,7 +90,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test_trades.csv");
 
-        let recorder = CsvRecorder::new(file_path.clone());
+        let recorder = CsvRecorder::new(file_path.clone()).unwrap();
 
         let trade = TradeRecord::now(
             "BTC-USD".to_string(),

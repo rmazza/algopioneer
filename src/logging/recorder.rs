@@ -91,6 +91,9 @@ impl TradeRecord {
     ///
     /// This is the typical constructor for live trading. For deterministic
     /// testing, use `with_timestamp()` instead.
+    #[deprecated(
+        note = "Use with_timestamp and inject time from a Clock trait for better determinism"
+    )]
     pub fn now(
         symbol: String,
         side: TradeSide,
@@ -161,12 +164,25 @@ impl MultiRecorder {
 #[async_trait]
 impl TradeRecorder for MultiRecorder {
     async fn record(&self, trade: &TradeRecord) -> Result<(), RecordError> {
+        let mut error_count = 0;
+        let mut last_error = None;
+
         for recorder in &self.recorders {
-            // Best-effort: log errors but don't fail the whole chain
             if let Err(e) = recorder.record(trade).await {
+                // Best-effort: log errors but don't fail the whole chain immediately
                 tracing::error!(error = %e, "Failed to record trade to backend");
+                last_error = Some(e);
+                error_count += 1;
             }
         }
+
+        // If all recorders failed, we should probably report it
+        if error_count > 0 && error_count == self.recorders.len() {
+            if let Some(e) = last_error {
+                return Err(e);
+            }
+        }
+
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 pub mod market_data_provider;
 pub mod websocket;
-use crate::logging::PaperTradeLogger;
+use crate::logging::{TradeRecord, TradeRecorder, TradeSide};
 use crate::sandbox;
 use cbadv::models::product::{Candle, ProductCandleQuery};
 use cbadv::time::Granularity;
@@ -23,8 +23,8 @@ pub struct CoinbaseClient {
     mode: AppEnv,
     // AS5: Rate limiter for API calls (10 req/sec for Coinbase Advanced Trade)
     rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
-    // Thread-safe paper trade logger (None if not in Paper mode)
-    paper_logger: Option<PaperTradeLogger>,
+    // Thread-safe trade recorder (None if not in Paper mode)
+    recorder: Option<Arc<dyn TradeRecorder>>,
 }
 
 impl CoinbaseClient {
@@ -35,14 +35,14 @@ impl CoinbaseClient {
     ///
     /// # Arguments
     /// * `env` - The environment mode (Live, Sandbox, or Paper)
-    /// * `paper_logger` - Optional logger for paper trades (required for Paper mode)
+    /// * `recorder` - Optional recorder for trades (required for Paper mode)
     ///
     /// # Errors
     /// Returns an error if COINBASE_API_KEY or COINBASE_API_SECRET environment
     /// variables are not set, or if the REST client fails to build.
     pub fn new(
         env: AppEnv,
-        paper_logger: Option<PaperTradeLogger>,
+        recorder: Option<Arc<dyn TradeRecorder>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Retrieve API Key and Secret from environment variables
         let api_key = std::env::var("COINBASE_API_KEY")
@@ -50,7 +50,7 @@ impl CoinbaseClient {
         let api_secret = std::env::var("COINBASE_API_SECRET")
             .map_err(|_| "COINBASE_API_SECRET must be set in .env file or environment")?;
 
-        Self::with_credentials(api_key, api_secret, env, paper_logger)
+        Self::with_credentials(api_key, api_secret, env, recorder)
     }
 
     /// Creates a new CoinbaseClient with explicit credentials (thread-safe).
@@ -63,12 +63,12 @@ impl CoinbaseClient {
     /// * `api_key` - The Coinbase API key
     /// * `api_secret` - The Coinbase API secret
     /// * `env` - The environment mode (Live, Sandbox, or Paper)
-    /// * `paper_logger` - Optional logger for paper trades
+    /// * `recorder` - Optional recorder for trades
     pub fn with_credentials(
         api_key: String,
         api_secret: String,
         env: AppEnv,
-        paper_logger: Option<PaperTradeLogger>,
+        recorder: Option<Arc<dyn TradeRecorder>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Build the REST client with explicit credentials
         let client: RestClient = RestClientBuilder::new()
@@ -89,7 +89,7 @@ impl CoinbaseClient {
             client,
             mode: env,
             rate_limiter,
-            paper_logger,
+            recorder,
         })
     }
 
@@ -147,11 +147,29 @@ impl CoinbaseClient {
                     "PAPER TRADE executed"
                 );
 
-                // Log to CSV via channel-based logger (thread-safe, no race conditions)
-                if let Some(ref logger) = self.paper_logger {
-                    logger.log_trade(product_id, side, size, price);
+                // Log using the new recorder trait
+                if let Some(ref recorder) = self.recorder {
+                    let trade_side = match side.to_lowercase().as_str() {
+                        "buy" => TradeSide::Buy,
+                        "sell" => TradeSide::Sell,
+                        _ => TradeSide::Buy, // Default or error handling
+                    };
+
+                    // Use deterministic timestamp constructor
+                    let record = TradeRecord::with_timestamp(
+                        product_id.to_string(),
+                        trade_side,
+                        size,
+                        price,
+                        true,
+                        Utc::now(), // Inject time here
+                    );
+
+                    if let Err(e) = recorder.record(&record).await {
+                        tracing::error!("Failed to record paper trade: {}", e);
+                    }
                 } else {
-                    tracing::warn!("Paper trading without logger - trades not being recorded");
+                    tracing::warn!("Paper trading without recorder - trades not being recorded");
                 }
                 Ok(())
             }

@@ -14,12 +14,12 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 25,
-    "entry_z_score": 2.0,
-    "exit_z_score": 0.2
+    "entry_z_score": "2",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
-    "spot_symbol": "DOT-USD",
-    "future_symbol": "FLOW-USD",
+    "spot_symbol": "FLOW-USD",
+    "future_symbol": "DOT-USD",
     "order_size": "100",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -32,12 +32,12 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 30,
-    "entry_z_score": 1.8,
-    "exit_z_score": 0.2
+    "entry_z_score": "1.8000000000000000444089209845",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
-    "spot_symbol": "SHIB-USD",
-    "future_symbol": "MKR-USD",
+    "spot_symbol": "MKR-USD",
+    "future_symbol": "SHIB-USD",
     "order_size": "100",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -50,8 +50,8 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 20,
-    "entry_z_score": 1.8,
-    "exit_z_score": 0.2
+    "entry_z_score": "1.8000000000000000444089209845",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
     "spot_symbol": "EOS-USD",
@@ -68,8 +68,8 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 30,
-    "entry_z_score": 2.0,
-    "exit_z_score": 0.2
+    "entry_z_score": "2",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
     "spot_symbol": "STX-USD",
@@ -86,12 +86,12 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 30,
-    "entry_z_score": 2.0,
-    "exit_z_score": 0.2
+    "entry_z_score": "2",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
-    "spot_symbol": "COMP-USD",
-    "future_symbol": "MKR-USD",
+    "spot_symbol": "MKR-USD",
+    "future_symbol": "COMP-USD",
     "order_size": "100",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -104,8 +104,8 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 30,
-    "entry_z_score": 1.8,
-    "exit_z_score": 0.2
+    "entry_z_score": "1.8000000000000000444089209845",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
     "spot_symbol": "DOGE-USD",
@@ -121,9 +121,9 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 25,
-    "entry_z_score": 1.2,
-    "exit_z_score": 0.2
+    "window_size": 30,
+    "entry_z_score": "1.3999999999999999111821580293",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
     "spot_symbol": "STX-USD",
@@ -140,8 +140,8 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 15,
-    "entry_z_score": 2.0,
-    "exit_z_score": 0.2
+    "entry_z_score": "2",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
     "spot_symbol": "MKR-USD",
@@ -158,8 +158,8 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 25,
-    "entry_z_score": 1.2,
-    "exit_z_score": 0.2
+    "entry_z_score": "1.1999999999999999555910790145",
+    "exit_z_score": "0.2000000000000000111022302462"
   },
   {
     "spot_symbol": "AAVE-USD",
@@ -176,7 +176,7 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 25,
-    "entry_z_score": 1.8,
-    "exit_z_score": 0.2
+    "entry_z_score": "1.8000000000000000444089209845",
+    "exit_z_score": "0.2000000000000000111022302462"
   }
 ]
