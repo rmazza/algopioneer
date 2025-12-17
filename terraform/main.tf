@@ -40,12 +40,24 @@ variable "instance_type" {
   description = "EC2 instance type. Override for production (e.g., t3.medium)."
 }
 
+variable "environment" {
+  type        = string
+  default     = "test"
+  description = "Environment name (test, prod). Used in resource naming and tags."
+
+  validation {
+    condition     = contains(["test", "prod"], var.environment)
+    error_message = "Environment must be either 'test' or 'prod'."
+  }
+}
+
 # --- Locals for Consistent Naming ---
 locals {
-  name_prefix = "algopioneer"
+  name_prefix = "algopioneer-${var.environment}"
   common_tags = {
-    Project   = "algopioneer"
-    ManagedBy = "terraform"
+    Project     = "algopioneer"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
@@ -198,8 +210,7 @@ resource "aws_instance" "bot" {
   EOF
 
   tags = merge(local.common_tags, {
-    Name        = "${local.name_prefix}-shadow"
-    Environment = "paper"
+    Name = "${local.name_prefix}-shadow"
   })
 
   # NOTE: For production, add:
@@ -222,4 +233,9 @@ output "instance_id" {
 output "ami_id" {
   description = "AMI ID used for the instance (for debugging)"
   value       = data.aws_ami.amazon_linux_2023.id
+}
+
+output "environment" {
+  description = "Current deployment environment"
+  value       = var.environment
 }

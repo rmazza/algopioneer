@@ -1,0 +1,17 @@
+# =============================================================================
+# Production Environment Configuration
+# =============================================================================
+# Usage:
+#   cp environments/prod.tfvars.example environments/prod.tfvars
+#   terraform init -backend-config=backends/prod.hcl  # If using S3 backend
+#   terraform apply -var-file=environments/prod.tfvars
+
+environment   = "prod"
+instance_type = "t3.medium"  # Larger instance for production workloads
+
+# Required: Provide your IP and key name
+my_ip    = "YOUR_IP/32"      # e.g., "203.0.113.10/32"
+key_name = "YOUR_KEY_NAME"   # e.g., "algopioneer-prod"
+
+# Production recommendations (uncomment in your local copy):
+# aws_region = "us-east-1"  # Consider proximity to exchange endpoints

@@ -1,0 +1,13 @@
+# =============================================================================
+# Test Environment Configuration
+# =============================================================================
+# Usage: 
+#   cp environments/test.tfvars.example environments/test.tfvars
+#   terraform apply -var-file=environments/test.tfvars
+
+environment   = "test"
+instance_type = "t3.micro"
+
+# Required: Provide your IP and key name
+my_ip    = "YOUR_IP/32"      # e.g., "203.0.113.10/32"
+key_name = "YOUR_KEY_NAME"   # e.g., "algopioneer-dev"
