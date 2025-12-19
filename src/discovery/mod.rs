@@ -20,6 +20,7 @@ pub mod config;
 pub mod error;
 pub mod filter;
 pub mod optimizer;
+pub mod sector;
 
 pub use config::DiscoveryConfig;
 pub use error::DiscoveryError;

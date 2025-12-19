@@ -1,138 +1,12 @@
 [
   {
-    "spot_symbol": "FLOW-USD",
-    "future_symbol": "VET-USD",
-    "order_size": "100",
+    "spot_symbol": "AAVE-USD",
+    "future_symbol": "XLM-USD",
+    "order_size": "500",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 25,
-    "entry_z_score": "2",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "FLOW-USD",
-    "future_symbol": "DOT-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 30,
-    "entry_z_score": "1.8000000000000000444089209845",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "MKR-USD",
-    "future_symbol": "SHIB-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 20,
-    "entry_z_score": "1.8000000000000000444089209845",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "EOS-USD",
-    "future_symbol": "AXS-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 30,
-    "entry_z_score": "2",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "STX-USD",
-    "future_symbol": "LDO-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 30,
-    "entry_z_score": "2",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "MKR-USD",
-    "future_symbol": "COMP-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 30,
-    "entry_z_score": "1.8000000000000000444089209845",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "DOGE-USD",
-    "future_symbol": "LDO-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 30,
-    "entry_z_score": "1.3999999999999999111821580293",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "STX-USD",
-    "future_symbol": "AXS-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
+    "min_profit_threshold": "7.0",
+    "stop_loss_threshold": "-15.0",
     "fee_tier": {
       "maker_fee_bps": "10.0",
       "taker_fee_bps": "20.0",
@@ -140,43 +14,25 @@
     },
     "throttle_interval_secs": 5,
     "window_size": 15,
-    "entry_z_score": "2",
-    "exit_z_score": "0.2000000000000000111022302462"
+    "entry_z_score": "2.0",
+    "exit_z_score": "0.2"
   },
   {
     "spot_symbol": "MKR-USD",
-    "future_symbol": "XRP-USD",
-    "order_size": "100",
+    "future_symbol": "COMP-USD",
+    "order_size": "500",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
+    "min_profit_threshold": "7.0",
+    "stop_loss_threshold": "-15.0",
     "fee_tier": {
       "maker_fee_bps": "10.0",
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 25,
-    "entry_z_score": "1.1999999999999999555910790145",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
-    "spot_symbol": "AAVE-USD",
-    "future_symbol": "XLM-USD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 25,
-    "entry_z_score": "1.8000000000000000444089209845",
-    "exit_z_score": "0.2000000000000000111022302462"
+    "window_size": 20,
+    "entry_z_score": "1.7",
+    "exit_z_score": "0.2"
   }
 ]

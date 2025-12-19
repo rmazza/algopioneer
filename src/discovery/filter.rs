@@ -32,6 +32,8 @@ pub struct CandidatePair {
     pub half_life_hours: f64,
     /// ADF test statistic (more negative = more stationary/cointegrated)
     pub adf_statistic: f64,
+    /// Whether both assets are in the same sector (e.g. DeFi-DeFi)
+    pub same_sector: bool,
 }
 
 /// Calculate Pearson correlation coefficient between two price series
@@ -339,12 +341,15 @@ pub fn filter_candidates_with_options(
                 continue;
             }
 
+            let same_sector = crate::discovery::sector::is_same_sector(sym_a, sym_b);
+
             info!(
                 pair = format!("{}-{}", sym_a, sym_b),
                 correlation = format!("{:.3}", correlation),
                 half_life = format!("{:.1}h", half_life),
                 adf = format!("{:.2}", adf_stat),
                 cointegrated = is_cointegrated,
+                same_sector = same_sector,
                 "Viable pair found"
             );
 
@@ -355,6 +360,7 @@ pub fn filter_candidates_with_options(
                 spread_std,
                 half_life_hours: half_life,
                 adf_statistic: adf_stat,
+                same_sector,
             });
         }
     }
