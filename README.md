@@ -21,6 +21,7 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 
 ### Research & Discovery
 - **Automated Pair Discovery**: Find cointegrated pairs with correlation and half-life filtering
+- **Sector-Based Filtering**: Classify tokens by sector (DeFi, L1, Meme, etc.) to find fundamentally-linked pairs
 - **Parameter Optimization**: Grid search backtesting with Sharpe ratio ranking
 - **Backtest Simulation**: Evaluate strategy performance on historical data
 
@@ -176,7 +177,8 @@ algopioneer/
 │   │   ├── config.rs           # DiscoveryConfig with serde support
 │   │   ├── error.rs            # Typed errors with thiserror
 │   │   ├── filter.rs           # Correlation + half-life filtering
-│   │   └── optimizer.rs        # Grid search parameter optimization
+│   │   ├── optimizer.rs        # Grid search parameter optimization
+│   │   └── sector.rs           # Token sector classification (DeFi, L1, etc.)
 │   ├── strategy/
 │   │   ├── dual_leg_trading.rs # Main arbitrage strategy with state machine
 │   │   ├── moving_average.rs   # Moving average crossover strategy
@@ -188,7 +190,9 @@ algopioneer/
 │   ├── health.rs               # HTTP health check endpoint (/health)
 │   ├── observability.rs        # OpenTelemetry tracing integration
 │   └── examples/
-│       └── optimize_pairs.rs   # Pairs optimization example
+│       ├── optimize_pairs.rs   # Pairs optimization example
+│       ├── check_sectors.rs    # Sector classification viewer
+│       └── debug_config.rs     # Config deserialization debug
 ├── tests/
 │   ├── integration_test.rs     # Integration tests with mock executor
 │   └── proptest_financial.rs   # Property-based tests for financial math
