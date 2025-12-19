@@ -76,6 +76,67 @@ pub const DEFAULT_CANDIDATES: &[&str] = &[
     "ZRX-USD",
 ];
 
+/// Classic US equity pairs for Alpaca trading (zero commission)
+/// These are historically cointegrated pairs within the same sector.
+pub const DEFAULT_EQUITY_CANDIDATES: &[&str] = &[
+    // Consumer Staples (highly cointegrated)
+    "KO",  // Coca-Cola
+    "PEP", // Pepsi
+    "PG",  // Procter & Gamble
+    "CL",  // Colgate-Palmolive
+    "KHC", // Kraft Heinz
+    "GIS", // General Mills
+    // Financials - Payment Networks
+    "V",   // Visa
+    "MA",  // Mastercard
+    "AXP", // American Express
+    // Financials - Big Banks
+    "JPM", // JP Morgan
+    "BAC", // Bank of America
+    "WFC", // Wells Fargo
+    "C",   // Citigroup
+    "GS",  // Goldman Sachs
+    "MS",  // Morgan Stanley
+    // Energy - Oil Majors
+    "XOM", // Exxon
+    "CVX", // Chevron
+    "COP", // ConocoPhillips
+    "OXY", // Occidental
+    // Tech - Cloud/Enterprise
+    "MSFT", // Microsoft
+    "ORCL", // Oracle
+    "CRM",  // Salesforce
+    "IBM",  // IBM
+    // Tech - Semiconductors
+    "INTC", // Intel
+    "AMD",  // AMD
+    "NVDA", // NVIDIA
+    "AVGO", // Broadcom
+    // Retail
+    "WMT",  // Walmart
+    "TGT",  // Target
+    "COST", // Costco
+    "HD",   // Home Depot
+    "LOW",  // Lowe's
+    // Autos
+    "F",  // Ford
+    "GM", // General Motors
+    // Airlines
+    "DAL", // Delta
+    "UAL", // United
+    "AAL", // American
+    "LUV", // Southwest
+    // Telecom
+    "T",  // AT&T
+    "VZ", // Verizon
+    // Healthcare
+    "JNJ",  // Johnson & Johnson
+    "PFE",  // Pfizer
+    "MRK",  // Merck
+    "ABBV", // AbbVie
+    "UNH",  // UnitedHealth
+];
+
 /// Configuration for the discovery pipeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryConfig {

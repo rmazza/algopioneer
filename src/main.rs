@@ -178,6 +178,9 @@ enum Commands {
         /// Path to pairs configuration file
         #[arg(long)]
         config: String,
+        /// Exchange to use: coinbase, alpaca
+        #[arg(long, default_value = "coinbase")]
+        exchange: String,
         /// Run in paper trading mode
         #[arg(long, default_value_t = false)]
         paper: bool,
@@ -330,9 +333,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Commands::Portfolio { config, paper } => {
+        Commands::Portfolio {
+            config,
+            exchange,
+            paper,
+        } => {
             use algopioneer::discovery::config::PortfolioPairConfig;
             use algopioneer::exchange::coinbase::CoinbaseWebSocketProvider;
+            use algopioneer::exchange::ExchangeId;
             use algopioneer::strategy::dual_leg_trading::{
                 DualLegLiveConfig, DualLegStrategyLive, DualLegStrategyType,
             };
@@ -341,7 +349,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::io::BufReader;
 
             let env = if *paper { AppEnv::Paper } else { AppEnv::Live };
+
+            // Parse exchange
+            let exchange_id: ExchangeId = exchange.parse().unwrap_or_else(|e| {
+                warn!(
+                    "Invalid exchange '{}': {}. Defaulting to Coinbase.",
+                    exchange, e
+                );
+                ExchangeId::Coinbase
+            });
+
             info!("--- AlgoPioneer: Portfolio Supervisor Mode ---");
+            info!("Exchange: {}, Paper: {}", exchange_id, paper);
             info!("Loading configuration from: {}", config);
 
             // Load Config
@@ -354,7 +373,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            // Initialize Shared Resources
+            // Handle exchange-specific initialization
+            match exchange_id {
+                ExchangeId::Alpaca => {
+                    // Alpaca requires WebSocket streaming which is not fully implemented
+                    // For now, inform user and provide guidance
+                    warn!("Alpaca exchange selected for Portfolio mode.");
+                    warn!("Note: Alpaca WebSocket streaming is not yet fully implemented.");
+                    warn!("For live trading, use 'dual-leg' command with Alpaca for single pairs,");
+                    warn!("or run the portfolio command with Coinbase for now.");
+
+                    // TODO: Implement AlpacaClient that wraps AlpacaExchangeClient
+                    // and implements the same interface as CoinbaseClient
+                    error!("Alpaca portfolio mode not yet available. Use --exchange coinbase");
+                    return Ok(());
+                }
+                ExchangeId::Kraken => {
+                    warn!("Kraken exchange not fully implemented. Defaulting to Coinbase.");
+                }
+                ExchangeId::Coinbase => {
+                    // Default path - continue with Coinbase
+                }
+            }
+
+            // Initialize Shared Resources (Coinbase path)
             // Create paper logger if in paper mode
             let recorder: Option<Arc<dyn TradeRecorder>> = if *paper {
                 match CsvRecorder::new(PathBuf::from("paper_trades.csv")) {
