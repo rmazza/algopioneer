@@ -49,6 +49,8 @@ uuid = { version = "1.10", features = ["v4"] }
 # Optional: AWS SDK for DynamoDB trade recording
 aws-sdk-dynamodb = { version = "1.51", optional = true }
 aws-config = { version = "1.5", optional = true }
+apca = "0.30.0"
+num-decimal = { version = "0.2.5", default-features = false, features = ["num-v04"] }
 
 [features]
 default = []
@@ -59,11 +61,6 @@ mockall = "0.13.1"
 # AS2: Property-based testing for financial math
 proptest = "1.4"
 tempfile = "3.23.0"
-
-# NP2: Removed duplicate dependencies (axum, tower, dashmap, opentelemetry, etc.)
-# These are already in [dependencies] and don't need to be repeated here
-
-[profile.release]
 # OW7: Use jemalloc for better memory allocation performance in long-running async apps
 
 # Jemalloc dependency for non-MSVC targets (Linux/macOS)

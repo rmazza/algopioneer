@@ -4,6 +4,7 @@
 //! New exchanges can be added by implementing the core traits without
 //! modifying business logic in strategies.
 
+pub mod alpaca;
 pub mod coinbase;
 pub mod kraken;
 
@@ -20,6 +21,7 @@ use tokio::sync::mpsc;
 pub use crate::types::{MarketData, OrderSide};
 
 // Re-export commonly used types
+pub use alpaca::AlpacaExchangeClient;
 pub use coinbase::CoinbaseExchangeClient;
 pub use kraken::KrakenExchangeClient;
 
@@ -135,6 +137,7 @@ impl ExchangeConfig {
         let (key_var, secret_var) = match exchange {
             ExchangeId::Coinbase => ("COINBASE_API_KEY", "COINBASE_API_SECRET"),
             ExchangeId::Kraken => ("KRAKEN_API_KEY", "KRAKEN_API_SECRET"),
+            ExchangeId::Alpaca => ("ALPACA_API_KEY", "ALPACA_API_SECRET"),
         };
 
         let api_key = std::env::var(key_var).map_err(|_| {
@@ -303,6 +306,7 @@ pub trait WebSocketProvider: Send + Sync {
 pub enum ExchangeId {
     Coinbase,
     Kraken,
+    Alpaca,
 }
 
 impl std::fmt::Display for ExchangeId {
@@ -310,6 +314,7 @@ impl std::fmt::Display for ExchangeId {
         match self {
             ExchangeId::Coinbase => write!(f, "coinbase"),
             ExchangeId::Kraken => write!(f, "kraken"),
+            ExchangeId::Alpaca => write!(f, "alpaca"),
         }
     }
 }
@@ -321,8 +326,9 @@ impl std::str::FromStr for ExchangeId {
         match s.to_lowercase().as_str() {
             "coinbase" => Ok(ExchangeId::Coinbase),
             "kraken" => Ok(ExchangeId::Kraken),
+            "alpaca" => Ok(ExchangeId::Alpaca),
             _ => Err(format!(
-                "Unknown exchange: {}. Valid options: coinbase, kraken",
+                "Unknown exchange: {}. Valid options: coinbase, kraken, alpaca",
                 s
             )),
         }
@@ -343,6 +349,10 @@ pub fn create_exchange_client(
             let client = kraken::KrakenExchangeClient::new(config)?;
             Ok(Arc::new(client))
         }
+        ExchangeId::Alpaca => {
+            let client = alpaca::AlpacaExchangeClient::new(config)?;
+            Ok(Arc::new(client))
+        }
     }
 }
 
@@ -358,6 +368,10 @@ pub fn create_websocket_provider(
         }
         ExchangeId::Kraken => {
             let provider = kraken::KrakenWebSocketProvider::new(config)?;
+            Ok(Box::new(provider))
+        }
+        ExchangeId::Alpaca => {
+            let provider = alpaca::AlpacaWebSocketProvider::new(config)?;
             Ok(Box::new(provider))
         }
     }
