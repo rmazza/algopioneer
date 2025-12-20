@@ -17,8 +17,10 @@
 //! let client = AlpacaExchangeClient::new(config)?;
 //! ```
 
+mod alpaca_client;
 mod client;
 mod websocket;
 
+pub use alpaca_client::AlpacaClient;
 pub use client::AlpacaExchangeClient;
 pub use websocket::AlpacaWebSocketProvider;

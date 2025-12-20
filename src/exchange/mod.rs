@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 pub use crate::types::{MarketData, OrderSide};
 
 // Re-export commonly used types
+pub use alpaca::AlpacaClient;
 pub use alpaca::AlpacaExchangeClient;
 pub use coinbase::CoinbaseExchangeClient;
 pub use kraken::KrakenExchangeClient;
