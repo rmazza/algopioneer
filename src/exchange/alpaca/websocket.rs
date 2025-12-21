@@ -7,24 +7,20 @@
 //! updates which are sufficient for equity trading (not latency-sensitive like crypto).
 
 use async_trait::async_trait;
-use chrono::Utc;
-use num_decimal::Num;
-use rust_decimal::Decimal;
-use std::sync::Once;
+
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use apca::data::v2::bars as alpaca_bars;
 use apca::{ApiInfo, Client};
 
+use crate::exchange::alpaca::utils;
 use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
+use crate::strategy::dual_leg_trading::{Clock, SystemClock};
 use crate::types::MarketData;
-
-/// Thread-safe initialization guard for environment variables.
-/// CB-1 FIX: Environment variables are set exactly once at startup.
-static WS_ENV_INIT: Once = Once::new();
 
 /// Alpaca data provider using polling for reliable market data
 ///
@@ -38,6 +34,8 @@ pub struct AlpacaWebSocketProvider {
     sandbox: bool,
     /// Polling interval in seconds
     poll_interval_secs: u64,
+    /// Injected clock for deterministic time
+    clock: Arc<dyn Clock>,
 }
 
 impl AlpacaWebSocketProvider {
@@ -52,6 +50,7 @@ impl AlpacaWebSocketProvider {
             api_secret: config.api_secret.clone(),
             sandbox: config.sandbox,
             poll_interval_secs: 5, // 5 second polling interval
+            clock: Arc::new(SystemClock),
         })
     }
 
@@ -68,29 +67,25 @@ impl AlpacaWebSocketProvider {
             api_secret,
             sandbox: true,
             poll_interval_secs: 5,
+            clock: Arc::new(SystemClock),
         })
     }
 
-    /// Convert internal symbol to Alpaca format
-    fn to_alpaca_symbol(symbol: &str) -> String {
-        symbol.replace('-', "")
-    }
-
-    /// CB-2 FIX: Convert num_decimal::Num to Decimal with proper error handling.
-    /// Returns ExchangeError instead of silently returning zero.
-    fn num_to_decimal(n: &Num) -> Result<Decimal, ExchangeError> {
-        let str_repr = n.to_string();
-        str_repr.parse::<Decimal>().map_err(|e| {
-            error!(
-                source_num = %n,
-                string_repr = %str_repr,
-                parse_error = %e,
-                "Price conversion failed - Num to Decimal"
-            );
-            ExchangeError::Other(format!(
-                "Num->Decimal conversion failed: '{}': {}",
-                str_repr, e
-            ))
+    /// Create with injected clock for testing
+    pub fn with_clock(
+        config: &ExchangeConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, ExchangeError> {
+        info!(
+            sandbox = config.sandbox,
+            "Creating Alpaca data provider with injected clock"
+        );
+        Ok(Self {
+            api_key: config.api_key.clone(),
+            api_secret: config.api_secret.clone(),
+            sandbox: config.sandbox,
+            poll_interval_secs: 5,
+            clock,
         })
     }
 }
@@ -104,7 +99,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
     ) -> Result<(), ExchangeError> {
         // Convert symbols to Alpaca format
         let alpaca_symbols: Vec<String> =
-            symbols.iter().map(|s| Self::to_alpaca_symbol(s)).collect();
+            symbols.iter().map(|s| utils::to_alpaca_symbol(s)).collect();
 
         info!(
             symbols = ?alpaca_symbols,
@@ -112,25 +107,17 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             "Starting Alpaca data provider (polling mode)"
         );
 
-        // CB-1 FIX: Set up API credentials exactly once using thread-safe guard.
-        // This prevents data races in multi-threaded async contexts.
-        let api_key = self.api_key.clone();
-        let api_secret = self.api_secret.clone();
-        // N-3 FIX: Use sandbox field to determine API endpoint
+        // SAFETY: We construct ApiInfo directly to avoid mutating global environment variables
         let base_url = if self.sandbox {
             "https://paper-api.alpaca.markets"
         } else {
             "https://api.alpaca.markets"
         };
-        WS_ENV_INIT.call_once(|| {
-            std::env::set_var("APCA_API_KEY_ID", &api_key);
-            std::env::set_var("APCA_API_SECRET_KEY", &api_secret);
-            std::env::set_var("APCA_API_BASE_URL", base_url);
-        });
 
-        let api_info = ApiInfo::from_env().map_err(|e| {
-            ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
-        })?;
+        let api_info =
+            ApiInfo::from_parts(base_url, &self.api_key, &self.api_secret).map_err(|e| {
+                ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
+            })?;
 
         let client = Client::new(api_info);
 
@@ -144,7 +131,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
             // Fetch latest bar for each symbol
             for (orig_symbol, alpaca_symbol) in symbols.iter().zip(alpaca_symbols.iter()) {
-                let now = Utc::now();
+                let now = self.clock.now();
                 let start = now - chrono::Duration::minutes(2);
 
                 let request = alpaca_bars::ListReqInit {
@@ -157,7 +144,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                     Ok(result) => {
                         if let Some(bar) = result.bars.first() {
                             // CB-2 FIX: Propagate conversion error instead of silent zero
-                            let price = match Self::num_to_decimal(&bar.close) {
+                            let price = match utils::num_to_decimal(&bar.close) {
                                 Ok(p) => p,
                                 Err(e) => {
                                     warn!(error = %e, symbol = %alpaca_symbol, "Skipping bar due to price conversion error");
@@ -215,12 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn test_symbol_conversion() {
-        assert_eq!(
-            AlpacaWebSocketProvider::to_alpaca_symbol("BTC-USD"),
-            "BTCUSD"
-        );
-        assert_eq!(AlpacaWebSocketProvider::to_alpaca_symbol("AAPL"), "AAPL");
-        assert_eq!(AlpacaWebSocketProvider::to_alpaca_symbol("KO"), "KO");
+    fn test_provider_with_clock() {
+        let config = ExchangeConfig {
+            api_key: "test".to_string(),
+            api_secret: "test".to_string(),
+            sandbox: true,
+        };
+        let clock = Arc::new(SystemClock);
+        let provider = AlpacaWebSocketProvider::with_clock(&config, clock);
+        assert!(provider.is_ok());
     }
 }

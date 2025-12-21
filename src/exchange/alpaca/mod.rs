@@ -19,6 +19,7 @@
 
 mod alpaca_client;
 mod client;
+pub mod utils;
 mod websocket;
 
 pub use alpaca_client::AlpacaClient;
