@@ -332,8 +332,11 @@ async fn optimize_pair(
             continue;
         }
 
-        for &z_entry in &grid.z_entries {
-            let mut manager = PairsManager::new(window, z_entry, grid.z_exit);
+        for z_entry_dec in &grid.z_entries {
+            // Convert Decimal to f64 for PairsManager API
+            let z_entry = z_entry_dec.to_f64().unwrap_or(2.0);
+            let z_exit = grid.z_exit.to_f64().unwrap_or(0.1);
+            let mut manager = PairsManager::new(window, z_entry, z_exit);
 
             let backtest_data = BacktestData {
                 timestamps: train_timestamps,
@@ -345,7 +348,7 @@ async fn optimize_pair(
                 taker_fee: config.taker_fee,
                 window,
                 z_entry,
-                z_exit: grid.z_exit,
+                z_exit,
             };
 
             let result = run_backtest(&mut manager, backtest_data, &backtest_config).await;

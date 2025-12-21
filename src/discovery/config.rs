@@ -298,9 +298,10 @@ pub struct GridSearchConfig {
     /// Window sizes to test
     pub windows: Vec<usize>,
     /// Z-score entry thresholds to test
-    pub z_entries: Vec<f64>,
+    /// MC-1 FIX: Using Decimal for consistency with PortfolioPairConfig
+    pub z_entries: Vec<Decimal>,
     /// Fixed Z-score exit threshold (mean reversion)
-    pub z_exit: f64,
+    pub z_exit: Decimal,
 }
 
 impl Default for GridSearchConfig {
@@ -309,8 +310,8 @@ impl Default for GridSearchConfig {
             // Use smaller windows that work with short lookbacks
             windows: vec![10, 15, 20, 25, 30],
             // Lower z-score thresholds to generate more signals
-            z_entries: vec![1.2, 1.4, 1.6, 1.8, 2.0],
-            z_exit: 0.2,
+            z_entries: vec![dec!(1.2), dec!(1.4), dec!(1.6), dec!(1.8), dec!(2.0)],
+            z_exit: dec!(0.2),
         }
     }
 }

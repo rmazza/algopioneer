@@ -35,7 +35,6 @@ static WS_ENV_INIT: Once = Once::new();
 pub struct AlpacaWebSocketProvider {
     api_key: String,
     api_secret: String,
-    #[allow(dead_code)]
     sandbox: bool,
     /// Polling interval in seconds
     poll_interval_secs: u64,
@@ -117,10 +116,16 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         // This prevents data races in multi-threaded async contexts.
         let api_key = self.api_key.clone();
         let api_secret = self.api_secret.clone();
+        // N-3 FIX: Use sandbox field to determine API endpoint
+        let base_url = if self.sandbox {
+            "https://paper-api.alpaca.markets"
+        } else {
+            "https://api.alpaca.markets"
+        };
         WS_ENV_INIT.call_once(|| {
             std::env::set_var("APCA_API_KEY_ID", &api_key);
             std::env::set_var("APCA_API_SECRET_KEY", &api_secret);
-            std::env::set_var("APCA_API_BASE_URL", "https://paper-api.alpaca.markets");
+            std::env::set_var("APCA_API_BASE_URL", base_url);
         });
 
         let api_info = ApiInfo::from_env().map_err(|e| {

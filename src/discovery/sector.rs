@@ -1,5 +1,6 @@
 use lazy_static::lazy_static;
 use std::collections::HashMap;
+use tracing::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Sector {
@@ -205,7 +206,17 @@ lazy_static! {
 pub fn get_sector(symbol: &str) -> Sector {
     // Strip "-USD" suffix if present (for crypto)
     let ticker = symbol.split('-').next().unwrap_or(symbol);
-    *TOKEN_SECTORS.get(ticker).unwrap_or(&Sector::Unknown)
+    match TOKEN_SECTORS.get(ticker) {
+        Some(sector) => *sector,
+        None => {
+            debug!(
+                symbol = %symbol,
+                ticker = %ticker,
+                "Unknown sector mapping - symbol not in classification table"
+            );
+            Sector::Unknown
+        }
+    }
 }
 
 /// Check if two symbols belong to the same sector
