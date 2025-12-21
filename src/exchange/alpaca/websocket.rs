@@ -10,16 +10,21 @@ use async_trait::async_trait;
 use chrono::Utc;
 use num_decimal::Num;
 use rust_decimal::Decimal;
+use std::sync::Once;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use apca::data::v2::bars as alpaca_bars;
 use apca::{ApiInfo, Client};
 
 use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
 use crate::types::MarketData;
+
+/// Thread-safe initialization guard for environment variables.
+/// CB-1 FIX: Environment variables are set exactly once at startup.
+static WS_ENV_INIT: Once = Once::new();
 
 /// Alpaca data provider using polling for reliable market data
 ///
@@ -72,9 +77,22 @@ impl AlpacaWebSocketProvider {
         symbol.replace('-', "")
     }
 
-    /// Convert num_decimal::Num to Decimal
-    fn num_to_decimal(n: &Num) -> Decimal {
-        n.to_string().parse::<Decimal>().unwrap_or(Decimal::ZERO)
+    /// CB-2 FIX: Convert num_decimal::Num to Decimal with proper error handling.
+    /// Returns ExchangeError instead of silently returning zero.
+    fn num_to_decimal(n: &Num) -> Result<Decimal, ExchangeError> {
+        let str_repr = n.to_string();
+        str_repr.parse::<Decimal>().map_err(|e| {
+            error!(
+                source_num = %n,
+                string_repr = %str_repr,
+                parse_error = %e,
+                "Price conversion failed - Num to Decimal"
+            );
+            ExchangeError::Other(format!(
+                "Num->Decimal conversion failed: '{}': {}",
+                str_repr, e
+            ))
+        })
     }
 }
 
@@ -95,10 +113,15 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             "Starting Alpaca data provider (polling mode)"
         );
 
-        // Set up API credentials
-        std::env::set_var("APCA_API_KEY_ID", &self.api_key);
-        std::env::set_var("APCA_API_SECRET_KEY", &self.api_secret);
-        std::env::set_var("APCA_API_BASE_URL", "https://paper-api.alpaca.markets");
+        // CB-1 FIX: Set up API credentials exactly once using thread-safe guard.
+        // This prevents data races in multi-threaded async contexts.
+        let api_key = self.api_key.clone();
+        let api_secret = self.api_secret.clone();
+        WS_ENV_INIT.call_once(|| {
+            std::env::set_var("APCA_API_KEY_ID", &api_key);
+            std::env::set_var("APCA_API_SECRET_KEY", &api_secret);
+            std::env::set_var("APCA_API_BASE_URL", "https://paper-api.alpaca.markets");
+        });
 
         let api_info = ApiInfo::from_env().map_err(|e| {
             ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
@@ -128,7 +151,14 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 match client.issue::<alpaca_bars::List>(&request).await {
                     Ok(result) => {
                         if let Some(bar) = result.bars.first() {
-                            let price = Self::num_to_decimal(&bar.close);
+                            // CB-2 FIX: Propagate conversion error instead of silent zero
+                            let price = match Self::num_to_decimal(&bar.close) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    warn!(error = %e, symbol = %alpaca_symbol, "Skipping bar due to price conversion error");
+                                    continue;
+                                }
+                            };
                             let timestamp = bar.time.timestamp_millis();
 
                             debug!(
