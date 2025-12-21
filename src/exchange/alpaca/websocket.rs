@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use apca::data::v2::bars as alpaca_bars;
 use apca::{ApiInfo, Client};

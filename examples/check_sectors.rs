@@ -15,8 +15,8 @@ fn main() {
     ];
 
     println!(
-        "{:<25} | {:<15} | {:<15} | {}",
-        "Pair", "Sector A", "Sector B", "Same?"
+        "{:<25} | {:<15} | {:<15} | Same?",
+        "Pair", "Sector A", "Sector B"
     );
     println!("{}", "-".repeat(70));
 

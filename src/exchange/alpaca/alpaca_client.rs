@@ -5,13 +5,14 @@
 
 use crate::coinbase::AppEnv;
 use crate::logging::{TradeRecord, TradeRecorder, TradeSide};
+use crate::strategy::dual_leg_trading::{Clock, SystemClock};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
 use num_decimal::Num;
 use rust_decimal::Decimal;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -24,6 +25,10 @@ use apca::{ApiInfo, Client, RequestError};
 use crate::exchange::{Candle, ExchangeConfig, ExchangeError, Executor, Granularity};
 use crate::types::OrderSide;
 
+/// Thread-safe initialization guard for environment variables.
+/// CB-1 FIX: Environment variables are set exactly once at startup.
+static ENV_INIT: Once = Once::new();
+
 /// Alpaca client with same interface as CoinbaseClient
 ///
 /// Provides order execution, position tracking, and candle fetching
@@ -33,6 +38,8 @@ pub struct AlpacaClient {
     mode: AppEnv,
     rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
     recorder: Option<Arc<dyn TradeRecorder>>,
+    /// CB-3 FIX: Injected clock for deterministic timestamps
+    clock: Arc<dyn Clock>,
 }
 
 impl AlpacaClient {
@@ -50,15 +57,28 @@ impl AlpacaClient {
         let api_secret = std::env::var("ALPACA_API_SECRET")
             .map_err(|_| "ALPACA_API_SECRET must be set in .env file or environment")?;
 
-        Self::with_credentials(api_key, api_secret, env, recorder)
+        Self::with_credentials_and_clock(api_key, api_secret, env, recorder, Arc::new(SystemClock))
     }
 
-    /// Create a new AlpacaClient with explicit credentials
+    /// Create a new AlpacaClient with explicit credentials (uses SystemClock)
     pub fn with_credentials(
         api_key: String,
         api_secret: String,
         env: AppEnv,
         recorder: Option<Arc<dyn TradeRecorder>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_credentials_and_clock(api_key, api_secret, env, recorder, Arc::new(SystemClock))
+    }
+
+    /// Create a new AlpacaClient with explicit credentials and clock (CB-3 FIX)
+    ///
+    /// This constructor allows injecting a custom clock for deterministic testing.
+    pub fn with_credentials_and_clock(
+        api_key: String,
+        api_secret: String,
+        env: AppEnv,
+        recorder: Option<Arc<dyn TradeRecorder>>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let is_paper = matches!(env, AppEnv::Paper | AppEnv::Sandbox);
 
@@ -73,22 +93,24 @@ impl AlpacaClient {
             "Initializing Alpaca client (paper={})", is_paper
         );
 
-        // Set environment variables for apca
-        std::env::set_var("APCA_API_KEY_ID", &api_key);
-        std::env::set_var("APCA_API_SECRET_KEY", &api_secret);
-        std::env::set_var("APCA_API_BASE_URL", base_url);
+        // CB-1 FIX: Set environment variables exactly once using thread-safe guard.
+        // This prevents data races in multi-threaded async contexts.
+        ENV_INIT.call_once(|| {
+            // SAFETY: This runs exactly once before any other code can observe the env vars.
+            // The Once guard ensures thread-safe initialization.
+            std::env::set_var("APCA_API_KEY_ID", &api_key);
+            std::env::set_var("APCA_API_SECRET_KEY", &api_secret);
+            std::env::set_var("APCA_API_BASE_URL", base_url);
+        });
 
         let api_info =
             ApiInfo::from_env().map_err(|e| format!("Failed to create Alpaca API info: {}", e))?;
 
         let client = Client::new(api_info);
 
-        // Rate limiter: Alpaca allows 200 requests per minute
-        const RATE_LIMIT_NZ: NonZeroU32 = match NonZeroU32::new(3) {
-            Some(v) => v,
-            None => panic!("RATE_LIMIT must be non-zero"),
-        };
-        let quota = Quota::per_second(RATE_LIMIT_NZ);
+        // CB-4 FIX: Use safe NonZeroU32 constant (now safe in const context since Rust 1.70+)
+        const RATE_LIMIT_PER_SECOND: NonZeroU32 = NonZeroU32::new(3).unwrap();
+        let quota = Quota::per_second(RATE_LIMIT_PER_SECOND);
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {
@@ -96,6 +118,7 @@ impl AlpacaClient {
             mode: env,
             rate_limiter,
             recorder,
+            clock,
         })
     }
 
@@ -146,20 +169,26 @@ impl AlpacaClient {
                     _ => alpaca_order::Side::Sell,
                 };
 
-                let qty_num = Self::decimal_to_num(size);
+                // CB-2 FIX: Propagate conversion errors instead of silent fallback
+                let qty_num = Self::decimal_to_num(size)
+                    .map_err(|e| format!("Failed to convert quantity: {}", e))?;
 
                 let request = match price {
-                    Some(limit_price) => alpaca_order::CreateReqInit {
-                        type_: alpaca_order::Type::Limit,
-                        limit_price: Some(Self::decimal_to_num(limit_price)),
-                        time_in_force: alpaca_order::TimeInForce::Day,
-                        ..Default::default()
+                    Some(limit_price) => {
+                        let limit_num = Self::decimal_to_num(limit_price)
+                            .map_err(|e| format!("Failed to convert limit price: {}", e))?;
+                        alpaca_order::CreateReqInit {
+                            type_: alpaca_order::Type::Limit,
+                            limit_price: Some(limit_num),
+                            time_in_force: alpaca_order::TimeInForce::Day,
+                            ..Default::default()
+                        }
+                        .init(
+                            &symbol,
+                            order_side,
+                            alpaca_order::Amount::quantity(qty_num),
+                        )
                     }
-                    .init(
-                        &symbol,
-                        order_side,
-                        alpaca_order::Amount::quantity(qty_num),
-                    ),
                     None => alpaca_order::CreateReqInit {
                         type_: alpaca_order::Type::Market,
                         time_in_force: alpaca_order::TimeInForce::Day,
@@ -207,13 +236,14 @@ impl AlpacaClient {
                         _ => TradeSide::Sell,
                     };
 
+                    // CB-3 FIX: Use injected clock for deterministic timestamps
                     let record = TradeRecord::with_timestamp(
                         product_id.to_string(),
                         trade_side,
                         size,
                         price,
                         true,
-                        Utc::now(),
+                        self.clock.now(),
                     );
 
                     if let Err(e) = recorder.record(&record).await {
@@ -244,7 +274,9 @@ impl AlpacaClient {
 
                 match client.issue::<alpaca_position::Get>(&sym).await {
                     Ok(position) => {
-                        let qty = Self::num_to_decimal(&position.quantity);
+                        // CB-2 FIX: Propagate conversion error
+                        let qty = Self::num_to_decimal(&position.quantity)
+                            .map_err(|e| format!("Failed to convert position quantity: {}", e))?;
                         debug!(symbol = %symbol, quantity = %qty, "Position found");
                         Ok(qty)
                     }
@@ -308,18 +340,27 @@ impl AlpacaClient {
             .await
             .map_err(|e| format!("Failed to fetch bars: {}", e))?;
 
-        let candles: Vec<Candle> = bars_result
+        // CB-2 FIX: Collect candles with proper error handling for conversions
+        let candles: Result<Vec<Candle>, Box<dyn std::error::Error>> = bars_result
             .bars
             .iter()
-            .map(|bar| Candle {
-                timestamp: bar.time,
-                open: Self::num_to_decimal(&bar.open),
-                high: Self::num_to_decimal(&bar.high),
-                low: Self::num_to_decimal(&bar.low),
-                close: Self::num_to_decimal(&bar.close),
-                volume: Decimal::from(bar.volume),
+            .map(|bar| {
+                Ok(Candle {
+                    timestamp: bar.time,
+                    open: Self::num_to_decimal(&bar.open)
+                        .map_err(|e| format!("Failed to convert open: {}", e))?,
+                    high: Self::num_to_decimal(&bar.high)
+                        .map_err(|e| format!("Failed to convert high: {}", e))?,
+                    low: Self::num_to_decimal(&bar.low)
+                        .map_err(|e| format!("Failed to convert low: {}", e))?,
+                    close: Self::num_to_decimal(&bar.close)
+                        .map_err(|e| format!("Failed to convert close: {}", e))?,
+                    volume: Decimal::from(bar.volume),
+                })
             })
             .collect();
+
+        let candles = candles?;
 
         info!(
             symbol = %symbol,
@@ -331,25 +372,58 @@ impl AlpacaClient {
     }
 
     // Helper functions
-    fn decimal_to_num(d: Decimal) -> Num {
-        d.to_string()
-            .parse::<Num>()
-            .unwrap_or_else(|_| Num::from(0))
+
+    /// CB-2 FIX: Convert Decimal to Num with proper error handling.
+    /// Returns ExchangeError instead of silently falling back to zero.
+    fn decimal_to_num(d: Decimal) -> Result<Num, ExchangeError> {
+        d.to_string().parse::<Num>().map_err(|e| {
+            tracing::error!(
+                decimal = %d,
+                error = %e,
+                "Failed to convert Decimal to Num"
+            );
+            ExchangeError::Other(format!("Decimal to Num conversion failed for {}: {}", d, e))
+        })
     }
 
-    fn num_to_decimal(n: &Num) -> Decimal {
-        n.to_string().parse::<Decimal>().unwrap_or(Decimal::ZERO)
+    /// CB-2 FIX: Convert Num to Decimal with proper error handling.
+    /// Returns ExchangeError instead of silently falling back to zero.
+    fn num_to_decimal(n: &Num) -> Result<Decimal, ExchangeError> {
+        n.to_string().parse::<Decimal>().map_err(|e| {
+            tracing::error!(
+                num = %n,
+                error = %e,
+                "Failed to convert Num to Decimal"
+            );
+            ExchangeError::Other(format!("Num to Decimal conversion failed for {}: {}", n, e))
+        })
     }
 
+    /// MC-4 FIX: Convert granularity with warning when falling back.
     fn granularity_to_timeframe(g: Granularity) -> alpaca_bars::TimeFrame {
         match g {
             Granularity::OneMinute => alpaca_bars::TimeFrame::OneMinute,
-            Granularity::FiveMinute => alpaca_bars::TimeFrame::OneMinute,
-            Granularity::FifteenMinute => alpaca_bars::TimeFrame::OneMinute,
-            Granularity::ThirtyMinute => alpaca_bars::TimeFrame::OneHour,
+            Granularity::FiveMinute => {
+                warn!(requested = ?g, actual = "1m", "Alpaca does not support 5m bars, using 1m");
+                alpaca_bars::TimeFrame::OneMinute
+            }
+            Granularity::FifteenMinute => {
+                warn!(requested = ?g, actual = "1m", "Alpaca does not support 15m bars, using 1m");
+                alpaca_bars::TimeFrame::OneMinute
+            }
+            Granularity::ThirtyMinute => {
+                warn!(requested = ?g, actual = "1h", "Alpaca does not support 30m bars, using 1h");
+                alpaca_bars::TimeFrame::OneHour
+            }
             Granularity::OneHour => alpaca_bars::TimeFrame::OneHour,
-            Granularity::TwoHour => alpaca_bars::TimeFrame::OneHour,
-            Granularity::SixHour => alpaca_bars::TimeFrame::OneHour,
+            Granularity::TwoHour => {
+                warn!(requested = ?g, actual = "1h", "Alpaca does not support 2h bars, using 1h");
+                alpaca_bars::TimeFrame::OneHour
+            }
+            Granularity::SixHour => {
+                warn!(requested = ?g, actual = "1h", "Alpaca does not support 6h bars, using 1h");
+                alpaca_bars::TimeFrame::OneHour
+            }
             Granularity::OneDay => alpaca_bars::TimeFrame::OneDay,
         }
     }
@@ -400,10 +474,10 @@ mod tests {
     #[test]
     fn test_decimal_num_conversion() {
         let d = Decimal::new(12345, 2);
-        let n = AlpacaClient::decimal_to_num(d);
+        let n = AlpacaClient::decimal_to_num(d).expect("conversion should succeed");
         assert_eq!(n.to_string(), "123.45");
 
-        let d2 = AlpacaClient::num_to_decimal(&n);
+        let d2 = AlpacaClient::num_to_decimal(&n).expect("conversion should succeed");
         assert_eq!(d2, d);
     }
 }
