@@ -286,3 +286,34 @@ impl CoinbaseClient {
         }
     }
 }
+
+// Implement DiscoveryDataSource for pair discovery pipeline
+use crate::discovery::DiscoveryDataSource;
+use async_trait::async_trait;
+
+#[async_trait]
+impl DiscoveryDataSource for CoinbaseClient {
+    async fn fetch_candles_hourly(
+        &mut self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<(i64, rust_decimal::Decimal)>, Box<dyn std::error::Error + Send + Sync>> {
+        let candles = self
+            .get_product_candles_paginated(symbol, &start, &end, Granularity::OneHour)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::new(std::io::Error::other(e.to_string()))
+            })?;
+
+        // Convert to (timestamp, close_price) tuples using Decimal
+        let result: Vec<(i64, rust_decimal::Decimal)> = candles
+            .iter()
+            .filter_map(|c| {
+                rust_decimal::Decimal::from_f64_retain(c.close).map(|price| (c.start as i64, price))
+            })
+            .collect();
+
+        Ok(result)
+    }
+}

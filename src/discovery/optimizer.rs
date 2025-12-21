@@ -6,21 +6,41 @@
 use super::config::{DiscoveryConfig, GridSearchConfig, PortfolioPairConfig};
 use super::error::DiscoveryError;
 use super::filter::{filter_candidates, CandidatePair};
-use crate::coinbase::CoinbaseClient;
 use crate::strategy::dual_leg_trading::Clock;
 use crate::strategy::dual_leg_trading::{
     DualLegConfig, EntryStrategy, MarketData, PairsManager, TransactionCostModel,
 };
 use crate::strategy::Signal;
 
-use cbadv::time::Granularity;
-use chrono::Duration as ChronoDuration;
+use async_trait::async_trait;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+
+/// Trait for data sources that can provide historical candle data for discovery.
+///
+/// This abstraction allows the discovery pipeline to work with any exchange
+/// (Coinbase, Alpaca, etc.) without coupling to a specific client implementation.
+///
+/// # DRY Principle
+/// Single trait allows unified discovery logic for crypto and equities.
+#[async_trait]
+pub trait DiscoveryDataSource: Send + Sync {
+    /// Fetch hourly candle close prices for a symbol.
+    ///
+    /// Returns a vector of (timestamp_seconds, close_price) tuples sorted by time.
+    async fn fetch_candles_hourly(
+        &mut self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<(i64, Decimal)>, Box<dyn Error + Send + Sync>>;
+}
 
 /// Result of parameter optimization for a single pair
 #[derive(Debug, Clone)]
@@ -499,12 +519,15 @@ async fn optimize_pair(
     })
 }
 
-/// Fetch historical candle data from Coinbase API
+/// Fetch historical candle data using any DiscoveryDataSource
 ///
 /// # CB-1 Fix
 /// Time is now injected via Clock trait for deterministic discovery and testing.
-async fn fetch_candle_data(
-    client: &mut CoinbaseClient,
+///
+/// # DRY Principle
+/// Works with any exchange that implements DiscoveryDataSource.
+async fn fetch_candle_data<D: DiscoveryDataSource>(
+    data_source: &mut D,
     symbols: &[String],
     lookback_days: u32,
     clock: &dyn Clock,
@@ -519,27 +542,20 @@ async fn fetch_candle_data(
         "Fetching candle data"
     );
 
-    let mut all_candles: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    let mut all_candles: HashMap<String, Vec<(i64, Decimal)>> = HashMap::new();
     let mut common_timestamps: Option<HashSet<i64>> = None;
 
     for symbol in symbols {
         info!(symbol = %symbol, "Fetching candles");
 
-        match client
-            .get_product_candles_paginated(symbol, &start, &end, Granularity::OneHour)
-            .await
-        {
+        match data_source.fetch_candles_hourly(symbol, start, end).await {
             Ok(candles) => {
                 if candles.is_empty() {
                     warn!(symbol = %symbol, "No candles received");
                     continue;
                 }
 
-                // Extract timestamps and close prices
-                let data: Vec<(i64, f64)> =
-                    candles.iter().map(|c| (c.start as i64, c.close)).collect();
-
-                let timestamps: HashSet<i64> = data.iter().map(|(t, _)| *t).collect();
+                let timestamps: HashSet<i64> = candles.iter().map(|(t, _)| *t).collect();
 
                 // Update common timestamps
                 common_timestamps = match common_timestamps {
@@ -547,20 +563,22 @@ async fn fetch_candle_data(
                     None => Some(timestamps),
                 };
 
-                all_candles.insert(symbol.clone(), data);
+                all_candles.insert(symbol.clone(), candles);
             }
             Err(e) => {
                 let err_str = e.to_string();
-                if err_str.contains("INVALID_ARGUMENT") || err_str.contains("ProductID is invalid")
+                if err_str.contains("INVALID_ARGUMENT")
+                    || err_str.contains("ProductID is invalid")
+                    || err_str.contains("not found")
                 {
-                    warn!(symbol = %symbol, "Invalid product ID, skipping");
+                    warn!(symbol = %symbol, error = %err_str, "Invalid symbol, skipping");
                     continue;
                 }
                 return Err(DiscoveryError::Api(e.to_string().into()));
             }
         }
 
-        // Rate limiting
+        // Rate limiting (exchange-agnostic)
         sleep(std::time::Duration::from_millis(200)).await;
     }
 
@@ -579,10 +597,10 @@ async fn fetch_candle_data(
     let mut aligned_prices: HashMap<String, Vec<Decimal>> = HashMap::new();
 
     for (symbol, data) in all_candles {
-        let price_map: HashMap<i64, f64> = data.into_iter().collect();
+        let price_map: HashMap<i64, Decimal> = data.into_iter().collect();
         let aligned: Vec<Decimal> = sorted_timestamps
             .iter()
-            .filter_map(|ts| price_map.get(ts).and_then(|p| Decimal::from_f64_retain(*p)))
+            .filter_map(|ts| price_map.get(ts).copied())
             .collect();
 
         if aligned.len() == sorted_timestamps.len() {
@@ -624,8 +642,11 @@ async fn fetch_candle_data(
 /// # CB-1 Fix
 /// Accepts a `Clock` trait for deterministic time handling, enabling reproducible
 /// discovery runs and proper integration testing.
-pub async fn discover_and_optimize(
-    client: &mut CoinbaseClient,
+///
+/// # DRY Principle
+/// Works with any exchange via the DiscoveryDataSource trait.
+pub async fn discover_and_optimize<D: DiscoveryDataSource>(
+    data_source: &mut D,
     config: &DiscoveryConfig,
     clock: &dyn Clock,
 ) -> Result<Vec<OptimizedPair>, DiscoveryError> {
@@ -639,7 +660,7 @@ pub async fn discover_and_optimize(
 
     // Step 1: Fetch data
     let (timestamps, prices_decimal) =
-        fetch_candle_data(client, &config.candidates, config.lookback_days, clock).await?;
+        fetch_candle_data(data_source, &config.candidates, config.lookback_days, clock).await?;
 
     // Step 2: Convert to f64 for correlation filtering
     let prices_f64: HashMap<String, Vec<f64>> = prices_decimal

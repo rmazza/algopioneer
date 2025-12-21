@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use algopioneer::discovery::{discover_and_optimize, DiscoveryConfig};
+//! use algopioneer::discovery::{discover_and_optimize, DiscoveryConfig, DiscoveryDataSource};
 //! use algopioneer::coinbase::CoinbaseClient;
 //! use algopioneer::strategy::dual_leg_trading::SystemClock;
 //!
@@ -25,4 +25,4 @@ pub mod sector;
 pub use config::DiscoveryConfig;
 pub use error::DiscoveryError;
 pub use filter::CandidatePair;
-pub use optimizer::{discover_and_optimize, OptimizedPair};
+pub use optimizer::{discover_and_optimize, DiscoveryDataSource, OptimizedPair};

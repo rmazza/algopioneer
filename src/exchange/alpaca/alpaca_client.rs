@@ -515,6 +515,61 @@ impl crate::exchange::ExchangeClient for AlpacaClient {
     }
 }
 
+// Implement DiscoveryDataSource for pair discovery pipeline
+use crate::discovery::DiscoveryDataSource;
+
+#[async_trait]
+impl DiscoveryDataSource for AlpacaClient {
+    async fn fetch_candles_hourly(
+        &mut self,
+        symbol: &str,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(i64, Decimal)>, Box<dyn std::error::Error + Send + Sync>> {
+        self.rate_limiter.until_ready().await;
+
+        let alpaca_symbol = utils::to_alpaca_symbol(symbol);
+        // Note: Alpaca free tier only supports daily bars for stocks
+        // Using OneDay instead of OneHour
+        let timeframe = alpaca_bars::TimeFrame::OneDay;
+
+        info!(
+            symbol = %alpaca_symbol,
+            start = %start,
+            end = %end,
+            timeframe = "1D",
+            "Fetching Alpaca candles for discovery"
+        );
+
+        let client = self.client.read().await;
+
+        // Use IEX feed for free tier access (SIP requires paid subscription)
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(10000),
+            feed: Some(apca::data::v2::Feed::IEX),
+            ..Default::default()
+        }
+        .init(alpaca_symbol.as_ref(), start, end, timeframe);
+
+        let bars_result = client
+            .issue::<alpaca_bars::List>(&request)
+            .await
+            .map_err(|e| format!("Failed to fetch bars: {}", e))?;
+
+        // Convert to (timestamp_seconds, close_price) tuples
+        let result: Result<Vec<(i64, Decimal)>, _> = bars_result
+            .bars
+            .iter()
+            .map(|bar| {
+                let close = utils::num_to_decimal(&bar.close)?;
+                Ok((bar.time.timestamp(), close))
+            })
+            .collect();
+
+        result.map_err(|e: ExchangeError| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

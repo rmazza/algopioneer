@@ -187,7 +187,10 @@ enum Commands {
     },
     /// Discover and optimize cointegrated trading pairs automatically
     DiscoverPairs {
-        /// Symbols to analyze (comma-separated, or "default" for top 20 pairs)
+        /// Exchange to use: "coinbase" (crypto) or "alpaca" (stocks)
+        #[arg(long, default_value = "coinbase")]
+        exchange: String,
+        /// Symbols to analyze (comma-separated, or "default" for built-in list)
         #[arg(long, default_value = "default")]
         symbols: String,
         /// Minimum Pearson correlation threshold
@@ -493,6 +496,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::DiscoverPairs {
+            exchange,
             symbols,
             min_correlation,
             max_half_life,
@@ -504,6 +508,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_cointegration,
         } => {
             run_discover_pairs(
+                exchange,
                 symbols,
                 *min_correlation,
                 *max_half_life,
@@ -916,6 +921,7 @@ async fn run_dual_leg_trading(
 /// Note: Many arguments are acceptable for CLI entry points as they map to CLI flags.
 #[allow(clippy::too_many_arguments)]
 async fn run_discover_pairs(
+    exchange_arg: &str,
     symbols_arg: &str,
     min_correlation: f64,
     max_half_life: f64,
@@ -926,14 +932,31 @@ async fn run_discover_pairs(
     initial_capital: f64,
     no_cointegration: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use algopioneer::discovery::config::{PortfolioPairConfig, DEFAULT_CANDIDATES};
+    use algopioneer::discovery::config::{
+        PortfolioPairConfig, DEFAULT_CANDIDATES, DEFAULT_EQUITY_CANDIDATES,
+    };
+    use algopioneer::exchange::alpaca::AlpacaClient;
 
-    info!("--- AlgoPioneer: Pair Discovery Pipeline ---");
+    let is_alpaca = exchange_arg.to_lowercase() == "alpaca";
 
-    // Parse symbols
+    if is_alpaca {
+        info!("--- AlgoPioneer: Pair Discovery Pipeline (Alpaca - Equities) ---");
+    } else {
+        info!("--- AlgoPioneer: Pair Discovery Pipeline (Coinbase - Crypto) ---");
+    }
+
+    // Parse symbols - use appropriate defaults based on exchange
     let candidates: Vec<String> = if symbols_arg == "default" {
-        info!("Using default top-20 candidate pairs");
-        DEFAULT_CANDIDATES.iter().map(|s| s.to_string()).collect()
+        if is_alpaca {
+            info!("Using default equity candidates (40+ stocks)");
+            DEFAULT_EQUITY_CANDIDATES
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            info!("Using default crypto candidates (50+ crypto pairs)");
+            DEFAULT_CANDIDATES.iter().map(|s| s.to_string()).collect()
+        }
     } else {
         symbols_arg
             .split(',')
@@ -942,6 +965,7 @@ async fn run_discover_pairs(
     };
 
     info!(
+        exchange = exchange_arg,
         candidates = candidates.len(),
         min_corr = min_correlation,
         max_hl = max_half_life,
@@ -952,25 +976,49 @@ async fn run_discover_pairs(
     );
 
     // Build discovery config
+    // CB-1/CB-2 FIX: Alpaca uses daily bars, so thresholds need adjustment:
+    // - half_life is in SAMPLES not hours, so 48.0 = 48 days with daily data
+    // - min_trades must be realistic for daily data (63 samples with 90-day lookback)
+    let (adjusted_max_half_life, adjusted_min_trades, adjusted_train_ratio) = if is_alpaca {
+        // Alpaca: daily bars
+        // max_half_life = 30 samples (30 days) is reasonable for daily mean reversion
+        // min_trades = 3 is achievable with 63 daily samples
+        // train_ratio = 0.8 to maximize training data
+        (30.0, 3u32, 0.8)
+    } else {
+        // Coinbase: hourly bars (default)
+        (max_half_life, 25, 0.7)
+    };
+
     let config = DiscoveryConfig {
         candidates,
         min_correlation,
-        max_half_life_hours: max_half_life,
+        max_half_life_hours: adjusted_max_half_life,
         min_sharpe_ratio: min_sharpe,
         lookback_days,
         max_pairs_output: max_pairs,
         initial_capital: Decimal::from_f64_retain(initial_capital).unwrap_or(dec!(10000)),
         require_cointegration: !no_cointegration,
+        min_trades: adjusted_min_trades,
+        train_ratio: adjusted_train_ratio,
         ..Default::default()
     };
 
-    // Initialize Coinbase client (discovery always uses Live mode, no paper trading)
-    let mut client = CoinbaseClient::new(AppEnv::Live, None)?;
-
-    // Run discovery pipeline
+    // Run discovery pipeline with appropriate client
     info!("Starting discovery and optimization...");
     let clock = SystemClock;
-    let results = match discover_and_optimize(&mut client, &config, &clock).await {
+
+    let results = if is_alpaca {
+        // Alpaca path - use AlpacaClient for equities
+        let mut client = AlpacaClient::new(AppEnv::Live, None)?;
+        discover_and_optimize(&mut client, &config, &clock).await
+    } else {
+        // Coinbase path - use CoinbaseClient for crypto
+        let mut client = CoinbaseClient::new(AppEnv::Live, None)?;
+        discover_and_optimize(&mut client, &config, &clock).await
+    };
+
+    let results = match results {
         Ok(pairs) => pairs,
         Err(e) => {
             error!("Discovery failed: {}", e);
