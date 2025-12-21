@@ -180,28 +180,33 @@ impl Position {
 
 /// Trading days per year for Sharpe annualization (unused, Sharpe calculated per-trade)
 /// Calculate annualized Sharpe ratio from trade returns
+///
+/// # Optimization (Zero-Allocation)
+/// Uses a two-pass approach over the slice to calculate mean and variance
+/// without allocating an intermediate `Vec<f64>`.
 fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
-    if returns.len() < 2 {
+    let n = returns.len();
+    if n < 2 {
         return 0.0;
     }
 
-    // Convert to f64 for statistical calculations (using ToPrimitive)
-    let float_returns: Vec<f64> = returns.iter().filter_map(|d| d.to_f64()).collect();
+    let n_f64 = n as f64;
 
-    if float_returns.len() < 2 {
-        return 0.0;
-    }
+    // Pass 1: Sum for mean (Zero allocation)
+    let sum: f64 = returns.iter().map(|d| d.to_f64().unwrap_or(0.0)).sum();
 
-    let n = float_returns.len() as f64;
-    let mean = float_returns.iter().sum::<f64>() / n;
+    let mean = sum / n_f64;
 
-    // Sample variance (n-1 denominator)
-    let variance = float_returns
+    // Pass 2: Sum for variance (Zero allocation)
+    let variance_sum: f64 = returns
         .iter()
-        .map(|r| (r - mean).powi(2))
-        .sum::<f64>()
-        / (n - 1.0);
+        .map(|d| {
+            let val = d.to_f64().unwrap_or(0.0);
+            (val - mean).powi(2)
+        })
+        .sum();
 
+    let variance = variance_sum / (n_f64 - 1.0);
     let std_dev = variance.sqrt();
 
     // Per-trade Sharpe ratio (not annualized) to avoid inflation on high-frequency trading
@@ -213,6 +218,11 @@ fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
 }
 
 /// Run backtest simulation for given parameters
+/// Run backtest simulation for given parameters
+///
+/// # Optimization (Zero-Allocation Hot Path)
+/// Allocates `MarketData` structs once outside the loop and reuses them.
+/// Pre-allocates `trade_returns` vector to minimize resizing.
 async fn run_backtest(
     manager: &mut PairsManager,
     data: BacktestData<'_>,
@@ -221,27 +231,36 @@ async fn run_backtest(
     let mut capital = config.initial_capital;
     let mut position: Option<Position> = None;
     let mut trades = 0u32;
-    let mut trade_returns: Vec<Decimal> = Vec::with_capacity(data.timestamps.len() / 10);
+    // Pre-allocate to approximate size (assuming ~1 trade per 50 ticks is generous)
+    let mut trade_returns: Vec<Decimal> = Vec::with_capacity(data.timestamps.len() / 50 + 1);
 
-    // Symbol strings are only used for logging in PairsManager.analyze()
-    // Since we're backtesting, we don't need real symbol names
+    // SAFETY: Hoist allocations out of the loop
+    // We reuse these structs for every tick to avoid 50M+ allocations per discovery run.
+    let mut leg1 = MarketData {
+        symbol: "A".to_string(), // Allocated once
+        instrument_id: None,
+        price: Decimal::ZERO,
+        timestamp: 0,
+    };
+
+    let mut leg2 = MarketData {
+        symbol: "B".to_string(), // Allocated once
+        instrument_id: None,
+        price: Decimal::ZERO,
+        timestamp: 0,
+    };
 
     for i in 0..data.timestamps.len() {
         let p_a = data.prices_a[i];
         let p_b = data.prices_b[i];
+        let ts = data.timestamps[i];
 
-        let leg1 = MarketData {
-            symbol: String::from("A"), // Static symbol for backtesting
-            price: p_a,
-            instrument_id: None,
-            timestamp: data.timestamps[i],
-        };
-        let leg2 = MarketData {
-            symbol: String::from("B"), // Static symbol for backtesting
-            price: p_b,
-            instrument_id: None,
-            timestamp: data.timestamps[i],
-        };
+        // Hot-path mutation: Zero allocation
+        leg1.price = p_a;
+        leg1.timestamp = ts;
+
+        leg2.price = p_b;
+        leg2.timestamp = ts;
 
         // Get signal from PairsManager
         let signal = manager.analyze(&leg1, &leg2).await;
