@@ -5,6 +5,7 @@
 
 use crate::coinbase::AppEnv;
 use crate::logging::{TradeRecord, TradeRecorder, TradeSide};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
 use num_decimal::Num;
@@ -20,7 +21,8 @@ use apca::api::v2::position as alpaca_position;
 use apca::data::v2::bars as alpaca_bars;
 use apca::{ApiInfo, Client, RequestError};
 
-use crate::exchange::{Candle, ExchangeConfig, Granularity};
+use crate::exchange::{Candle, ExchangeConfig, ExchangeError, Executor, Granularity};
+use crate::types::OrderSide;
 
 /// Alpaca client with same interface as CoinbaseClient
 ///
@@ -361,6 +363,33 @@ impl TryFrom<(ExchangeConfig, AppEnv, Option<Arc<dyn TradeRecorder>>)> for Alpac
         (config, env, recorder): (ExchangeConfig, AppEnv, Option<Arc<dyn TradeRecorder>>),
     ) -> Result<Self, Self::Error> {
         Self::with_credentials(config.api_key, config.api_secret, env, recorder)
+    }
+}
+
+// Implement Executor trait for strategy compatibility
+#[async_trait]
+impl Executor for AlpacaClient {
+    async fn execute_order(
+        &self,
+        symbol: &str,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<(), ExchangeError> {
+        let side_str = match side {
+            OrderSide::Buy => "buy",
+            OrderSide::Sell => "sell",
+        };
+
+        self.place_order(symbol, side_str, quantity, price)
+            .await
+            .map_err(|e| ExchangeError::Other(e.to_string()))
+    }
+
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+        AlpacaClient::get_position(self, symbol)
+            .await
+            .map_err(|e| ExchangeError::Other(e.to_string()))
     }
 }
 

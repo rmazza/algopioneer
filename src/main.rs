@@ -376,16 +376,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Handle exchange-specific initialization
             match exchange_id {
                 ExchangeId::Alpaca => {
-                    // Alpaca requires WebSocket streaming which is not fully implemented
-                    // For now, inform user and provide guidance
-                    warn!("Alpaca exchange selected for Portfolio mode.");
-                    warn!("Note: Alpaca WebSocket streaming is not yet fully implemented.");
-                    warn!("For live trading, use 'dual-leg' command with Alpaca for single pairs,");
-                    warn!("or run the portfolio command with Coinbase for now.");
+                    // Alpaca path - use AlpacaClient and AlpacaWebSocketProvider
+                    info!("Initializing Alpaca exchange for Portfolio mode");
 
-                    // TODO: Implement AlpacaClient that wraps AlpacaExchangeClient
-                    // and implements the same interface as CoinbaseClient
-                    error!("Alpaca portfolio mode not yet available. Use --exchange coinbase");
+                    use algopioneer::exchange::alpaca::{AlpacaClient, AlpacaWebSocketProvider};
+
+                    // Create paper logger if in paper mode
+                    let recorder: Option<Arc<dyn TradeRecorder>> = if *paper {
+                        match CsvRecorder::new(PathBuf::from("paper_trades_alpaca.csv")) {
+                            Ok(rec) => Some(Arc::new(rec)),
+                            Err(e) => {
+                                error!("Failed to initialize CSV recorder: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let alpaca_client = Arc::new(AlpacaClient::new(env, recorder)?);
+                    let ws_client = Box::new(AlpacaWebSocketProvider::from_env()?);
+
+                    // Initialize Supervisor
+                    let mut supervisor = StrategySupervisor::new();
+
+                    for (idx, json_config) in config_list.into_iter().enumerate() {
+                        let pair_id = format!(
+                            "{}-{}",
+                            json_config.dual_leg_config.spot_symbol,
+                            json_config.dual_leg_config.future_symbol
+                        );
+
+                        let live_config = DualLegLiveConfig {
+                            dual_leg_config: json_config.dual_leg_config,
+                            window_size: json_config.window_size,
+                            entry_z_score: json_config.entry_z_score.to_f64().unwrap_or(2.0),
+                            exit_z_score: json_config.exit_z_score.to_f64().unwrap_or(0.1),
+                            strategy_type: DualLegStrategyType::Pairs,
+                        };
+
+                        let strategy = DualLegStrategyLive::new(
+                            pair_id.clone(),
+                            live_config,
+                            alpaca_client.clone(),
+                        );
+
+                        supervisor.add_strategy(Box::new(strategy));
+                        info!("Added Alpaca strategy #{} ({})", idx + 1, pair_id);
+                    }
+
+                    // Run Supervisor (blocks until completion)
+                    if let Err(e) = supervisor.run(ws_client).await {
+                        error!("Alpaca supervisor terminated with error: {}", e);
+                    }
                     return Ok(());
                 }
                 ExchangeId::Kraken => {

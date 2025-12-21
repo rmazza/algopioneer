@@ -1,27 +1,39 @@
 //! Alpaca WebSocket Provider
 //!
-//! Real-time market data streaming from Alpaca.
+//! Market data provider for Alpaca using polling (reliable for equities).
 //!
-//! Note: The apca crate's streaming API is complex and may require
-//! additional configuration. This implementation provides a working
-//! stub that can be enhanced for production use.
+//! Note: The apca crate's streaming API has complex generics that are difficult
+//! to work with. This polling implementation provides reliable market data
+//! updates which are sufficient for equity trading (not latency-sensitive like crypto).
 
 use async_trait::async_trait;
+use chrono::Utc;
+use num_decimal::Num;
+use rust_decimal::Decimal;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::time::interval;
+use tracing::{debug, error, info, warn};
 
-use crate::exchange::{ExchangeConfig, ExchangeError, MarketData, WebSocketProvider};
+use apca::data::v2::bars as alpaca_bars;
+use apca::{ApiInfo, Client};
 
-/// Alpaca WebSocket provider for real-time quotes
+use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
+use crate::types::MarketData;
+
+/// Alpaca data provider using polling for reliable market data
 ///
-/// Streams level-1 quotes (bid/ask) for subscribed symbols using
-/// the IEX data feed.
+/// Uses 1-minute bar polling instead of WebSocket streaming.
+/// This is simpler and more reliable for equity trading.
 ///
-/// Note: Full streaming implementation requires Alpaca data subscription.
-/// This stub provides the interface for future implementation.
+/// Note: Stock data only available during market hours (9:30 AM - 4 PM ET)
 pub struct AlpacaWebSocketProvider {
+    api_key: String,
+    api_secret: String,
     #[allow(dead_code)]
-    config: ExchangeConfig,
+    sandbox: bool,
+    /// Polling interval in seconds
+    poll_interval_secs: u64,
 }
 
 impl AlpacaWebSocketProvider {
@@ -29,23 +41,40 @@ impl AlpacaWebSocketProvider {
     pub fn new(config: &ExchangeConfig) -> Result<Self, ExchangeError> {
         info!(
             sandbox = config.sandbox,
-            "Creating Alpaca WebSocket provider"
+            "Creating Alpaca data provider (polling mode)"
         );
         Ok(Self {
-            config: config.clone(),
+            api_key: config.api_key.clone(),
+            api_secret: config.api_secret.clone(),
+            sandbox: config.sandbox,
+            poll_interval_secs: 5, // 5 second polling interval
         })
     }
 
-    /// Convert Alpaca symbol to internal format
-    #[allow(dead_code)]
-    fn from_alpaca_symbol(symbol: &str) -> String {
-        // For crypto, insert dash before USD
-        if symbol.ends_with("USD") && symbol.len() > 3 {
-            let base = &symbol[..symbol.len() - 3];
-            format!("{}-USD", base)
-        } else {
-            symbol.to_string()
-        }
+    /// Create from environment variables
+    pub fn from_env() -> Result<Self, ExchangeError> {
+        let api_key = std::env::var("ALPACA_API_KEY")
+            .map_err(|_| ExchangeError::Configuration("ALPACA_API_KEY must be set".to_string()))?;
+        let api_secret = std::env::var("ALPACA_API_SECRET").map_err(|_| {
+            ExchangeError::Configuration("ALPACA_API_SECRET must be set".to_string())
+        })?;
+
+        Ok(Self {
+            api_key,
+            api_secret,
+            sandbox: true,
+            poll_interval_secs: 5,
+        })
+    }
+
+    /// Convert internal symbol to Alpaca format
+    fn to_alpaca_symbol(symbol: &str) -> String {
+        symbol.replace('-', "")
+    }
+
+    /// Convert num_decimal::Num to Decimal
+    fn num_to_decimal(n: &Num) -> Decimal {
+        n.to_string().parse::<Decimal>().unwrap_or(Decimal::ZERO)
     }
 }
 
@@ -54,37 +83,83 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
     async fn connect_and_subscribe(
         &self,
         symbols: Vec<String>,
-        _sender: mpsc::Sender<MarketData>,
+        sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError> {
         // Convert symbols to Alpaca format
-        let alpaca_symbols: Vec<String> = symbols.iter().map(|s| s.replace('-', "")).collect();
+        let alpaca_symbols: Vec<String> =
+            symbols.iter().map(|s| Self::to_alpaca_symbol(s)).collect();
 
         info!(
             symbols = ?alpaca_symbols,
-            "Alpaca WebSocket streaming requested"
+            poll_interval = self.poll_interval_secs,
+            "Starting Alpaca data provider (polling mode)"
         );
 
-        // TODO: Implement full streaming using apca crate
-        //
-        // The apca crate provides streaming via:
-        // - apca::data::v2::stream module
-        // - Requires setting up MessageStream and Subscription
-        // - Different feeds: IEX (free), SIP (paid subscription)
-        //
-        // For now, return error indicating not implemented
-        // Real-time data requires Alpaca market data subscription
+        // Set up API credentials
+        std::env::set_var("APCA_API_KEY_ID", &self.api_key);
+        std::env::set_var("APCA_API_SECRET_KEY", &self.api_secret);
+        std::env::set_var("APCA_API_BASE_URL", "https://paper-api.alpaca.markets");
 
-        warn!(
-            "Alpaca WebSocket streaming not yet fully implemented. \
-             Use polling via get_candles() for historical data, \
-             or implement streaming when you have an Alpaca data subscription."
-        );
+        let api_info = ApiInfo::from_env().map_err(|e| {
+            ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
+        })?;
 
-        Err(ExchangeError::Other(
-            "Alpaca WebSocket streaming requires additional implementation. \
-             See TODO in websocket.rs for guidance."
-                .to_string(),
-        ))
+        let client = Client::new(api_info);
+
+        // Polling loop
+        let mut poll_timer = interval(Duration::from_secs(self.poll_interval_secs));
+
+        info!("Alpaca polling started");
+
+        loop {
+            poll_timer.tick().await;
+
+            // Fetch latest bar for each symbol
+            for (orig_symbol, alpaca_symbol) in symbols.iter().zip(alpaca_symbols.iter()) {
+                let now = Utc::now();
+                let start = now - chrono::Duration::minutes(2);
+
+                let request = alpaca_bars::ListReqInit {
+                    limit: Some(1),
+                    ..Default::default()
+                }
+                .init(alpaca_symbol, start, now, alpaca_bars::TimeFrame::OneMinute);
+
+                match client.issue::<alpaca_bars::List>(&request).await {
+                    Ok(result) => {
+                        if let Some(bar) = result.bars.first() {
+                            let price = Self::num_to_decimal(&bar.close);
+                            let timestamp = bar.time.timestamp_millis();
+
+                            debug!(
+                                symbol = %alpaca_symbol,
+                                price = %price,
+                                "Price update"
+                            );
+
+                            let market_data = MarketData {
+                                symbol: orig_symbol.clone(),
+                                instrument_id: Some("alpaca".to_string()),
+                                price,
+                                timestamp,
+                            };
+
+                            if sender.send(market_data).await.is_err() {
+                                info!("Channel closed, stopping polling");
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            symbol = %alpaca_symbol,
+                            error = %e,
+                            "Failed to fetch bar (market may be closed)"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -106,10 +181,11 @@ mod tests {
 
     #[test]
     fn test_symbol_conversion() {
-        assert_eq!(AlpacaWebSocketProvider::from_alpaca_symbol("AAPL"), "AAPL");
         assert_eq!(
-            AlpacaWebSocketProvider::from_alpaca_symbol("BTCUSD"),
-            "BTC-USD"
+            AlpacaWebSocketProvider::to_alpaca_symbol("BTC-USD"),
+            "BTCUSD"
         );
+        assert_eq!(AlpacaWebSocketProvider::to_alpaca_symbol("AAPL"), "AAPL");
+        assert_eq!(AlpacaWebSocketProvider::to_alpaca_symbol("KO"), "KO");
     }
 }
