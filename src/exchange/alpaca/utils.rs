@@ -4,28 +4,27 @@ use crate::exchange::{ExchangeError, Granularity};
 use apca::data::v2::bars as alpaca_bars;
 use num_decimal::Num;
 use rust_decimal::Decimal;
+use std::borrow::Cow;
 use tracing::{error, warn};
 
-/// Convert internal symbol format to Alpaca format
+/// Convert internal symbol format to Alpaca format (zero-alloc when possible)
 ///
-/// Examples:
-/// - "AAPL" -> "AAPL" (no change for stocks)
-/// - "BTC-USD" -> "BTCUSD" (crypto format)
-pub fn to_alpaca_symbol(symbol: &str) -> String {
-    // Remove dashes for Alpaca format
-    symbol.replace('-', "")
-}
-
-/// Convert Alpaca symbol back to internal format
-#[allow(dead_code)]
-pub fn from_alpaca_symbol(symbol: &str) -> String {
-    // For crypto, insert dash before USD
-    if symbol.ends_with("USD") && symbol.len() > 3 {
-        let base = &symbol[..symbol.len() - 3];
-        format!("{}-USD", base)
-    } else {
-        symbol.to_string()
+/// # Performance (N-2 FIX)
+/// Uses `Cow<str>` to avoid allocation when symbol has no dash.
+/// For equities (most Alpaca usage), this is the common case.
+///
+/// # Examples
+/// - `"AAPL"` -> `Cow::Borrowed("AAPL")` (zero alloc)
+/// - `"BTC-USD"` -> `Cow::Owned("BTCUSD")` (one alloc)
+#[inline]
+pub fn to_alpaca_symbol(symbol: &str) -> Cow<'_, str> {
+    // Fast path: no dash = no allocation needed
+    if !symbol.contains('-') {
+        return Cow::Borrowed(symbol);
     }
+
+    // Slow path: preallocate exact capacity
+    Cow::Owned(symbol.replace('-', ""))
 }
 
 /// Convert Decimal to num_decimal::Num with error handling.
@@ -91,10 +90,35 @@ pub fn granularity_to_timeframe(g: Granularity) -> alpaca_bars::TimeFrame {
 mod tests {
     use super::*;
 
+    /// Test-only: Convert Alpaca symbol back to internal format
+    fn from_alpaca_symbol(symbol: &str) -> String {
+        // For crypto, insert dash before USD
+        if symbol.ends_with("USD") && symbol.len() > 3 {
+            let base = &symbol[..symbol.len() - 3];
+            format!("{}-USD", base)
+        } else {
+            symbol.to_string()
+        }
+    }
+
     #[test]
-    fn test_symbol_conversion() {
-        assert_eq!(to_alpaca_symbol("AAPL"), "AAPL");
-        assert_eq!(to_alpaca_symbol("BTC-USD"), "BTCUSD");
+    fn test_symbol_zero_alloc() {
+        // Test that equities return borrowed (zero alloc)
+        let cow = to_alpaca_symbol("AAPL");
+        assert!(matches!(cow, Cow::Borrowed(_)));
+        assert_eq!(cow.as_ref(), "AAPL");
+    }
+
+    #[test]
+    fn test_symbol_with_dash() {
+        // Test that crypto symbols allocate
+        let cow = to_alpaca_symbol("BTC-USD");
+        assert!(matches!(cow, Cow::Owned(_)));
+        assert_eq!(cow.as_ref(), "BTCUSD");
+    }
+
+    #[test]
+    fn test_symbol_roundtrip() {
         assert_eq!(from_alpaca_symbol("BTCUSD"), "BTC-USD");
         assert_eq!(from_alpaca_symbol("AAPL"), "AAPL");
     }

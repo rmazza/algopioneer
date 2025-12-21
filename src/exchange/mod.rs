@@ -20,9 +20,8 @@ use tokio::sync::mpsc;
 // Re-export shared types for convenience
 pub use crate::types::{MarketData, OrderSide};
 
-// Re-export commonly used types
+// Re-export commonly used types (MC-3 FIX: single unified Alpaca client)
 pub use alpaca::AlpacaClient;
-pub use alpaca::AlpacaExchangeClient;
 pub use coinbase::CoinbaseExchangeClient;
 pub use kraken::KrakenExchangeClient;
 
@@ -351,7 +350,8 @@ pub fn create_exchange_client(
             Ok(Arc::new(client))
         }
         ExchangeId::Alpaca => {
-            let client = alpaca::AlpacaExchangeClient::new(config)?;
+            // MC-3 FIX: Use unified AlpacaClient
+            let client = alpaca::AlpacaClient::from_config(config)?;
             Ok(Arc::new(client))
         }
     }

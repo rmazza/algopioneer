@@ -11,17 +11,16 @@
 //! ## Usage
 //! ```ignore
 //! use algopioneer::exchange::{ExchangeConfig, ExchangeId};
-//! use algopioneer::exchange::alpaca::AlpacaExchangeClient;
+//! use algopioneer::exchange::alpaca::AlpacaClient;
 //!
 //! let config = ExchangeConfig::from_env(ExchangeId::Alpaca)?;
-//! let client = AlpacaExchangeClient::new(config)?;
+//! let client = AlpacaClient::from_config(config)?;
 //! ```
 
 mod alpaca_client;
-mod client;
 pub mod utils;
 mod websocket;
 
+// MC-3 FIX: Single unified client export (DRY principle)
 pub use alpaca_client::AlpacaClient;
-pub use client::AlpacaExchangeClient;
 pub use websocket::AlpacaWebSocketProvider;

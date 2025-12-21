@@ -95,8 +95,11 @@ impl AlpacaClient {
 
         let client = Client::new(api_info);
 
-        // CB-4 FIX: Use safe NonZeroU32 constant (now safe in const context since Rust 1.70+)
-        const RATE_LIMIT_PER_SECOND: NonZeroU32 = NonZeroU32::new(3).unwrap();
+        // MC-1 FIX: Use const assertion with descriptive panic message
+        const RATE_LIMIT_PER_SECOND: NonZeroU32 = match NonZeroU32::new(3) {
+            Some(n) => n,
+            None => panic!("Rate limit must be non-zero"),
+        };
         let quota = Quota::per_second(RATE_LIMIT_PER_SECOND);
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
@@ -107,6 +110,20 @@ impl AlpacaClient {
             recorder,
             clock,
         })
+    }
+
+    /// Create from ExchangeConfig (for factory/DI pattern - MC-3 FIX)
+    ///
+    /// Used by `create_exchange_client` factory function.
+    pub fn from_config(config: ExchangeConfig) -> Result<Self, ExchangeError> {
+        let env = if config.sandbox {
+            AppEnv::Paper
+        } else {
+            AppEnv::Live
+        };
+
+        Self::with_credentials(config.api_key, config.api_secret, env, None)
+            .map_err(|e| ExchangeError::Configuration(e.to_string()))
     }
 
     /// Test connection to Alpaca API
@@ -170,7 +187,7 @@ impl AlpacaClient {
                             ..Default::default()
                         }
                         .init(
-                            &symbol,
+                            symbol.as_ref(),
                             order_side,
                             alpaca_order::Amount::quantity(qty_num),
                         )
@@ -181,7 +198,7 @@ impl AlpacaClient {
                         ..Default::default()
                     }
                     .init(
-                        &symbol,
+                        symbol.as_ref(),
                         order_side,
                         alpaca_order::Amount::quantity(qty_num),
                     ),
@@ -255,7 +272,7 @@ impl AlpacaClient {
             AppEnv::Live => {
                 let symbol = utils::to_alpaca_symbol(product_id);
                 let client = self.client.read().await;
-                let sym = asset::Symbol::Sym(symbol.clone());
+                let sym = asset::Symbol::Sym(symbol.clone().into_owned());
 
                 match client.issue::<alpaca_position::Get>(&sym).await {
                     Ok(position) => {
@@ -318,7 +335,7 @@ impl AlpacaClient {
             limit: Some(10000),
             ..Default::default()
         }
-        .init(&symbol, *start, *end, timeframe);
+        .init(symbol.as_ref(), *start, *end, timeframe);
 
         let bars_result = client
             .issue::<alpaca_bars::List>(&request)
@@ -392,6 +409,109 @@ impl Executor for AlpacaClient {
         AlpacaClient::get_position(self, symbol)
             .await
             .map_err(|e| ExchangeError::Other(e.to_string()))
+    }
+}
+
+// MC-3 FIX: Implement ExchangeClient trait for unified client (DRY principle)
+// This consolidates functionality from the deleted AlpacaExchangeClient.
+#[async_trait]
+impl crate::exchange::ExchangeClient for AlpacaClient {
+    async fn test_connection(&mut self) -> Result<(), ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        let client = self.client.read().await;
+        let account = client
+            .issue::<apca::api::v2::account::Get>(&())
+            .await
+            .map_err(|e| ExchangeError::Network(format!("Failed to connect to Alpaca: {}", e)))?;
+
+        info!(
+            account_id = %account.id.as_hyphenated(),
+            status = ?account.status,
+            buying_power = %account.buying_power,
+            "Connected to Alpaca"
+        );
+
+        Ok(())
+    }
+
+    async fn get_candles(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        self.get_candles_paginated(product_id, start, end, granularity)
+            .await
+    }
+
+    async fn get_candles_paginated(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        let symbol = utils::to_alpaca_symbol(product_id);
+        let timeframe = utils::granularity_to_timeframe(granularity);
+
+        info!(
+            symbol = %symbol,
+            start = %start,
+            end = %end,
+            timeframe = ?timeframe,
+            "Fetching Alpaca bars"
+        );
+
+        let client = self.client.read().await;
+
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(10000),
+            ..Default::default()
+        }
+        .init(symbol.as_ref(), *start, *end, timeframe);
+
+        let bars_result = client
+            .issue::<alpaca_bars::List>(&request)
+            .await
+            .map_err(|e| ExchangeError::Other(format!("Failed to fetch bars: {}", e)))?;
+
+        // Collect candles with proper error handling for conversions
+        let candles: Result<Vec<Candle>, ExchangeError> = bars_result
+            .bars
+            .iter()
+            .map(|bar| {
+                Ok(Candle {
+                    timestamp: bar.time,
+                    open: utils::num_to_decimal(&bar.open)?,
+                    high: utils::num_to_decimal(&bar.high)?,
+                    low: utils::num_to_decimal(&bar.low)?,
+                    close: utils::num_to_decimal(&bar.close)?,
+                    volume: Decimal::from(bar.volume),
+                })
+            })
+            .collect();
+
+        let candles = candles?;
+
+        info!(
+            symbol = %symbol,
+            bars_count = candles.len(),
+            "Fetched Alpaca bars"
+        );
+
+        Ok(candles)
+    }
+
+    fn normalize_symbol(&self, symbol: &str) -> String {
+        utils::to_alpaca_symbol(symbol).into_owned()
+    }
+
+    fn exchange_id(&self) -> crate::exchange::ExchangeId {
+        crate::exchange::ExchangeId::Alpaca
     }
 }
 

@@ -62,10 +62,15 @@ impl AlpacaWebSocketProvider {
             ExchangeError::Configuration("ALPACA_API_SECRET must be set".to_string())
         })?;
 
+        // N-3 FIX: Read sandbox from env, default to paper (true) for safety
+        let sandbox = std::env::var("ALPACA_SANDBOX")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+
         Ok(Self {
             api_key,
             api_secret,
-            sandbox: true,
+            sandbox,
             poll_interval_secs: 5,
             clock: Arc::new(SystemClock),
         })
@@ -97,9 +102,11 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError> {
-        // Convert symbols to Alpaca format
-        let alpaca_symbols: Vec<String> =
-            symbols.iter().map(|s| utils::to_alpaca_symbol(s)).collect();
+        // Convert symbols to Alpaca format (into_owned() for Cow -> String)
+        let alpaca_symbols: Vec<String> = symbols
+            .iter()
+            .map(|s| utils::to_alpaca_symbol(s).into_owned())
+            .collect();
 
         info!(
             symbols = ?alpaca_symbols,
