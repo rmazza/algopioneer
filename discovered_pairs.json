@@ -1,7 +1,7 @@
 [
   {
-    "spot_symbol": "AXP",
-    "future_symbol": "F",
+    "spot_symbol": "F",
+    "future_symbol": "AXP",
     "order_size": "100",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,

@@ -12,7 +12,7 @@ use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
 use rust_decimal::Decimal;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+
 use tracing::{debug, error, info, warn};
 
 use apca::api::v2::asset;
@@ -30,7 +30,7 @@ use crate::types::OrderSide;
 /// Provides order execution, position tracking, and candle fetching
 /// with paper trading support and rate limiting.
 pub struct AlpacaClient {
-    client: Arc<RwLock<Client>>,
+    client: Arc<Client>,
     mode: AppEnv,
     rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
     recorder: Option<Arc<dyn TradeRecorder>>,
@@ -95,16 +95,12 @@ impl AlpacaClient {
 
         let client = Client::new(api_info);
 
-        // MC-1 FIX: Use const assertion with descriptive panic message
-        const RATE_LIMIT_PER_SECOND: NonZeroU32 = match NonZeroU32::new(3) {
-            Some(n) => n,
-            None => panic!("Rate limit must be non-zero"),
-        };
-        let quota = Quota::per_second(RATE_LIMIT_PER_SECOND);
+        // MC-1 FIX: Safe unwrapping of hardcoded constant
+        let quota = Quota::per_second(NonZeroU32::new(3).expect("Rate limit 3 is non-zero"));
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {
-            client: Arc::new(RwLock::new(client)),
+            client: Arc::new(client),
             mode: env,
             rate_limiter,
             recorder,
@@ -127,23 +123,12 @@ impl AlpacaClient {
     }
 
     /// Test connection to Alpaca API
+    ///
+    /// MC-3 FIX: Uses the ExchangeClient trait implementation to avoid duplication
     pub async fn test_connection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.rate_limiter.until_ready().await;
-
-        let client = self.client.read().await;
-        let account = client
-            .issue::<apca::api::v2::account::Get>(&())
+        <Self as crate::exchange::ExchangeClient>::test_connection(self)
             .await
-            .map_err(|e| format!("Failed to connect to Alpaca: {}", e))?;
-
-        info!(
-            account_id = %account.id.as_hyphenated(),
-            status = ?account.status,
-            buying_power = %account.buying_power,
-            "Connected to Alpaca"
-        );
-
-        Ok(())
+            .map_err(|e| e.to_string().into())
     }
 
     /// Place an order on Alpaca
@@ -204,7 +189,7 @@ impl AlpacaClient {
                     ),
                 };
 
-                let client = self.client.read().await;
+                let client = &self.client;
                 let order = client
                     .issue::<alpaca_order::Create>(&request)
                     .await
@@ -271,7 +256,7 @@ impl AlpacaClient {
         match self.mode {
             AppEnv::Live => {
                 let symbol = utils::to_alpaca_symbol(product_id);
-                let client = self.client.read().await;
+                let client = &self.client;
                 let sym = asset::Symbol::Sym(symbol.clone().into_owned());
 
                 match client.issue::<alpaca_position::Get>(&sym).await {
@@ -297,6 +282,8 @@ impl AlpacaClient {
     }
 
     /// Get candles for a symbol
+    ///
+    /// MC-1 FIX: Delegates to ExchangeClient trait to avoid code duplication
     pub async fn get_product_candles(
         &mut self,
         product_id: &str,
@@ -304,11 +291,20 @@ impl AlpacaClient {
         end: &DateTime<Utc>,
         granularity: Granularity,
     ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
-        self.get_product_candles_paginated(product_id, start, end, granularity)
-            .await
+        <Self as crate::exchange::ExchangeClient>::get_candles(
+            self,
+            product_id,
+            start,
+            end,
+            granularity,
+        )
+        .await
+        .map_err(|e| e.to_string().into())
     }
 
     /// Get candles with pagination
+    ///
+    /// MC-1 FIX: Delegates to ExchangeClient trait to avoid code duplication
     pub async fn get_product_candles_paginated(
         &mut self,
         product_id: &str,
@@ -316,61 +312,15 @@ impl AlpacaClient {
         end: &DateTime<Utc>,
         granularity: Granularity,
     ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
-        self.rate_limiter.until_ready().await;
-
-        let symbol = utils::to_alpaca_symbol(product_id);
-        let timeframe = utils::granularity_to_timeframe(granularity);
-
-        info!(
-            symbol = %symbol,
-            start = %start,
-            end = %end,
-            timeframe = ?timeframe,
-            "Fetching Alpaca bars"
-        );
-
-        let client = self.client.read().await;
-
-        let request = alpaca_bars::ListReqInit {
-            limit: Some(10000),
-            ..Default::default()
-        }
-        .init(symbol.as_ref(), *start, *end, timeframe);
-
-        let bars_result = client
-            .issue::<alpaca_bars::List>(&request)
-            .await
-            .map_err(|e| format!("Failed to fetch bars: {}", e))?;
-
-        // CB-2 FIX: Collect candles with proper error handling for conversions
-        let candles: Result<Vec<Candle>, Box<dyn std::error::Error>> = bars_result
-            .bars
-            .iter()
-            .map(|bar| {
-                Ok(Candle {
-                    timestamp: bar.time,
-                    open: utils::num_to_decimal(&bar.open)
-                        .map_err(|e| format!("Failed to convert open: {}", e))?,
-                    high: utils::num_to_decimal(&bar.high)
-                        .map_err(|e| format!("Failed to convert high: {}", e))?,
-                    low: utils::num_to_decimal(&bar.low)
-                        .map_err(|e| format!("Failed to convert low: {}", e))?,
-                    close: utils::num_to_decimal(&bar.close)
-                        .map_err(|e| format!("Failed to convert close: {}", e))?,
-                    volume: Decimal::from(bar.volume),
-                })
-            })
-            .collect();
-
-        let candles = candles?;
-
-        info!(
-            symbol = %symbol,
-            bars_count = candles.len(),
-            "Fetched Alpaca bars"
-        );
-
-        Ok(candles)
+        <Self as crate::exchange::ExchangeClient>::get_candles_paginated(
+            self,
+            product_id,
+            start,
+            end,
+            granularity,
+        )
+        .await
+        .map_err(|e| e.to_string().into())
     }
 }
 
@@ -419,7 +369,7 @@ impl crate::exchange::ExchangeClient for AlpacaClient {
     async fn test_connection(&mut self) -> Result<(), ExchangeError> {
         self.rate_limiter.until_ready().await;
 
-        let client = self.client.read().await;
+        let client = &self.client;
         let account = client
             .issue::<apca::api::v2::account::Get>(&())
             .await
@@ -466,7 +416,7 @@ impl crate::exchange::ExchangeClient for AlpacaClient {
             "Fetching Alpaca bars"
         );
 
-        let client = self.client.read().await;
+        let client = &self.client;
 
         let request = alpaca_bars::ListReqInit {
             limit: Some(10000),
@@ -529,19 +479,19 @@ impl DiscoveryDataSource for AlpacaClient {
         self.rate_limiter.until_ready().await;
 
         let alpaca_symbol = utils::to_alpaca_symbol(symbol);
-        // Note: Alpaca free tier only supports daily bars for stocks
-        // Using OneDay instead of OneHour
-        let timeframe = alpaca_bars::TimeFrame::OneDay;
+        // CB-1 FIX: Correctly request OneHour bars as contract implies.
+        // If free tier fails, we propagate the error instead of silently substituting data.
+        let timeframe = alpaca_bars::TimeFrame::OneHour;
 
         info!(
             symbol = %alpaca_symbol,
             start = %start,
             end = %end,
-            timeframe = "1D",
+            timeframe = "1h",
             "Fetching Alpaca candles for discovery"
         );
 
-        let client = self.client.read().await;
+        let client = &self.client;
 
         // Use IEX feed for free tier access (SIP requires paid subscription)
         let request = alpaca_bars::ListReqInit {
