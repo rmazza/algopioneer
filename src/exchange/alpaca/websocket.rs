@@ -7,6 +7,7 @@
 //! updates which are sufficient for equity trading (not latency-sensitive like crypto).
 
 use async_trait::async_trait;
+use futures_util::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -23,12 +24,18 @@ use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
 use crate::strategy::dual_leg_trading::{Clock, SystemClock};
 use crate::types::MarketData;
 
-/// MC-2 FIX: Constant for instrument_id to avoid heap allocation per tick
-const ALPACA_INSTRUMENT_ID: &str = "alpaca";
+/// MC-1 FIX: Static instrument_id to avoid heap allocation per tick
+static ALPACA_INSTRUMENT_ID: &str = "alpaca";
 
 /// Alpaca free tier rate limit: 200 req/min ≈ 3.3 req/sec
 /// Using 3 req/sec to stay safely under the limit
 const RATE_LIMIT_PER_SECOND: u32 = 3;
+
+/// CB-2 FIX: Compile-time NonZeroU32 to avoid runtime .expect()
+const RATE_LIMIT_NZ: NonZeroU32 = match NonZeroU32::new(RATE_LIMIT_PER_SECOND) {
+    Some(v) => v,
+    None => panic!("RATE_LIMIT_PER_SECOND must be > 0"),
+};
 
 /// Alpaca data provider using polling for reliable market data
 ///
@@ -103,12 +110,6 @@ impl AlpacaWebSocketProvider {
     }
 }
 
-use futures_util::stream::{self, StreamExt};
-
-impl AlpacaWebSocketProvider {
-    // ... (keeping new/from_env/with_clock same) ...
-}
-
 #[async_trait]
 impl WebSocketProvider for AlpacaWebSocketProvider {
     async fn connect_and_subscribe(
@@ -116,11 +117,12 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError> {
-        // Convert symbols to Alpaca format (into_owned() for Cow -> String)
-        let mut symbol_pairs: Vec<(String, String)> = Vec::new();
-        for s in &symbols {
-            symbol_pairs.push((s.clone(), utils::to_alpaca_symbol(s).into_owned()));
-        }
+        // MC-3 FIX: Pre-compute symbol mappings as Arc for zero-copy sharing across ticks
+        let symbol_pairs: Arc<[(String, String)]> = symbols
+            .iter()
+            .map(|s| (s.clone(), utils::to_alpaca_symbol(s).into_owned()))
+            .collect::<Vec<_>>()
+            .into();
 
         info!(
             symbols_count = symbol_pairs.len(),
@@ -144,11 +146,9 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         // Wrap client in Arc for cheap cloning across tasks
         let client = Arc::new(Client::new(api_info));
 
-        // CB-1 FIX: Rate limiter to prevent API abuse
-        // Alpaca free tier: 200 req/min ~ 3.3 req/sec.
-        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
-            NonZeroU32::new(RATE_LIMIT_PER_SECOND).expect("Rate limit must be non-zero"),
-        )));
+        // Rate limiter to prevent API abuse (Alpaca free tier: 200 req/min ~ 3.3 req/sec)
+        // CB-2 FIX: Uses compile-time RATE_LIMIT_NZ constant
+        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(RATE_LIMIT_NZ)));
 
         // Polling loop
         let mut poll_timer = interval(Duration::from_secs(self.poll_interval_secs));
@@ -158,16 +158,17 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         loop {
             poll_timer.tick().await;
 
-            // Clone things needed for the stream
-            let pairs = symbol_pairs.clone();
-            let client = client.clone();
-            let rate_limiter = rate_limiter.clone();
+            // MC-3 FIX: Arc::clone is O(1), no Vec cloning
+            let pairs = Arc::clone(&symbol_pairs);
+            let client = Arc::clone(&client);
+            let rate_limiter = Arc::clone(&rate_limiter);
             let stream_sender = sender.clone();
-            let clock = self.clock.clone();
+            let clock = Arc::clone(&self.clock);
 
             // Create a stream of futures to fetch data concurrently
             // Using buffer_unordered to execute up to 5 requests in parallel (conservative)
-            let mut stream = stream::iter(pairs)
+            // MC-3 FIX: pairs.iter().cloned() iterates Arc slice contents
+            let mut stream = stream::iter(pairs.iter().cloned())
                 .map(move |(orig_symbol, alpaca_symbol)| {
                     let client = client.clone();
                     let rate_limiter = rate_limiter.clone();
@@ -183,6 +184,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
                         let request = alpaca_bars::ListReqInit {
                             limit: Some(1),
+                            feed: Some(apca::data::v2::Feed::IEX),
                             ..Default::default()
                         }
                         .init(&alpaca_symbol, start, now, alpaca_bars::TimeFrame::OneMinute);
@@ -202,10 +204,10 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
                                     debug!(symbol = %alpaca_symbol, price = %price, "Price update");
 
-                                    // MC-2 FIX: Use const for instrument_id
+                                    // MC-1 FIX: Use static str, still need to_string() for owned field
                                     let market_data = MarketData {
                                         symbol: orig_symbol,
-                                        instrument_id: Some(ALPACA_INSTRUMENT_ID.to_string()),
+                                        instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
                                         price,
                                         timestamp,
                                     };

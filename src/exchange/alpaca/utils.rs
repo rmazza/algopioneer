@@ -28,6 +28,8 @@ pub fn to_alpaca_symbol(symbol: &str) -> Cow<'_, str> {
 }
 
 /// Convert Decimal to num_decimal::Num with error handling.
+/// N-4 FIX: #[inline] for hot path (called per-tick)
+#[inline]
 pub fn decimal_to_num(d: Decimal) -> Result<Num, ExchangeError> {
     d.to_string().parse::<Num>().map_err(|e| {
         error!(
@@ -43,6 +45,8 @@ pub fn decimal_to_num(d: Decimal) -> Result<Num, ExchangeError> {
 }
 
 /// Convert num_decimal::Num to Decimal with error handling.
+/// N-4 FIX: #[inline] for hot path (called per-tick)
+#[inline]
 pub fn num_to_decimal(n: &Num) -> Result<Decimal, ExchangeError> {
     n.to_string().parse::<Decimal>().map_err(|e| {
         error!(
