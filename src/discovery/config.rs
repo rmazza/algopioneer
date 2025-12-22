@@ -307,10 +307,18 @@ pub struct GridSearchConfig {
 impl Default for GridSearchConfig {
     fn default() -> Self {
         Self {
-            // Use smaller windows that work with short lookbacks
-            windows: vec![10, 15, 20, 25, 30],
-            // Lower z-score thresholds to generate more signals
-            z_entries: vec![dec!(1.2), dec!(1.4), dec!(1.6), dec!(1.8), dec!(2.0)],
+            // Include smaller windows for daily bar discovery (5, 7 for limited samples)
+            windows: vec![5, 7, 10, 15, 20, 25, 30],
+            // Include lower z-score thresholds for daily bar discovery (limited samples)
+            z_entries: vec![
+                dec!(0.8),
+                dec!(1.0),
+                dec!(1.2),
+                dec!(1.4),
+                dec!(1.6),
+                dec!(1.8),
+                dec!(2.0),
+            ],
             z_exit: dec!(0.2),
         }
     }

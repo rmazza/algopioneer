@@ -316,4 +316,27 @@ impl DiscoveryDataSource for CoinbaseClient {
 
         Ok(result)
     }
+
+    async fn fetch_candles_daily(
+        &mut self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<(i64, rust_decimal::Decimal)>, Box<dyn std::error::Error + Send + Sync>> {
+        let candles = self
+            .get_product_candles_paginated(symbol, &start, &end, Granularity::OneDay)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::new(std::io::Error::other(e.to_string()))
+            })?;
+
+        let result: Vec<(i64, rust_decimal::Decimal)> = candles
+            .iter()
+            .filter_map(|c| {
+                rust_decimal::Decimal::from_f64_retain(c.close).map(|price| (c.start as i64, price))
+            })
+            .collect();
+
+        Ok(result)
+    }
 }

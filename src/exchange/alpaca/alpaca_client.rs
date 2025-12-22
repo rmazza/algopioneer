@@ -47,16 +47,22 @@ impl AlpacaClient {
     pub fn new(
         env: AppEnv,
         recorder: Option<Arc<dyn TradeRecorder>>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let api_key = std::env::var("ALPACA_API_KEY")
-            .map_err(|_| "ALPACA_API_KEY must be set in .env file or environment")?;
-        let api_secret = std::env::var("ALPACA_API_SECRET")
-            .map_err(|_| "ALPACA_API_SECRET must be set in .env file or environment")?;
+    ) -> Result<Self, ExchangeError> {
+        let api_key = std::env::var("ALPACA_API_KEY").map_err(|_| {
+            ExchangeError::Configuration(
+                "ALPACA_API_KEY must be set in .env file or environment".to_string(),
+            )
+        })?;
+        let api_secret = std::env::var("ALPACA_API_SECRET").map_err(|_| {
+            ExchangeError::Configuration(
+                "ALPACA_API_SECRET must be set in .env file or environment".to_string(),
+            )
+        })?;
 
         Self::with_credentials_and_clock(api_key, api_secret, env, recorder, Arc::new(SystemClock))
+            .map_err(|e| ExchangeError::Configuration(e.to_string())) // Simplify error mapping for now, ideally with_credentials_and_clock should return ExchangeError
     }
 
-    /// Create a new AlpacaClient with explicit credentials (uses SystemClock)
     pub fn with_credentials(
         api_key: String,
         api_secret: String,
@@ -89,7 +95,7 @@ impl AlpacaClient {
             "Initializing Alpaca client (paper={})", is_paper
         );
 
-        // SAFETY: We construct ApiInfo directly to avoid mutating global environment variables
+        // NOTE: We construct ApiInfo directly to avoid mutating global environment variables
         let api_info = ApiInfo::from_parts(base_url, &api_key, &api_secret)
             .map_err(|e| format!("Failed to create Alpaca API info: {}", e))?;
 
@@ -138,7 +144,7 @@ impl AlpacaClient {
         side: &str,
         size: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), ExchangeError> {
         self.rate_limiter.until_ready().await;
 
         match self.mode {
@@ -158,13 +164,15 @@ impl AlpacaClient {
                 };
 
                 // CB-2 FIX: Propagate conversion errors instead of silent fallback
-                let qty_num = utils::decimal_to_num(size)
-                    .map_err(|e| format!("Failed to convert quantity: {}", e))?;
+                let qty_num = utils::decimal_to_num(size).map_err(|e| {
+                    ExchangeError::Other(format!("Failed to convert quantity: {}", e))
+                })?;
 
                 let request = match price {
                     Some(limit_price) => {
-                        let limit_num = utils::decimal_to_num(limit_price)
-                            .map_err(|e| format!("Failed to convert limit price: {}", e))?;
+                        let limit_num = utils::decimal_to_num(limit_price).map_err(|e| {
+                            ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+                        })?;
                         alpaca_order::CreateReqInit {
                             type_: alpaca_order::Type::Limit,
                             limit_price: Some(limit_num),
@@ -193,7 +201,7 @@ impl AlpacaClient {
                 let order = client
                     .issue::<alpaca_order::Create>(&request)
                     .await
-                    .map_err(|e| format!("Order failed: {}", e))?;
+                    .map_err(|e| ExchangeError::OrderRejected(format!("Order failed: {}", e)))?;
 
                 info!(
                     order_id = %order.id.as_hyphenated(),
@@ -247,10 +255,7 @@ impl AlpacaClient {
     }
 
     /// Get position for a symbol
-    pub async fn get_position(
-        &self,
-        product_id: &str,
-    ) -> Result<Decimal, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_position(&self, product_id: &str) -> Result<Decimal, ExchangeError> {
         self.rate_limiter.until_ready().await;
 
         match self.mode {
@@ -262,8 +267,12 @@ impl AlpacaClient {
                 match client.issue::<alpaca_position::Get>(&sym).await {
                     Ok(position) => {
                         // CB-2 FIX: Propagate conversion error
-                        let qty = utils::num_to_decimal(&position.quantity)
-                            .map_err(|e| format!("Failed to convert position quantity: {}", e))?;
+                        let qty = utils::num_to_decimal(&position.quantity).map_err(|e| {
+                            ExchangeError::Other(format!(
+                                "Failed to convert position quantity: {}",
+                                e
+                            ))
+                        })?;
                         debug!(symbol = %symbol, quantity = %qty, "Position found");
                         Ok(qty)
                     }
@@ -272,7 +281,10 @@ impl AlpacaClient {
                             debug!(symbol = %symbol, "No position found");
                             Ok(Decimal::ZERO)
                         } else {
-                            Err(format!("Failed to get position: {}", e).into())
+                            Err(ExchangeError::Network(format!(
+                                "Failed to get position: {}",
+                                e
+                            )))
                         }
                     }
                 }
@@ -290,7 +302,7 @@ impl AlpacaClient {
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
         granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Candle>, ExchangeError> {
         <Self as crate::exchange::ExchangeClient>::get_candles(
             self,
             product_id,
@@ -299,7 +311,6 @@ impl AlpacaClient {
             granularity,
         )
         .await
-        .map_err(|e| e.to_string().into())
     }
 
     /// Get candles with pagination
@@ -311,7 +322,7 @@ impl AlpacaClient {
         start: &DateTime<Utc>,
         end: &DateTime<Utc>,
         granularity: Granularity,
-    ) -> Result<Vec<Candle>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Candle>, ExchangeError> {
         <Self as crate::exchange::ExchangeClient>::get_candles_paginated(
             self,
             product_id,
@@ -320,7 +331,6 @@ impl AlpacaClient {
             granularity,
         )
         .await
-        .map_err(|e| e.to_string().into())
     }
 }
 
@@ -350,15 +360,11 @@ impl Executor for AlpacaClient {
             OrderSide::Sell => "sell",
         };
 
-        self.place_order(symbol, side_str, quantity, price)
-            .await
-            .map_err(|e| ExchangeError::Other(e.to_string()))
+        self.place_order(symbol, side_str, quantity, price).await
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
-        AlpacaClient::get_position(self, symbol)
-            .await
-            .map_err(|e| ExchangeError::Other(e.to_string()))
+        AlpacaClient::get_position(self, symbol).await
     }
 }
 
@@ -479,8 +485,6 @@ impl DiscoveryDataSource for AlpacaClient {
         self.rate_limiter.until_ready().await;
 
         let alpaca_symbol = utils::to_alpaca_symbol(symbol);
-        // CB-1 FIX: Correctly request OneHour bars as contract implies.
-        // If free tier fails, we propagate the error instead of silently substituting data.
         let timeframe = alpaca_bars::TimeFrame::OneHour;
 
         info!(
@@ -517,6 +521,57 @@ impl DiscoveryDataSource for AlpacaClient {
             .collect();
 
         result.map_err(|e: ExchangeError| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    async fn fetch_candles_daily(
+        &mut self,
+        symbol: &str,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(i64, Decimal)>, Box<dyn std::error::Error + Send + Sync>> {
+        self.rate_limiter.until_ready().await;
+
+        let alpaca_symbol = utils::to_alpaca_symbol(symbol);
+        let timeframe = alpaca_bars::TimeFrame::OneDay;
+
+        info!(
+            symbol = %alpaca_symbol,
+            start = %start,
+            end = %end,
+            timeframe = "1d",
+            "Fetching Alpaca daily candles for discovery"
+        );
+
+        let client = &self.client;
+
+        // Use IEX feed for free tier access
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(10000),
+            feed: Some(apca::data::v2::Feed::IEX),
+            ..Default::default()
+        }
+        .init(alpaca_symbol.as_ref(), start, end, timeframe);
+
+        let bars_result = client
+            .issue::<alpaca_bars::List>(&request)
+            .await
+            .map_err(|e| format!("Failed to fetch daily bars: {}", e))?;
+
+        let result: Result<Vec<(i64, Decimal)>, _> = bars_result
+            .bars
+            .iter()
+            .map(|bar| {
+                let close = utils::num_to_decimal(&bar.close)?;
+                Ok((bar.time.timestamp(), close))
+            })
+            .collect();
+
+        result.map_err(|e: ExchangeError| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    /// Alpaca free tier has limited hourly data; prefer daily bars for discovery
+    fn prefers_daily_bars(&self) -> bool {
+        true
     }
 }
 

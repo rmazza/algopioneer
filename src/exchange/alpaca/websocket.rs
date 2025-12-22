@@ -120,22 +120,13 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError> {
-        // MC-3 FIX: Arc for zero-copy sharing across ticks
-        // Store as Arc<[(Arc<original>, Arc<alpaca>)]> so we can clone individual items zero-copy
-        let symbol_pairs: Arc<[(Arc<str>, Arc<str>)]> = symbols
-            .iter()
-            .map(|s| (Arc::from(s.as_str()), Arc::from(utils::to_alpaca_symbol(s))))
-            .collect::<Vec<_>>()
-            .into();
-
         info!(
-            symbols_count = symbol_pairs.len(),
+            symbols_count = symbols.len(),
             poll_interval = self.poll_interval_secs,
-            rate_limit_per_sec = RATE_LIMIT_PER_SECOND,
-            "Starting Alpaca data provider (polling mode with concurrent requests)"
+            "Starting Alpaca data provider (Actor-Lite Poll Mode)"
         );
 
-        // SAFETY: We construct ApiInfo directly to avoid abusing global environment variables
+        // NOTE: We construct ApiInfo directly to avoid abusing global environment variables
         let base_url = if self.sandbox {
             "https://paper-api.alpaca.markets"
         } else {
@@ -147,144 +138,150 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
             })?;
 
-        // Wrap client in Arc for cheap cloning across tasks
         let client = Arc::new(Client::new(api_info));
-
-        // Rate limiter to prevent API abuse (Alpaca free tier: 200 req/min ~ 3.3 req/sec)
-        // CB-2 FIX: Uses compile-time RATE_LIMIT_NZ constant
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(RATE_LIMIT_NZ)));
+        let clock = Arc::clone(&self.clock);
 
-        // Polling loop
-        // FIX: Replaced fixed interval with adaptive polling to preventing "Latency Spiral"
-        // The loop will now run as fast as the rate limiter allows, but never Faster than poll_interval_secs.
-        // If the work takes longer than poll_interval_secs (due to rate limits), the next cycle starts immediately.
-        info!("Alpaca concurrent polling started (Adaptive Mode)");
+        // Pre-compute symbol mappings once
+        // FIX: Use Arc<str> for cheap cloning in hot loops
+        let monitored_symbols: Arc<[(Arc<str>, Arc<str>)]> = symbols
+            .iter()
+            .map(|s| (Arc::from(s.as_str()), Arc::from(utils::to_alpaca_symbol(s))))
+            .collect::<Vec<_>>()
+            .into();
 
-        loop {
-            let cycle_start = tokio::time::Instant::now();
+        let poll_interval = Duration::from_secs(self.poll_interval_secs);
 
-            // MC-3 FIX: Arc::clone is O(1)
-            let pairs = Arc::clone(&symbol_pairs);
-            let client = Arc::clone(&client);
-            let rate_limiter = Arc::clone(&rate_limiter);
-            let stream_sender = sender.clone();
-            let clock = Arc::clone(&self.clock);
+        // Spawn a dedicated poller task to decouple scheduling from execution
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(poll_interval);
+            // set missed tick behavior to delay to avoid bursts if we get behind
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-            // Create a stream of futures to fetch data concurrently
-            // Using buffer_unordered to execute up to MAX_CONCURRENT_POLLS requests in parallel
-            let mut stream = stream::iter(pairs.iter().cloned())
-                .map(move |(orig_symbol, alpaca_symbol)| {
-                    let client = client.clone();
-                    let rate_limiter = rate_limiter.clone();
-                    let sender = stream_sender.clone();
-                    let clock = clock.clone();
-                    // Clone Arcs to strings (cheap) for the async block
-                    let orig_symbol = orig_symbol.clone();
-                    let alpaca_symbol = alpaca_symbol.clone();
+            loop {
+                // Wait for next tick
+                interval.tick().await;
 
-                    async move {
-                        // Wait for rate limiter - this provides the pacing
-                        rate_limiter.until_ready().await;
+                if sender.is_closed() {
+                    info!("Channel closed, stopping polling task");
+                    break;
+                }
 
-                        let now = clock.now();
-                        let start = now - chrono::Duration::minutes(2);
+                let start_poll = std::time::Instant::now();
 
-                        let request = alpaca_bars::ListReqInit {
-                            limit: Some(1),
-                            feed: Some(apca::data::v2::Feed::IEX),
-                            ..Default::default()
+                // Fan-out: Create a stream of concurrent fetch futures
+                let fetches = stream::iter(monitored_symbols.iter().cloned())
+                    .map(|(orig, alpaca)| {
+                        let client = client.clone();
+                        let rl = rate_limiter.clone();
+                        let clock = clock.clone();
+
+                        async move {
+                            rl.until_ready().await;
+                            Self::fetch_single_bar(&client, &clock, &orig, &alpaca).await
                         }
-                        .init(alpaca_symbol.as_ref(), start, now, alpaca_bars::TimeFrame::OneMinute);
+                    })
+                    // Limit concurrency to avoid overwhelming the runtime or hitting rate limits too hard
+                    .buffer_unordered(MAX_CONCURRENT_POLLS);
 
-                        let fetch_start = std::time::Instant::now();
-                        let result = client.issue::<alpaca_bars::List>(&request).await;
-                        let fetch_elapsed = fetch_start.elapsed().as_secs_f64();
+                // Fan-in: Process results
+                let mut results = fetches;
+                let mut processed_count = 0;
 
-                        match result {
-                            Ok(result) => {
-                                crate::metrics::record_poll_latency(&orig_symbol, "success", fetch_elapsed);
-
-                                if let Some(bar) = result.bars.first() {
-                                    let price = match utils::num_to_decimal(&bar.close) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            warn!(error = %e, symbol = %alpaca_symbol, "Price conversion error");
-                                            crate::metrics::record_dropped_tick(&orig_symbol, "conversion_error");
-                                            return;
-                                        }
-                                    };
-                                    let timestamp = bar.time.timestamp_millis();
-
-                                    debug!(symbol = %alpaca_symbol, price = %price, "Price update");
-
-                                    let market_data = MarketData {
-                                        symbol: orig_symbol.to_string(),
-                                        instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
-                                        price,
-                                        timestamp,
-                                    };
-
-                                    if sender.send(market_data).await.is_err() {
-                                        // Channel receiver dropped
-                                    } else {
-                                        crate::metrics::record_ws_tick(&orig_symbol);
-                                    }
-                                }
+                while let Some(result) = results.next().await {
+                    match result {
+                        Ok(Some(data)) => {
+                            let symbol = data.symbol.clone();
+                            if let Err(_e) = sender.send(data).await {
+                                info!("Channel closed during send, stopping polling");
+                                return;
                             }
-                            Err(e) => {
-                                crate::metrics::record_poll_latency(&orig_symbol, "error", fetch_elapsed);
-                                warn!(symbol = %alpaca_symbol, error = %e, "Failed to fetch bar");
-                                crate::metrics::record_dropped_tick(&orig_symbol, "fetch_error");
-                            }
+                            crate::metrics::record_ws_tick(&symbol);
+                            processed_count += 1;
+                        }
+                        Ok(None) => {
+                            // No new data
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Poll failed");
                         }
                     }
-                })
-                .buffer_unordered(MAX_CONCURRENT_POLLS);
-
-            // Drive the stream to completion
-            while stream.next().await.is_some() {
-                // Check for channel closure inside the loop to fail fast(er)
-                if sender.is_closed() {
-                    info!("Channel closed, stopping polling");
-                    return Ok(());
                 }
-            }
 
-            // Adaptive Sleep:
-            // Calculate how long the work took
-            let elapsed = cycle_start.elapsed();
-            let target_interval = Duration::from_secs(self.poll_interval_secs);
-
-            if elapsed < target_interval {
-                // If we finished early, sleep for the remainder to maintain the target interval
-                tokio::time::sleep(target_interval - elapsed).await;
-            } else {
-                // If we took longer (e.g. strict rate limits for many symbols),
-                // we log a warning (once per minute to avoid spam) and start immediately.
-                // This prevents the spiral by acknowledging we are maxed out.
-                static NEXT_LOG: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                // Simple rate limited logging
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let last = NEXT_LOG.load(std::sync::atomic::Ordering::Relaxed);
-
-                if now_secs > last {
+                let elapsed = start_poll.elapsed();
+                if elapsed > poll_interval {
                     warn!(
                         elapsed_ms = elapsed.as_millis(),
-                        target_ms = target_interval.as_millis(),
-                        "Polling cycle took longer than interval (system saturated, running at max speed)"
+                        interval_ms = poll_interval.as_millis(),
+                        "Polling cycle saturated interval - system falling behind"
                     );
-                    NEXT_LOG.store(now_secs + 60, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    debug!(
+                        processed = processed_count,
+                        elapsed_ms = elapsed.as_millis(),
+                        "Poll cycle complete"
+                    );
                 }
             }
+        });
 
-            // Final check
-            if sender.is_closed() {
-                info!("Channel closed, stopping polling");
-                return Ok(());
+        Ok(())
+    }
+}
+
+impl AlpacaWebSocketProvider {
+    // Helper for fetching a single bar (isolated logic)
+    // Returns Result<Option<MarketData>>: Ok(None) means success but no data.
+    async fn fetch_single_bar(
+        client: &Client,
+        clock: &Arc<dyn Clock>,
+        orig_symbol: &str,
+        alpaca_symbol: &str,
+    ) -> Result<Option<MarketData>, ExchangeError> {
+        let now = clock.now();
+        let start = now - chrono::Duration::minutes(2);
+
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(1),
+            feed: Some(apca::data::v2::Feed::IEX),
+            ..Default::default()
+        }
+        .init(alpaca_symbol, start, now, alpaca_bars::TimeFrame::OneMinute);
+
+        let fetch_start = std::time::Instant::now();
+        let result = client.issue::<alpaca_bars::List>(&request).await;
+        let fetch_elapsed = fetch_start.elapsed().as_secs_f64();
+
+        match result {
+            Ok(result) => {
+                crate::metrics::record_poll_latency(orig_symbol, "success", fetch_elapsed);
+
+                if let Some(bar) = result.bars.first() {
+                    let price = match utils::num_to_decimal(&bar.close) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(error = %e, symbol = %alpaca_symbol, "Price conversion error");
+                            crate::metrics::record_dropped_tick(orig_symbol, "conversion_error");
+                            return Ok(None);
+                        }
+                    };
+                    let timestamp = bar.time.timestamp_millis();
+
+                    Ok(Some(MarketData {
+                        symbol: orig_symbol.to_string(),
+                        instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
+                        price,
+                        timestamp,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => {
+                crate::metrics::record_poll_latency(orig_symbol, "error", fetch_elapsed);
+                warn!(symbol = %alpaca_symbol, error = %e, "Failed to fetch bar");
+                crate::metrics::record_dropped_tick(orig_symbol, "fetch_error");
+                Err(ExchangeError::Network(format!("Fetch failed: {}", e)))
             }
         }
     }

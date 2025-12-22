@@ -1,7 +1,7 @@
 [
   {
     "spot_symbol": "F",
-    "future_symbol": "AXP",
+    "future_symbol": "IBM",
     "order_size": "100",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
@@ -13,8 +13,26 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 10,
-    "entry_z_score": "1.1999999999999999555910790145",
+    "window_size": 7,
+    "entry_z_score": "1.3999999999999999111821580293",
+    "exit_z_score": "0.2000000000000000111022302462"
+  },
+  {
+    "spot_symbol": "AXP",
+    "future_symbol": "WFC",
+    "order_size": "100",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 5,
+    "entry_z_score": "1.8000000000000000444089209845",
     "exit_z_score": "0.2000000000000000111022302462"
   }
 ]

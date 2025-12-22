@@ -40,6 +40,26 @@ pub trait DiscoveryDataSource: Send + Sync {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<(i64, Decimal)>, Box<dyn Error + Send + Sync>>;
+
+    /// Fetch daily candle close prices for a symbol.
+    ///
+    /// Returns a vector of (timestamp_seconds, close_price) tuples sorted by time.
+    /// Default implementation panics - exchanges that support daily bars should override.
+    async fn fetch_candles_daily(
+        &mut self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<(i64, Decimal)>, Box<dyn Error + Send + Sync>> {
+        // Default: use hourly (for backwards compatibility)
+        self.fetch_candles_hourly(symbol, start, end).await
+    }
+
+    /// Returns true if this data source prefers daily bars for discovery.
+    /// Alpaca free tier should return true due to limited hourly data.
+    fn prefers_daily_bars(&self) -> bool {
+        false
+    }
 }
 
 /// Result of parameter optimization for a single pair
@@ -411,9 +431,11 @@ async fn optimize_pair(
     let train_result = match best_train_result {
         Some(r) => r,
         None => {
-            debug!(
+            info!(
                 pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
-                "No valid parameter combination found in training"
+                data_points = n,
+                train_samples = train_timestamps.len(),
+                "Pair skipped: no parameter combination generated trades. Consider lowering z-entry thresholds."
             );
             return None;
         }
@@ -454,12 +476,17 @@ async fn optimize_pair(
     let total_trades = train_result.trades + validation_result.trades;
     let total_profit = train_result.net_profit + validation_result.net_profit;
 
-    // Filter: minimum total trades
-    if total_trades < config.min_trades {
+    // Adaptive min_trades: scale down for smaller datasets (daily bars)
+    // For 63 data points, expect ~3 trades; for 1000+ hourly, expect 25+
+    let adaptive_min_trades = (n as u32 / 20).max(3).min(config.min_trades);
+
+    // Filter: minimum total trades (adaptive for daily vs hourly)
+    if total_trades < adaptive_min_trades {
         debug!(
             pair = format!("{}-{}", pair.symbol_a, pair.symbol_b),
             trades = total_trades,
-            min = config.min_trades,
+            min = adaptive_min_trades,
+            data_points = n,
             "Rejected: insufficient trades"
         );
         return None;
@@ -535,10 +562,12 @@ async fn fetch_candle_data<D: DiscoveryDataSource>(
     let end = clock.now();
     let start = end - ChronoDuration::days(lookback_days as i64);
 
+    let use_daily = data_source.prefers_daily_bars();
     info!(
         symbols = symbols.len(),
         start = %start.format("%Y-%m-%d"),
         end = %end.format("%Y-%m-%d"),
+        granularity = if use_daily { "daily" } else { "hourly" },
         "Fetching candle data"
     );
 
@@ -548,7 +577,14 @@ async fn fetch_candle_data<D: DiscoveryDataSource>(
     for symbol in symbols {
         info!(symbol = %symbol, "Fetching candles");
 
-        match data_source.fetch_candles_hourly(symbol, start, end).await {
+        // Use daily or hourly based on data source preference
+        let candle_result = if use_daily {
+            data_source.fetch_candles_daily(symbol, start, end).await
+        } else {
+            data_source.fetch_candles_hourly(symbol, start, end).await
+        };
+
+        match candle_result {
             Ok(candles) => {
                 if candles.is_empty() {
                     warn!(symbol = %symbol, "No candles received");
