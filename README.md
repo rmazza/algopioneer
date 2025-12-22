@@ -8,7 +8,7 @@
 
 ## Overview
 
-AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the Coinbase Advanced Trade API. It features comprehensive risk management, automatic failover, distributed tracing, and production-ready resilience patterns.
+AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the Coinbase Advanced Trade API and Alpaca. It features comprehensive risk management, automatic failover, distributed tracing, and production-ready resilience patterns.
 
 ## Key Features
 
@@ -36,7 +36,7 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 - ✅ **Panic Recovery**: Supervisor pattern with automatic strategy restart
 - ✅ **WebSocket Stability**: Proper task cleanup preventing resource leaks
 - ✅ **Trade Recording**: Modular trade logging to CSV or DynamoDB (via feature flag)
-- ✅ **Multi-Exchange Architecture**: Extensible design supporting Coinbase and Kraken (Experimental)
+- ✅ **Multi-Exchange Architecture**: Extensible design supporting Coinbase (Crypto), Kraken (Experimental), and Alpaca (US Equities).
 
 ## Prerequisites
 
@@ -166,7 +166,9 @@ algopioneer/
 │   ├── exchange/               # Exchange abstraction layer
 │   │   ├── mod.rs              # Traits (Executor, MarketDataProvider)
 │   │   ├── coinbase/           # Coinbase implementation
-│   │   └── kraken/             # Kraken implementation
+│   │   ├── kraken/             # Kraken implementation
+│   │   └── alpaca/             # Alpaca implementation (US Equities)
+│   ├── sandbox/                # Simulation environment
 │   ├── logging/                # Trade recording and metrics
 │   │   ├── mod.rs              # Logging traits
 │   │   ├── recorder.rs         # Recorder implementations
