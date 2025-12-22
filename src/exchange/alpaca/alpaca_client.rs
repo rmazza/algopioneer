@@ -96,7 +96,7 @@ impl AlpacaClient {
         let client = Client::new(api_info);
 
         // MC-1 FIX: Safe unwrapping of hardcoded constant
-        let quota = Quota::per_second(NonZeroU32::new(3).expect("Rate limit 3 is non-zero"));
+        let quota = Quota::per_second(NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN));
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {

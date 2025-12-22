@@ -81,6 +81,16 @@ lazy_static! {
         opts!("algopioneer_recovery_attempts_total", "Recovery attempts"),
         &["symbol", "status"]
     ).expect("FATAL: Failed to register RECOVERY_ATTEMPTS metric - check for duplicate registration");
+
+    // --- Market Data Metrics ---
+
+    /// Market data polling latency in seconds
+    pub static ref MARKET_DATA_POLL_LATENCY: HistogramVec = register_histogram_vec!(
+        "algopioneer_market_data_poll_latency_seconds",
+        "Market data polling latency",
+        &["symbol", "status"],
+        vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    ).expect("FATAL: Failed to register MARKET_DATA_POLL_LATENCY metric - check for duplicate registration");
 }
 
 /// Record an order execution
@@ -113,6 +123,13 @@ pub fn record_ws_tick(symbol: &str) {
 /// Record dropped tick
 pub fn record_dropped_tick(symbol: &str, reason: &str) {
     WS_TICKS_DROPPED.with_label_values(&[symbol, reason]).inc();
+}
+
+/// Record market data polling latency
+pub fn record_poll_latency(symbol: &str, status: &str, latency_secs: f64) {
+    MARKET_DATA_POLL_LATENCY
+        .with_label_values(&[symbol, status])
+        .observe(latency_secs);
 }
 
 /// Get metrics as text for /metrics endpoint

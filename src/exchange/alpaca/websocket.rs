@@ -37,6 +37,9 @@ const RATE_LIMIT_NZ: NonZeroU32 = match NonZeroU32::new(RATE_LIMIT_PER_SECOND) {
     None => panic!("RATE_LIMIT_PER_SECOND must be > 0"),
 };
 
+/// Maximum number of concurrent poll requests
+const MAX_CONCURRENT_POLLS: usize = 5;
+
 /// Alpaca data provider using polling for reliable market data
 ///
 /// Uses 1-minute bar polling instead of WebSocket streaming.
@@ -117,10 +120,11 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError> {
-        // MC-3 FIX: Pre-compute symbol mappings as Arc for zero-copy sharing across ticks
-        let symbol_pairs: Arc<[(String, String)]> = symbols
+        // MC-3 FIX: Arc for zero-copy sharing across ticks
+        // Store as Arc<[(Arc<original>, Arc<alpaca>)]> so we can clone individual items zero-copy
+        let symbol_pairs: Arc<[(Arc<str>, Arc<str>)]> = symbols
             .iter()
-            .map(|s| (s.clone(), utils::to_alpaca_symbol(s).into_owned()))
+            .map(|s| (Arc::from(s.as_str()), Arc::from(utils::to_alpaca_symbol(s))))
             .collect::<Vec<_>>()
             .into();
 
@@ -167,13 +171,16 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             let clock = Arc::clone(&self.clock);
 
             // Create a stream of futures to fetch data concurrently
-            // Using buffer_unordered to execute up to 5 requests in parallel (conservative)
+            // Using buffer_unordered to execute up to MAX_CONCURRENT_POLLS requests in parallel
             let mut stream = stream::iter(pairs.iter().cloned())
                 .map(move |(orig_symbol, alpaca_symbol)| {
                     let client = client.clone();
                     let rate_limiter = rate_limiter.clone();
                     let sender = stream_sender.clone();
                     let clock = clock.clone();
+                    // Clone Arcs to strings (cheap) for the async block
+                    let orig_symbol = orig_symbol.clone();
+                    let alpaca_symbol = alpaca_symbol.clone();
 
                     async move {
                         // Wait for rate limiter - this provides the pacing
@@ -187,15 +194,22 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                             feed: Some(apca::data::v2::Feed::IEX),
                             ..Default::default()
                         }
-                        .init(&alpaca_symbol, start, now, alpaca_bars::TimeFrame::OneMinute);
+                        .init(alpaca_symbol.as_ref(), start, now, alpaca_bars::TimeFrame::OneMinute);
 
-                        match client.issue::<alpaca_bars::List>(&request).await {
+                        let fetch_start = std::time::Instant::now();
+                        let result = client.issue::<alpaca_bars::List>(&request).await;
+                        let fetch_elapsed = fetch_start.elapsed().as_secs_f64();
+
+                        match result {
                             Ok(result) => {
+                                crate::metrics::record_poll_latency(&orig_symbol, "success", fetch_elapsed);
+
                                 if let Some(bar) = result.bars.first() {
                                     let price = match utils::num_to_decimal(&bar.close) {
                                         Ok(p) => p,
                                         Err(e) => {
                                             warn!(error = %e, symbol = %alpaca_symbol, "Price conversion error");
+                                            crate::metrics::record_dropped_tick(&orig_symbol, "conversion_error");
                                             return;
                                         }
                                     };
@@ -204,7 +218,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                     debug!(symbol = %alpaca_symbol, price = %price, "Price update");
 
                                     let market_data = MarketData {
-                                        symbol: orig_symbol,
+                                        symbol: orig_symbol.to_string(),
                                         instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
                                         price,
                                         timestamp,
@@ -212,16 +226,20 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
                                     if sender.send(market_data).await.is_err() {
                                         // Channel receiver dropped
+                                    } else {
+                                        crate::metrics::record_ws_tick(&orig_symbol);
                                     }
                                 }
                             }
                             Err(e) => {
+                                crate::metrics::record_poll_latency(&orig_symbol, "error", fetch_elapsed);
                                 warn!(symbol = %alpaca_symbol, error = %e, "Failed to fetch bar");
+                                crate::metrics::record_dropped_tick(&orig_symbol, "fetch_error");
                             }
                         }
                     }
                 })
-                .buffer_unordered(5); // Parallelism factor
+                .buffer_unordered(MAX_CONCURRENT_POLLS);
 
             // Drive the stream to completion
             while stream.next().await.is_some() {
