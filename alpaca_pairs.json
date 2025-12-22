@@ -1,0 +1,110 @@
+[
+  {
+    "spot_symbol": "INTC",
+    "future_symbol": "JNJ",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 30,
+    "entry_z_score": "1.6000000000000000888178419695",
+    "exit_z_score": "0.2000000000000000111022302462"
+  },
+  {
+    "spot_symbol": "HD",
+    "future_symbol": "C",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 30,
+    "entry_z_score": "1.3999999999999999111821580293",
+    "exit_z_score": "0.2000000000000000111022302462"
+  },
+  {
+    "spot_symbol": "LOW",
+    "future_symbol": "C",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 30,
+    "entry_z_score": "1.1999999999999999555910790145",
+    "exit_z_score": "0.2000000000000000111022302462"
+  },
+  {
+    "spot_symbol": "KO",
+    "future_symbol": "TGT",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 25,
+    "entry_z_score": "2",
+    "exit_z_score": "0.2000000000000000111022302462"
+  },
+  {
+    "spot_symbol": "BAC",
+    "future_symbol": "MS",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 30,
+    "entry_z_score": "2",
+    "exit_z_score": "0.2000000000000000111022302462"
+  },
+  {
+    "spot_symbol": "DAL",
+    "future_symbol": "PEP",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 20,
+    "entry_z_score": "1.6000000000000000888178419695",
+    "exit_z_score": "0.2000000000000000111022302462"
+  }
+]

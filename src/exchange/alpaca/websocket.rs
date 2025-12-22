@@ -13,7 +13,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::interval;
+
 use tracing::{debug, info, warn};
 
 use apca::data::v2::bars as alpaca_bars;
@@ -151,14 +151,15 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(RATE_LIMIT_NZ)));
 
         // Polling loop
-        let mut poll_timer = interval(Duration::from_secs(self.poll_interval_secs));
-
-        info!("Alpaca concurrent polling started");
+        // FIX: Replaced fixed interval with adaptive polling to preventing "Latency Spiral"
+        // The loop will now run as fast as the rate limiter allows, but never Faster than poll_interval_secs.
+        // If the work takes longer than poll_interval_secs (due to rate limits), the next cycle starts immediately.
+        info!("Alpaca concurrent polling started (Adaptive Mode)");
 
         loop {
-            poll_timer.tick().await;
+            let cycle_start = tokio::time::Instant::now();
 
-            // MC-3 FIX: Arc::clone is O(1), no Vec cloning
+            // MC-3 FIX: Arc::clone is O(1)
             let pairs = Arc::clone(&symbol_pairs);
             let client = Arc::clone(&client);
             let rate_limiter = Arc::clone(&rate_limiter);
@@ -167,7 +168,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
             // Create a stream of futures to fetch data concurrently
             // Using buffer_unordered to execute up to 5 requests in parallel (conservative)
-            // MC-3 FIX: pairs.iter().cloned() iterates Arc slice contents
             let mut stream = stream::iter(pairs.iter().cloned())
                 .map(move |(orig_symbol, alpaca_symbol)| {
                     let client = client.clone();
@@ -176,7 +176,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                     let clock = clock.clone();
 
                     async move {
-                        // Wait for rate limiter
+                        // Wait for rate limiter - this provides the pacing
                         rate_limiter.until_ready().await;
 
                         let now = clock.now();
@@ -192,7 +192,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                         match client.issue::<alpaca_bars::List>(&request).await {
                             Ok(result) => {
                                 if let Some(bar) = result.bars.first() {
-                                    // CB-2 FIX: Propagate conversion error
                                     let price = match utils::num_to_decimal(&bar.close) {
                                         Ok(p) => p,
                                         Err(e) => {
@@ -204,7 +203,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
                                     debug!(symbol = %alpaca_symbol, price = %price, "Price update");
 
-                                    // MC-1 FIX: Use static str, still need to_string() for owned field
                                     let market_data = MarketData {
                                         symbol: orig_symbol,
                                         instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
@@ -213,11 +211,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                     };
 
                                     if sender.send(market_data).await.is_err() {
-                                        // Channel closed. We can't easily break the outer loop from here,
-                                        // but we can stop sending. The outer loop will continue until next tick
-                                        // or we can use a signal mechanism.
-                                        // For now, logging.
-                                        // Note: We can't return error easily from stream map.
+                                        // Channel receiver dropped
                                     }
                                 }
                             }
@@ -230,9 +224,46 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 .buffer_unordered(5); // Parallelism factor
 
             // Drive the stream to completion
-            while stream.next().await.is_some() {}
+            while stream.next().await.is_some() {
+                // Check for channel closure inside the loop to fail fast(er)
+                if sender.is_closed() {
+                    info!("Channel closed, stopping polling");
+                    return Ok(());
+                }
+            }
 
-            // Optimization: If channel is closed, we should break.
+            // Adaptive Sleep:
+            // Calculate how long the work took
+            let elapsed = cycle_start.elapsed();
+            let target_interval = Duration::from_secs(self.poll_interval_secs);
+
+            if elapsed < target_interval {
+                // If we finished early, sleep for the remainder to maintain the target interval
+                tokio::time::sleep(target_interval - elapsed).await;
+            } else {
+                // If we took longer (e.g. strict rate limits for many symbols),
+                // we log a warning (once per minute to avoid spam) and start immediately.
+                // This prevents the spiral by acknowledging we are maxed out.
+                static NEXT_LOG: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                // Simple rate limited logging
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let last = NEXT_LOG.load(std::sync::atomic::Ordering::Relaxed);
+
+                if now_secs > last {
+                    warn!(
+                        elapsed_ms = elapsed.as_millis(),
+                        target_ms = target_interval.as_millis(),
+                        "Polling cycle took longer than interval (system saturated, running at max speed)"
+                    );
+                    NEXT_LOG.store(now_secs + 60, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+
+            // Final check
             if sender.is_closed() {
                 info!("Channel closed, stopping polling");
                 return Ok(());
