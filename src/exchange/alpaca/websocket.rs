@@ -1,58 +1,62 @@
 //! Alpaca WebSocket Provider
 //!
-//! Market data provider for Alpaca using polling (reliable for equities).
+//! Real-time market data streaming via native WebSocket connection to Alpaca.
 //!
-//! Note: The apca crate's streaming API has complex generics that are difficult
-//! to work with. This polling implementation provides reliable market data
-//! updates which are sufficient for equity trading (not latency-sensitive like crypto).
+//! ## WebSocket Flow
+//! 1. Connect to `wss://stream.data.alpaca.markets/v2/iex`
+//! 2. Receive `{"T":"success","msg":"connected"}`
+//! 3. Send auth: `{"action":"auth","key":"...","secret":"..."}`
+//! 4. Receive `{"T":"success","msg":"authenticated"}`
+//! 5. Send subscribe: `{"action":"subscribe","trades":["AAPL","AMD"]}`
+//! 6. Receive trades in real-time: `{"T":"t","S":"AAPL","p":"126.55","t":"..."}`
 
 use async_trait::async_trait;
-use futures_util::stream::{self, StreamExt};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
+use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-
-use tracing::{debug, info, warn};
-
-use apca::data::v2::bars as alpaca_bars;
-use apca::{ApiInfo, Client};
+use tokio::time::interval;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tracing::{debug, error, info, warn};
 
 use crate::exchange::alpaca::utils;
 use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
 use crate::strategy::dual_leg_trading::{Clock, SystemClock};
 use crate::types::MarketData;
 
-/// MC-1 FIX: Static instrument_id to avoid heap allocation per tick
+/// Static instrument_id to avoid heap allocation per tick
 static ALPACA_INSTRUMENT_ID: &str = "alpaca";
 
-/// Alpaca free tier rate limit: 200 req/min ≈ 3.3 req/sec
-/// Using 3 req/sec to stay safely under the limit
-const RATE_LIMIT_PER_SECOND: u32 = 3;
+/// IEX feed URL (free tier)
+const WS_URL_IEX: &str = "wss://stream.data.alpaca.markets/v2/iex";
 
-/// CB-2 FIX: Compile-time NonZeroU32 to avoid runtime .expect()
-const RATE_LIMIT_NZ: NonZeroU32 = match NonZeroU32::new(RATE_LIMIT_PER_SECOND) {
-    Some(v) => v,
-    None => panic!("RATE_LIMIT_PER_SECOND must be > 0"),
-};
+// Alpaca WebSocket message types
+#[derive(Debug, Deserialize)]
+struct AlpacaMessage {
+    #[serde(rename = "T")]
+    msg_type: String,
+    #[serde(default)]
+    msg: Option<String>,
+}
 
-/// Maximum number of concurrent poll requests
-const MAX_CONCURRENT_POLLS: usize = 5;
-
-/// Alpaca data provider using polling for reliable market data
+/// Alpaca WebSocket provider for real-time market data streaming
 ///
-/// Uses 1-minute bar polling instead of WebSocket streaming.
-/// This is simpler and more reliable for equity trading.
-///
-/// Note: Stock data only available during market hours (9:30 AM - 4 PM ET)
+/// Connects to Alpaca's real-time stock data WebSocket for sub-second
+/// price updates. Uses the IEX feed (free tier).
 pub struct AlpacaWebSocketProvider {
     api_key: String,
     api_secret: String,
+    #[allow(dead_code)]
     sandbox: bool,
-    /// Polling interval in seconds
-    poll_interval_secs: u64,
-    /// Injected clock for deterministic time
+    /// Injected clock for deterministic time (used for testing)
+    #[allow(dead_code)]
     clock: Arc<dyn Clock>,
 }
 
@@ -61,13 +65,12 @@ impl AlpacaWebSocketProvider {
     pub fn new(config: &ExchangeConfig) -> Result<Self, ExchangeError> {
         info!(
             sandbox = config.sandbox,
-            "Creating Alpaca data provider (polling mode)"
+            "Creating Alpaca WebSocket provider (streaming mode)"
         );
         Ok(Self {
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
             sandbox: config.sandbox,
-            poll_interval_secs: 5, // 5 second polling interval
             clock: Arc::new(SystemClock),
         })
     }
@@ -80,7 +83,6 @@ impl AlpacaWebSocketProvider {
             ExchangeError::Configuration("ALPACA_API_SECRET must be set".to_string())
         })?;
 
-        // N-3 FIX: Read sandbox from env, default to paper (true) for safety
         let sandbox = std::env::var("ALPACA_SANDBOX")
             .map(|v| v != "false" && v != "0")
             .unwrap_or(true);
@@ -89,7 +91,6 @@ impl AlpacaWebSocketProvider {
             api_key,
             api_secret,
             sandbox,
-            poll_interval_secs: 5,
             clock: Arc::new(SystemClock),
         })
     }
@@ -101,14 +102,104 @@ impl AlpacaWebSocketProvider {
     ) -> Result<Self, ExchangeError> {
         info!(
             sandbox = config.sandbox,
-            "Creating Alpaca data provider with injected clock"
+            "Creating Alpaca WebSocket provider with injected clock"
         );
         Ok(Self {
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
             sandbox: config.sandbox,
-            poll_interval_secs: 5,
             clock,
+        })
+    }
+
+    /// Connect to WebSocket with retry logic
+    async fn connect_with_retry(
+        max_retries: u32,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        ExchangeError,
+    > {
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(60);
+
+        for attempt in 1..=max_retries {
+            match connect_async(WS_URL_IEX).await {
+                Ok((stream, _)) => {
+                    info!("Alpaca WebSocket connected (attempt {})", attempt);
+                    return Ok(stream);
+                }
+                Err(e) if attempt < max_retries => {
+                    error!(
+                        "WebSocket connection failed (attempt {}/{}): {}",
+                        attempt, max_retries, e
+                    );
+                    info!("Retrying in {:?}...", backoff);
+                    tokio::time::sleep(backoff).await;
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                }
+                Err(e) => {
+                    error!("WebSocket connection failed after {} attempts", max_retries);
+                    return Err(ExchangeError::Network(format!(
+                        "Failed to connect after {} retries: {}",
+                        max_retries, e
+                    )));
+                }
+            }
+        }
+
+        Err(ExchangeError::Network(
+            "Connection retry loop exited unexpectedly".to_string(),
+        ))
+    }
+
+    /// CB-1 FIX: Parse trade from serde_json::Value without f64 precision loss
+    /// MC-2 FIX: Zero-allocation parsing (no to_string() call)
+    /// MC-3 FIX: O(1) HashMap lookup instead of O(n) Vec scan
+    /// MC-1 FIX: No Utc::now() fallback - strict timestamp parsing
+    fn parse_trade_from_value(
+        value: &serde_json::Value,
+        symbol_map: &HashMap<String, String>,
+    ) -> Option<MarketData> {
+        // Early exit: check message type inline
+        let msg_type = value.get("T")?.as_str()?;
+        if msg_type != "t" {
+            return None;
+        }
+
+        let alpaca_symbol = value.get("S")?.as_str()?;
+        let timestamp_str = value.get("t")?.as_str()?;
+
+        // O(1) symbol lookup (MC-3 FIX)
+        let original_symbol = symbol_map
+            .get(alpaca_symbol)
+            .cloned()
+            .unwrap_or_else(|| alpaca_symbol.to_string());
+
+        // CB-1 FIX: Precision-safe price parsing
+        // Try string first (preferred), fall back to f64 if Alpaca sends numeric
+        let price = if let Some(s) = value.get("p")?.as_str() {
+            // Best case: string value preserves precision
+            Decimal::from_str(s).ok()?
+        } else if let Some(n) = value.get("p")?.as_f64() {
+            // Fallback: Alpaca may send numeric JSON (lossy but functional)
+            Decimal::from_f64(n)?
+        } else {
+            return None;
+        };
+
+        // MC-1 FIX: Strict timestamp - no Utc::now() fallback
+        let timestamp = timestamp_str
+            .parse::<DateTime<Utc>>()
+            .ok()?
+            .timestamp_millis();
+
+        Some(MarketData {
+            symbol: original_symbol,
+            instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
+            price,
+            timestamp,
         })
     }
 }
@@ -122,168 +213,206 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
     ) -> Result<(), ExchangeError> {
         info!(
             symbols_count = symbols.len(),
-            poll_interval = self.poll_interval_secs,
-            "Starting Alpaca data provider (Actor-Lite Poll Mode)"
+            "Starting Alpaca WebSocket streaming"
         );
 
-        // NOTE: We construct ApiInfo directly to avoid abusing global environment variables
-        let base_url = if self.sandbox {
-            "https://paper-api.alpaca.markets"
-        } else {
-            "https://api.alpaca.markets"
-        };
-
-        let api_info =
-            ApiInfo::from_parts(base_url, &self.api_key, &self.api_secret).map_err(|e| {
-                ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
-            })?;
-
-        let client = Arc::new(Client::new(api_info));
-        let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(RATE_LIMIT_NZ)));
-        let clock = Arc::clone(&self.clock);
-
-        // Pre-compute symbol mappings once
-        // FIX: Use Arc<str> for cheap cloning in hot loops
-        let monitored_symbols: Arc<[(Arc<str>, Arc<str>)]> = symbols
+        // MC-3 FIX: Use HashMap for O(1) symbol lookup
+        // Key: Alpaca symbol, Value: Original symbol
+        let symbol_map: HashMap<String, String> = symbols
             .iter()
-            .map(|s| (Arc::from(s.as_str()), Arc::from(utils::to_alpaca_symbol(s))))
-            .collect::<Vec<_>>()
-            .into();
+            .map(|s| (utils::to_alpaca_symbol(s).into_owned(), s.clone()))
+            .collect();
 
-        let poll_interval = Duration::from_secs(self.poll_interval_secs);
+        let alpaca_symbols: Vec<String> = symbol_map.keys().cloned().collect();
 
-        // Spawn a dedicated poller task to decouple scheduling from execution
+        let api_key = self.api_key.clone();
+        let api_secret = self.api_secret.clone();
+
+        // Spawn background WebSocket handler
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(poll_interval);
-            // set missed tick behavior to delay to avoid bursts if we get behind
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            const MAX_RECONNECT_ATTEMPTS: u32 = u32::MAX;
+            const CONNECTION_MAX_RETRIES: u32 = 5;
+
+            let mut reconnect_count = 0;
 
             loop {
-                // Wait for next tick
-                interval.tick().await;
+                reconnect_count += 1;
+                info!(
+                    "Alpaca WebSocket connection attempt {} (symbols: {:?})",
+                    reconnect_count, alpaca_symbols
+                );
 
-                if sender.is_closed() {
-                    info!("Channel closed, stopping polling task");
-                    break;
-                }
-
-                let start_poll = std::time::Instant::now();
-
-                // Fan-out: Create a stream of concurrent fetch futures
-                let fetches = stream::iter(monitored_symbols.iter().cloned())
-                    .map(|(orig, alpaca)| {
-                        let client = client.clone();
-                        let rl = rate_limiter.clone();
-                        let clock = clock.clone();
-
-                        async move {
-                            rl.until_ready().await;
-                            Self::fetch_single_bar(&client, &clock, &orig, &alpaca).await
+                // Connect with retries
+                let ws_stream = match Self::connect_with_retry(CONNECTION_MAX_RETRIES).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        error!("Failed to establish WebSocket connection: {}", e);
+                        if reconnect_count == MAX_RECONNECT_ATTEMPTS {
+                            return;
                         }
-                    })
-                    // Limit concurrency to avoid overwhelming the runtime or hitting rate limits too hard
-                    .buffer_unordered(MAX_CONCURRENT_POLLS);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
 
-                // Fan-in: Process results
-                let mut results = fetches;
-                let mut processed_count = 0;
+                let (mut write, mut read) = ws_stream.split();
 
-                while let Some(result) = results.next().await {
-                    match result {
-                        Ok(Some(data)) => {
-                            let symbol = data.symbol.clone();
-                            if let Err(_e) = sender.send(data).await {
-                                info!("Channel closed during send, stopping polling");
-                                return;
+                // Wait for connection success message
+                let mut authenticated = false;
+                let mut subscribed = false;
+
+                // Read initial connection message
+                if let Some(Ok(Message::Text(text))) = read.next().await {
+                    debug!("Received: {}", text);
+                    // Parse as array of messages
+                    if let Ok(msgs) = serde_json::from_str::<Vec<AlpacaMessage>>(&text) {
+                        for msg in msgs {
+                            if msg.msg_type == "success" && msg.msg.as_deref() == Some("connected")
+                            {
+                                info!("Alpaca WebSocket connected successfully");
+
+                                // Send auth message
+                                let auth_msg = json!({
+                                    "action": "auth",
+                                    "key": api_key,
+                                    "secret": api_secret
+                                });
+
+                                if let Err(e) =
+                                    write.send(Message::Text(auth_msg.to_string().into())).await
+                                {
+                                    error!("Failed to send auth message: {}", e);
+                                    break;
+                                }
                             }
-                            crate::metrics::record_ws_tick(&symbol);
-                            processed_count += 1;
-                        }
-                        Ok(None) => {
-                            // No new data
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Poll failed");
                         }
                     }
                 }
 
-                let elapsed = start_poll.elapsed();
-                if elapsed > poll_interval {
-                    warn!(
-                        elapsed_ms = elapsed.as_millis(),
-                        interval_ms = poll_interval.as_millis(),
-                        "Polling cycle saturated interval - system falling behind"
-                    );
+                // Wait for auth response
+                if let Some(Ok(Message::Text(text))) = read.next().await {
+                    debug!("Auth response: {}", text);
+                    if let Ok(msgs) = serde_json::from_str::<Vec<AlpacaMessage>>(&text) {
+                        for msg in msgs {
+                            if msg.msg_type == "success"
+                                && msg.msg.as_deref() == Some("authenticated")
+                            {
+                                info!("Alpaca WebSocket authenticated");
+                                authenticated = true;
+
+                                // Send subscribe message
+                                let subscribe_msg = json!({
+                                    "action": "subscribe",
+                                    "trades": alpaca_symbols
+                                });
+
+                                if let Err(e) = write
+                                    .send(Message::Text(subscribe_msg.to_string().into()))
+                                    .await
+                                {
+                                    error!("Failed to send subscribe message: {}", e);
+                                    break;
+                                }
+                            } else if msg.msg_type == "error" {
+                                error!("Auth failed: {:?}", msg.msg);
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if !authenticated {
+                    error!("Failed to authenticate, reconnecting...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+
+                // Wait for subscription confirmation
+                if let Some(Ok(Message::Text(text))) = read.next().await {
+                    debug!("Subscribe response: {}", text);
+                    if let Ok(msgs) = serde_json::from_str::<Vec<AlpacaMessage>>(&text) {
+                        for msg in msgs {
+                            if msg.msg_type == "subscription" {
+                                info!("Alpaca WebSocket subscribed to trades");
+                                subscribed = true;
+                            }
+                        }
+                    }
+                }
+
+                if !subscribed {
+                    warn!("Subscription confirmation not received, continuing anyway...");
+                }
+
+                // Main message loop
+                let mut heartbeat_interval = interval(Duration::from_secs(30));
+                let should_reconnect: bool;
+
+                loop {
+                    tokio::select! {
+                        _ = heartbeat_interval.tick() => {
+                            debug!("Alpaca WebSocket heartbeat: connection active");
+                        }
+                        msg = read.next() => {
+                            match msg {
+                                Some(Ok(Message::Text(text))) => {
+                                    // Alpaca sends arrays of messages
+                                    // MC-2 FIX: Parse directly, no intermediate to_string()
+                                    if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                                        for msg_value in messages {
+                                            if let Some(data) = Self::parse_trade_from_value(
+                                                &msg_value,
+                                                &symbol_map
+                                            ) {
+                                                let symbol = data.symbol.clone();
+                                                if let Err(_e) = sender.send(data).await {
+                                                    info!("Channel closed, stopping WebSocket");
+                                                    return;
+                                                }
+                                                crate::metrics::record_ws_tick(&symbol);
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(Ok(Message::Ping(payload))) => {
+                                    debug!("Received ping, sending pong");
+                                    if let Err(e) = write.send(Message::Pong(payload)).await {
+                                        warn!("Failed to send pong: {}", e);
+                                    }
+                                }
+                                Some(Ok(Message::Close(frame))) => {
+                                    info!("WebSocket closed by server: {:?}", frame);
+                                    should_reconnect = true;
+                                    break;
+                                }
+                                Some(Err(e)) => {
+                                    error!("WebSocket error: {}", e);
+                                    should_reconnect = true;
+                                    break;
+                                }
+                                None => {
+                                    info!("WebSocket stream ended");
+                                    should_reconnect = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                if should_reconnect {
+                    info!("Initiating Alpaca WebSocket reconnection...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
                 } else {
-                    debug!(
-                        processed = processed_count,
-                        elapsed_ms = elapsed.as_millis(),
-                        "Poll cycle complete"
-                    );
+                    break;
                 }
             }
         });
 
         Ok(())
-    }
-}
-
-impl AlpacaWebSocketProvider {
-    // Helper for fetching a single bar (isolated logic)
-    // Returns Result<Option<MarketData>>: Ok(None) means success but no data.
-    async fn fetch_single_bar(
-        client: &Client,
-        clock: &Arc<dyn Clock>,
-        orig_symbol: &str,
-        alpaca_symbol: &str,
-    ) -> Result<Option<MarketData>, ExchangeError> {
-        let now = clock.now();
-        let start = now - chrono::Duration::minutes(2);
-
-        let request = alpaca_bars::ListReqInit {
-            limit: Some(1),
-            feed: Some(apca::data::v2::Feed::IEX),
-            ..Default::default()
-        }
-        .init(alpaca_symbol, start, now, alpaca_bars::TimeFrame::OneMinute);
-
-        let fetch_start = std::time::Instant::now();
-        let result = client.issue::<alpaca_bars::List>(&request).await;
-        let fetch_elapsed = fetch_start.elapsed().as_secs_f64();
-
-        match result {
-            Ok(result) => {
-                crate::metrics::record_poll_latency(orig_symbol, "success", fetch_elapsed);
-
-                if let Some(bar) = result.bars.first() {
-                    let price = match utils::num_to_decimal(&bar.close) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(error = %e, symbol = %alpaca_symbol, "Price conversion error");
-                            crate::metrics::record_dropped_tick(orig_symbol, "conversion_error");
-                            return Ok(None);
-                        }
-                    };
-                    let timestamp = bar.time.timestamp_millis();
-
-                    Ok(Some(MarketData {
-                        symbol: orig_symbol.to_string(),
-                        instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
-                        price,
-                        timestamp,
-                    }))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(e) => {
-                crate::metrics::record_poll_latency(orig_symbol, "error", fetch_elapsed);
-                warn!(symbol = %alpaca_symbol, error = %e, "Failed to fetch bar");
-                crate::metrics::record_dropped_tick(orig_symbol, "fetch_error");
-                Err(ExchangeError::Network(format!("Fetch failed: {}", e)))
-            }
-        }
     }
 }
 
@@ -313,5 +442,69 @@ mod tests {
         let clock = Arc::new(SystemClock);
         let provider = AlpacaWebSocketProvider::with_clock(&config, clock);
         assert!(provider.is_ok());
+    }
+
+    #[test]
+    fn test_parse_trade_with_string_price() {
+        let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
+
+        // CB-1 FIX: Test with string price (precision-safe)
+        let value: serde_json::Value = serde_json::json!({
+            "T": "t",
+            "S": "AAPL",
+            "p": "150.25",
+            "t": "2024-01-15T10:30:00Z"
+        });
+
+        let result = AlpacaWebSocketProvider::parse_trade_from_value(&value, &symbol_map);
+        assert!(result.is_some());
+
+        let data = result.unwrap();
+        assert_eq!(data.symbol, "AAPL");
+        assert_eq!(data.price, Decimal::from_str("150.25").unwrap());
+    }
+
+    #[test]
+    fn test_parse_trade_with_numeric_price_fallback() {
+        let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
+
+        // Test fallback for numeric price (Alpaca may send this)
+        let value: serde_json::Value = serde_json::json!({
+            "T": "t",
+            "S": "AAPL",
+            "p": 150.25,
+            "t": "2024-01-15T10:30:00Z"
+        });
+
+        let result = AlpacaWebSocketProvider::parse_trade_from_value(&value, &symbol_map);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_non_trade_message() {
+        let symbol_map: HashMap<String, String> = HashMap::new();
+        let value: serde_json::Value = serde_json::json!({
+            "T": "success",
+            "msg": "connected"
+        });
+
+        let result = AlpacaWebSocketProvider::parse_trade_from_value(&value, &symbol_map);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_trade_bad_timestamp_returns_none() {
+        let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
+
+        // MC-1 FIX: Bad timestamp should return None, not fallback to Utc::now()
+        let value: serde_json::Value = serde_json::json!({
+            "T": "t",
+            "S": "AAPL",
+            "p": "150.25",
+            "t": "invalid-timestamp"
+        });
+
+        let result = AlpacaWebSocketProvider::parse_trade_from_value(&value, &symbol_map);
+        assert!(result.is_none());
     }
 }

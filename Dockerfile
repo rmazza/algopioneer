@@ -6,7 +6,7 @@
 # Stage 1: Chef (Prepares the recipe)
 # Using stable Rust for production reliability
 # ------------------------------------------------------------------------------
-FROM rust:1.90-bookworm AS chef
+FROM rust:1-bookworm AS chef
 # Install cargo-chef globally
 RUN cargo install cargo-chef --locked
 WORKDIR /app
