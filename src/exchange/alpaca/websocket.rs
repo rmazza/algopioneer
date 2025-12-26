@@ -19,7 +19,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -28,7 +27,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::exchange::alpaca::utils;
 use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
-use crate::strategy::dual_leg_trading::{Clock, SystemClock};
 use crate::types::MarketData;
 
 /// Static instrument_id to avoid heap allocation per tick
@@ -53,11 +51,6 @@ struct AlpacaMessage {
 pub struct AlpacaWebSocketProvider {
     api_key: String,
     api_secret: String,
-    #[allow(dead_code)]
-    sandbox: bool,
-    /// Injected clock for deterministic time (used for testing)
-    #[allow(dead_code)]
-    clock: Arc<dyn Clock>,
 }
 
 impl AlpacaWebSocketProvider {
@@ -70,8 +63,6 @@ impl AlpacaWebSocketProvider {
         Ok(Self {
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
-            sandbox: config.sandbox,
-            clock: Arc::new(SystemClock),
         })
     }
 
@@ -83,32 +74,9 @@ impl AlpacaWebSocketProvider {
             ExchangeError::Configuration("ALPACA_API_SECRET must be set".to_string())
         })?;
 
-        let sandbox = std::env::var("ALPACA_SANDBOX")
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
-
         Ok(Self {
             api_key,
             api_secret,
-            sandbox,
-            clock: Arc::new(SystemClock),
-        })
-    }
-
-    /// Create with injected clock for testing
-    pub fn with_clock(
-        config: &ExchangeConfig,
-        clock: Arc<dyn Clock>,
-    ) -> Result<Self, ExchangeError> {
-        info!(
-            sandbox = config.sandbox,
-            "Creating Alpaca WebSocket provider with injected clock"
-        );
-        Ok(Self {
-            api_key: config.api_key.clone(),
-            api_secret: config.api_secret.clone(),
-            sandbox: config.sandbox,
-            clock,
         })
     }
 
@@ -429,18 +397,6 @@ mod tests {
         };
 
         let provider = AlpacaWebSocketProvider::new(&config);
-        assert!(provider.is_ok());
-    }
-
-    #[test]
-    fn test_provider_with_clock() {
-        let config = ExchangeConfig {
-            api_key: "test".to_string(),
-            api_secret: "test".to_string(),
-            sandbox: true,
-        };
-        let clock = Arc::new(SystemClock);
-        let provider = AlpacaWebSocketProvider::with_clock(&config, clock);
         assert!(provider.is_ok());
     }
 

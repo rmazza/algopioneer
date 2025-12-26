@@ -1482,6 +1482,7 @@ impl ExecutionEngine {
     pub async fn execute_basis_exit(
         &self,
         pair: &InstrumentPair,
+        direction: PositionDirection,
         quantity: Decimal,
         hedge_qty: Decimal,
         leg1_price: Decimal,
@@ -1494,16 +1495,20 @@ impl ExecutionEngine {
             ));
         }
 
-        // Reverse of entry: Sell Spot, Buy Future
-        let spot_leg = self.client.execute_order(
-            &pair.spot_symbol,
-            OrderSide::Sell,
-            quantity,
-            Some(leg1_price),
-        );
+        // CRITICAL FIX: Direction-aware order sides
+        // Long exit: Sell Spot (close long), Buy Future (close short)
+        // Short exit: Buy Spot (close short), Sell Future (close long)
+        let (spot_side, future_side) = match direction {
+            PositionDirection::Long => (OrderSide::Sell, OrderSide::Buy),
+            PositionDirection::Short => (OrderSide::Buy, OrderSide::Sell),
+        };
+
+        let spot_leg =
+            self.client
+                .execute_order(&pair.spot_symbol, spot_side, quantity, Some(leg1_price));
         let future_leg = self.client.execute_order(
             &pair.future_symbol,
-            OrderSide::Buy,
+            future_side,
             hedge_qty,
             Some(leg2_price),
         );
@@ -1527,12 +1532,12 @@ impl ExecutionEngine {
         // For exit, failures require retrying the same action (not reversal)
         if spot_res.is_err() || future_res.is_err() {
             if let Err(e) = spot_res {
-                self.queue_exit_retry(&pair.spot_symbol, OrderSide::Sell, quantity, e, "Spot")
+                self.queue_exit_retry(&pair.spot_symbol, spot_side, quantity, e, "Spot")
                     .await?;
             }
 
             if let Err(e) = future_res {
-                self.queue_exit_retry(&pair.future_symbol, OrderSide::Buy, hedge_qty, e, "Future")
+                self.queue_exit_retry(&pair.future_symbol, future_side, hedge_qty, e, "Future")
                     .await?;
             }
 
@@ -2264,7 +2269,9 @@ impl DualLegStrategy {
 
                     tokio::spawn(async move {
                         let result = match engine
-                            .execute_basis_exit(&pair, leg1_qty, leg2_qty, p1_limit, p2_limit)
+                            .execute_basis_exit(
+                                &pair, direction, leg1_qty, leg2_qty, p1_limit, p2_limit,
+                            )
                             .await
                         {
                             Ok(res) => res,

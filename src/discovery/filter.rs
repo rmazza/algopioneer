@@ -194,7 +194,15 @@ pub fn adf_test(spread: &[f64]) -> (f64, bool) {
         denominator += y_centered * y_centered;
     }
 
-    if denominator.abs() < f64::EPSILON {
+    // MC-2 FIX: More conservative bound for numerical stability
+    // f64::EPSILON (~2.2e-16) is too small; OLS can become unstable
+    // at larger denominators when data is near-constant or highly correlated
+    const NUMERICAL_STABILITY_THRESHOLD: f64 = 1e-12;
+    if denominator.abs() < NUMERICAL_STABILITY_THRESHOLD {
+        debug!(
+            denominator = format!("{:.2e}", denominator),
+            "ADF test skipped: numerically unstable regression (near-zero variance)"
+        );
         return (0.0, false); // Degenerate case
     }
 
