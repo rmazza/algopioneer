@@ -13,8 +13,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Coinbase credentials (crypto)
   COINBASE_API_KEY: ${{ secrets.COINBASE_API_KEY || 'test-key-ci' }}
   COINBASE_API_SECRET: ${{ secrets.COINBASE_API_SECRET || 'test-secret-ci' }}
+  # Alpaca credentials (equities) - Paper trading endpoint used for backtesting
+  ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY || 'test-key-ci' }}
+  ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET || 'test-secret-ci' }}
 
 jobs:
   backtest:
@@ -25,12 +29,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # --- Coinbase (Crypto) ---
           - name: BTC-MA-Sanity
             strategy: moving-average
             symbols: BTC-USD
-          - name: Multi-Pair-DualLeg
+            exchange: coinbase
+          - name: Crypto-DualLeg
             strategy: dual-leg
             symbols: BTC-USD,ETH-USD
+            exchange: coinbase
+          # --- Alpaca (Equities) ---
+          - name: Tech-Pairs
+            strategy: dual-leg
+            symbols: AAPL,MSFT
+            exchange: alpaca
+          - name: Finance-Pairs
+            strategy: dual-leg
+            symbols: JPM,BAC
+            exchange: alpaca
+          - name: Energy-Pairs
+            strategy: dual-leg
+            symbols: XOM,CVX
+            exchange: alpaca
 
     steps:
       - name: Checkout repository
@@ -58,6 +78,7 @@ jobs:
         run: |
           mkdir -p backtest_results
           cargo run --release -- backtest \
+            --exchange ${{ matrix.exchange }} \
             --strategy ${{ matrix.strategy }} \
             --symbols ${{ matrix.symbols }} \
             --duration ${{ github.event.inputs.duration || '7d' }} \
