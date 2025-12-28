@@ -47,3 +47,7 @@ Some modules use `Error` suffix (e.g., `ExecutionError`, `ExchangeError`) while 
 - [x] **MC-2**: Add numerical stability threshold (1e-12) to ADF test in `filter.rs`
 - [x] **CB-1**: Precision-safe price parsing in Alpaca WebSocket
 - [x] **MC-3**: O(1) symbol lookup with HashMap in WebSocket handler
+- [x] **CB-2**: Alpaca Discovery Fixes (Decimal z-scores, daily bars support)
+- [x] **CB-3**: Reliability improvements (Clock injection, graceful error handling)
+- [x] **CB-5**: Safe access in Market Data Provider (removed unwrap)
+- [x] **N-2**: Performance optimization in Alpaca Utils (pre-computed powers of 10)
