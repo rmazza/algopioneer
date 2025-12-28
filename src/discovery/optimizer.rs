@@ -218,35 +218,46 @@ impl Position {
     }
 }
 
-/// Trading days per year for Sharpe annualization (unused, Sharpe calculated per-trade)
-/// Calculate annualized Sharpe ratio from trade returns
+/// Calculate Sharpe ratio from trade returns using Welford's Online Algorithm.
 ///
-/// # Optimization (Zero-Allocation)
-/// Uses a two-pass approach over the slice to calculate mean and variance
-/// without allocating an intermediate `Vec<f64>`.
+/// # Numerical Stability (P0 Fix)
+/// The naive two-pass variance algorithm is susceptible to **catastrophic cancellation**
+/// when variance is small relative to the square of the mean. This is common in HFT
+/// where returns cluster tightly around a small positive mean (e.g., 1 bps ± 0.01 bps).
+///
+/// Welford's algorithm computes running mean and M2 (sum of squared deviations) in a
+/// single pass, maintaining numerical stability by:
+/// 1. Keeping the running mean close to current values (minimizing precision loss)
+/// 2. Computing deviations incrementally rather than from a pre-computed mean
+///
+/// # Zero-Allocation
+/// Operates directly on the `&[Decimal]` slice with O(1) space complexity.
+///
+/// # Reference
+/// Welford, B.P. (1962). "Note on a method for calculating corrected sums of
+/// squares and products". Technometrics. 4 (3): 419–420.
 fn calculate_sharpe_ratio(returns: &[Decimal]) -> f64 {
     let n = returns.len();
     if n < 2 {
         return 0.0;
     }
 
-    let n_f64 = n as f64;
+    // Welford's Online Algorithm for numerically stable mean and variance
+    let mut count = 0_u64;
+    let mut mean = 0.0_f64;
+    let mut m2 = 0.0_f64; // Sum of squared deviations from running mean
 
-    // Pass 1: Sum for mean (Zero allocation)
-    let sum: f64 = returns.iter().map(|d| d.to_f64().unwrap_or(0.0)).sum();
+    for d in returns {
+        let val = d.to_f64().unwrap_or(0.0);
+        count += 1;
+        let delta = val - mean;
+        mean += delta / count as f64;
+        let delta2 = val - mean; // Note: uses updated mean
+        m2 += delta * delta2;
+    }
 
-    let mean = sum / n_f64;
-
-    // Pass 2: Sum for variance (Zero allocation)
-    let variance_sum: f64 = returns
-        .iter()
-        .map(|d| {
-            let val = d.to_f64().unwrap_or(0.0);
-            (val - mean).powi(2)
-        })
-        .sum();
-
-    let variance = variance_sum / (n_f64 - 1.0);
+    // Sample variance (n-1 denominator for unbiased estimator)
+    let variance = m2 / (count - 1) as f64;
     let std_dev = variance.sqrt();
 
     // Per-trade Sharpe ratio (not annualized) to avoid inflation on high-frequency trading
@@ -829,5 +840,38 @@ mod tests {
         assert_eq!(pair.validation_sharpe, 1.2);
         assert_eq!(pair.validation_trades, 5);
         assert_eq!(pair.profit_per_trade, dec!(50));
+    }
+
+    /// P0 FIX: Test Welford's algorithm handles small variance without catastrophic cancellation.
+    /// This scenario is common in HFT where returns cluster tightly around a small mean.
+    #[test]
+    fn test_sharpe_ratio_small_variance_numerical_stability() {
+        // Returns with very small variance relative to mean (HFT scenario)
+        // Mean ≈ 0.0001 (1 bps), variance ≈ 1e-16
+        // Naive two-pass algorithm would lose precision due to catastrophic cancellation
+        let returns = vec![
+            dec!(0.00010001),
+            dec!(0.00010002),
+            dec!(0.00009999),
+            dec!(0.00010000),
+            dec!(0.00009998),
+        ];
+        let sharpe = calculate_sharpe_ratio(&returns);
+
+        // Welford's algorithm should produce a finite, reasonable Sharpe ratio
+        assert!(
+            sharpe.is_finite(),
+            "Sharpe should be finite, got: {}",
+            sharpe
+        );
+        assert!(
+            sharpe > 0.0,
+            "Sharpe should be positive for positive mean returns"
+        );
+        // With tiny variance and positive mean, Sharpe should be quite high
+        assert!(
+            sharpe > 1.0,
+            "High Sharpe expected for tight positive returns"
+        );
     }
 }

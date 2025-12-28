@@ -112,6 +112,13 @@ const MIN_SAFE_PRICE_RATIO: f64 = 1e-12; // Reciprocal of max for symmetry
 // NP-1 FIX: Extract magic number to named constant for precision warning throttling
 const PRECISION_WARNING_LOG_INTERVAL: u64 = 1000;
 
+// P1 FIX: Load Shedding Threshold
+// Maximum allowed latency (in milliseconds) before a tick is considered stale.
+// During high-volatility events or WebSocket floods, processing stale ticks
+// leads to execution on prices that no longer exist, causing massive slippage.
+// This check is on the hot path and uses simple integer arithmetic.
+const MAX_ALLOWED_LATENCY_MS: i64 = 100;
+
 // TASK 4: Ghost Position Recovery Marker
 // Used to indicate that an entry price is unknown after state recovery.
 // When process_tick sees this value, it will reset to current market price.
@@ -173,6 +180,8 @@ pub struct DualLegLogThrottler {
     pub unstable_state: LogThrottle,
     pub tick_age: LogThrottle,
     pub sync_issue: LogThrottle,
+    /// P1 FIX: Throttler for load shedding warnings (stale tick drops)
+    pub latency_drop: LogThrottle,
 }
 
 impl DualLegLogThrottler {
@@ -182,6 +191,7 @@ impl DualLegLogThrottler {
             unstable_state: LogThrottle::new(interval),
             tick_age: LogThrottle::new(interval),
             sync_issue: LogThrottle::new(interval),
+            latency_drop: LogThrottle::new(interval),
         }
     }
 }
@@ -1978,7 +1988,33 @@ impl DualLegStrategy {
             }
             return;
         }
+
+        // --- P1 FIX: Load Shedding ---
+        // Drop stale ticks to prevent execution on prices that no longer exist.
+        // During high-volatility events or WebSocket floods, channel buffers fill and
+        // processing lags behind. Executing on 5-second-old prices causes massive slippage.
+        //
+        // SAFETY: Reconciling/Halted states already returned above, so we only shed load
+        // during normal operation when we can afford to skip stale data.
+        //
+        // HOT PATH: Simple i64 subtraction - single CPU instruction.
         let now = self.clock.now_ts_millis();
+        let tick_latency = now - leg1.timestamp.max(leg2.timestamp);
+
+        if tick_latency > MAX_ALLOWED_LATENCY_MS {
+            if self.throttler.latency_drop.should_log() {
+                let suppressed = self.throttler.latency_drop.get_and_reset_suppressed_count();
+                warn!(
+                    latency_ms = tick_latency,
+                    threshold_ms = MAX_ALLOWED_LATENCY_MS,
+                    leg1_ts = leg1.timestamp,
+                    leg2_ts = leg2.timestamp,
+                    suppressed = suppressed,
+                    "LOAD SHEDDING: Dropping stale tick to prevent execution slippage"
+                );
+            }
+            return;
+        }
 
         if let Err(e) = self.validator.validate(leg1, now) {
             if self.throttler.tick_age.should_log() {
