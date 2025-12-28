@@ -1,24 +1,37 @@
-name: Nightly Backtest
+name: Nightly Strategy Regression Suite
 
 on:
   schedule:
-    # Run at 02:00 UTC every day
+    # 02:00 UTC daily (19:00 MST previous day)
     - cron: '0 2 * * *'
   workflow_dispatch:
-    # Allow manual triggering
+    inputs:
+      duration:
+        description: 'Backtest duration (e.g., 7d, 30d)'
+        required: false
+        default: '7d'
 
 env:
   CARGO_TERM_COLOR: always
-  # Use CI keys or placeholders; backtesting usually strictly uses historical data
-  # ensuring no external API calls unless configured otherwise.
-  COINBASE_API_KEY: "test-key-ci"
-  COINBASE_API_SECRET: "test-secret-ci"
+  COINBASE_API_KEY: ${{ secrets.COINBASE_API_KEY || 'test-key-ci' }}
+  COINBASE_API_SECRET: ${{ secrets.COINBASE_API_SECRET || 'test-secret-ci' }}
 
 jobs:
   backtest:
-    name: Strategy Regression Test
+    name: Backtest (${{ matrix.name }})
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: BTC-MA-Sanity
+            strategy: moving-average
+            symbols: BTC-USD
+          - name: Multi-Pair-DualLeg
+            strategy: dual-leg
+            symbols: BTC-USD,ETH-USD
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,7 +39,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
+      - name: Cache Cargo artifacts
         uses: actions/cache@v4
         with:
           path: |
@@ -38,18 +51,38 @@ jobs:
             ${{ runner.os }}-cargo-backtest-
 
       - name: Build Release
-        run: cargo build --release --verbose
+        run: cargo build --release --locked --verbose
 
-      - name: Sanity Check (BTC-USD)
+      - name: Run Backtest
+        id: backtest
         run: |
+          mkdir -p backtest_results
           cargo run --release -- backtest \
-            --strategy moving-average \
-            --symbols BTC-USD \
-            --duration 7d
+            --strategy ${{ matrix.strategy }} \
+            --symbols ${{ matrix.symbols }} \
+            --duration ${{ github.event.inputs.duration || '7d' }} \
+            --output-dir backtest_results
 
-      - name: Multi-Pair Integration Test
-        run: |
-          cargo run --release -- backtest \
-            --strategy dual-leg \
-            --symbols BTC-USD,ETH-USD \
-            --duration 7d
+      - name: Upload Backtest Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-${{ matrix.name }}-${{ github.run_id }}
+          path: backtest_results/
+          retention-days: 30
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: backtest
+    if: failure()
+    steps:
+      - name: Send Slack Alert
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          slack-message: |
+            🚨 *Nightly Backtest FAILED*
+            Repo: `${{ github.repository }}`
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

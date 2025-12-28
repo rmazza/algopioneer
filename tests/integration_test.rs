@@ -387,7 +387,7 @@ async fn test_pairs_trading_cycle() {
     // Expect Exiting -> Flat
     // Allow state transition
     tokio::task::yield_now().await;
-    
+
     let state = state_rx.recv().await.expect("No state (Exiting)");
     assert!(matches!(state, StrategyState::Exiting { .. }));
 
