@@ -1,0 +1,55 @@
+name: Nightly Backtest
+
+on:
+  schedule:
+    # Run at 02:00 UTC every day
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+env:
+  CARGO_TERM_COLOR: always
+  # Use CI keys or placeholders; backtesting usually strictly uses historical data
+  # ensuring no external API calls unless configured otherwise.
+  COINBASE_API_KEY: "test-key-ci"
+  COINBASE_API_SECRET: "test-secret-ci"
+
+jobs:
+  backtest:
+    name: Strategy Regression Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-backtest-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-backtest-
+
+      - name: Build Release
+        run: cargo build --release --verbose
+
+      - name: Sanity Check (BTC-USD)
+        run: |
+          cargo run --release -- backtest \
+            --strategy moving-average \
+            --symbols BTC-USD \
+            --duration 7d
+
+      - name: Multi-Pair Integration Test
+        run: |
+          cargo run --release -- backtest \
+            --strategy dual-leg \
+            --symbols BTC-USD,ETH-USD \
+            --duration 7d
