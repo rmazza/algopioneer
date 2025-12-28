@@ -2,9 +2,9 @@
 description: Quick check-in on paper trading strategy status
 ---
 
-# Paper Trading Check-In
+# Coinbase Paper Trading Check-In
 
-This workflow provides a quick status check on the running paper trading strategy.
+This workflow provides a quick status check on the running Coinbase paper trading strategy.
 
 ## Prerequisites
 
