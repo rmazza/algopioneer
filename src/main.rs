@@ -688,7 +688,7 @@ impl SimpleTradingEngine {
 }
 
 // --- Backtesting Logic ---
-use algopioneer::backtest;
+use algopioneer::backtest::{self, BacktestConfig};
 
 /// Loads data and runs the backtest.
 fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
@@ -700,19 +700,21 @@ fn run_backtest() -> Result<(), Box<dyn std::error::Error>> {
     // Create the strategy
     let strategy = MovingAverageCrossover::new(5, 10);
 
-    // Run the backtest
-    let initial_capital = 1000.0;
-    let result = backtest::run(&strategy, &df, initial_capital)?;
+    // Run the backtest with configuration
+    let config = BacktestConfig::with_capital(dec!(1000));
+    let result = backtest::run(&strategy, &df, &config)?;
 
     // Print the results
     info!("--- Backtest Results ---");
-    info!("Initial Capital: ${:.2}", result.initial_capital);
-    info!("Final Capital:   ${:.2}", result.final_capital);
-    info!("Net Profit:      ${:.2}", result.net_profit);
-    info!("Return:          {:.2}%", result.return_percentage());
+    info!("Initial Capital: ${}", result.initial_capital);
+    info!("Final Capital:   ${}", result.final_capital);
+    info!("Net Profit:      ${}", result.net_profit);
+    info!("Return:          {}%", result.return_percentage());
     info!("Total Trades:    {}", result.total_trades);
     info!("Winning Trades:  {}", result.winning_trades);
     info!("Losing Trades:   {}", result.losing_trades);
+    info!("Win Rate:        {}%", result.win_rate() * dec!(100));
+    info!("Max Drawdown:    {}%", result.max_drawdown * dec!(100));
     info!("------------------------");
 
     Ok(())
