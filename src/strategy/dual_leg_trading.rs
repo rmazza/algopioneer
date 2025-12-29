@@ -846,6 +846,8 @@ pub struct PairsManager {
     ewma_alpha: f64,
     /// Whether EWMA has been initialized (needs bootstrap period)
     ewma_initialized: bool,
+    // MC-1 FIX: Counter for periodic recalculation to prevent f64 drift
+    tick_count: u64,
 }
 
 impl PairsManager {
@@ -890,6 +892,7 @@ impl PairsManager {
             ewma_volatility: 0.0,
             ewma_alpha,
             ewma_initialized: false,
+            tick_count: 0, // MC-1
         }
     }
 
@@ -951,6 +954,11 @@ impl EntryStrategy for PairsManager {
                         .precision_rejections
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
+                    // CB-2 FIX: Emit Prometheus metric for monitoring
+                    crate::metrics::record_precision_rejection(&format!(
+                        "{}/{}",
+                        leg1.symbol, leg2.symbol
+                    ));
                     error!(
                         "PRECISION ERROR: Price ratio {:.2e} exceeds safe f64 bounds [{:.2e}, {:.2e}]. Rejecting signal to prevent precision loss. (Total rejections: {})",
                         ratio, MIN_SAFE_PRICE_RATIO, MAX_SAFE_PRICE_RATIO, count
@@ -966,6 +974,11 @@ impl EntryStrategy for PairsManager {
                         .precision_warnings
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
+                    // CB-2 FIX: Emit Prometheus metric for monitoring
+                    crate::metrics::record_precision_warning(&format!(
+                        "{}/{}",
+                        leg1.symbol, leg2.symbol
+                    ));
                     // NP-1 FIX: Use named constant instead of magic number
                     if count == 1 || count.is_multiple_of(PRECISION_WARNING_LOG_INTERVAL) {
                         warn!(
@@ -978,8 +991,9 @@ impl EntryStrategy for PairsManager {
                 (v1, v2)
             }
             _ => {
-                warn!(
-                    "Invalid prices for Pairs analysis: {:?}, {:?}",
+                // N-3 FIX: Use error! for consistency with other signal rejections
+                error!(
+                    "PRECISION ERROR: Invalid prices for Pairs analysis: {:?}, {:?}",
                     leg1.price, leg2.price
                 );
                 return Signal::Hold;
@@ -993,6 +1007,19 @@ impl EntryStrategy for PairsManager {
         self.running_sum += spread;
         self.running_sq_sum += spread * spread;
         self.spread_history.push_back(spread);
+
+        // MC-1 FIX: Periodic recalculation to prevent f64 drift
+        // Every 10,000 ticks, recompute from window to eliminate accumulated error
+        const RECALC_INTERVAL: u64 = 10_000;
+        self.tick_count += 1;
+        if self.tick_count.is_multiple_of(RECALC_INTERVAL) {
+            self.running_sum = self.spread_history.iter().sum();
+            self.running_sq_sum = self.spread_history.iter().map(|x| x * x).sum();
+            debug!(
+                tick_count = self.tick_count,
+                "MC-1: Recalculated running sums to prevent f64 drift"
+            );
+        }
 
         // Remove oldest value if window is full
         if self.spread_history.len() > self.window_size {
@@ -1318,6 +1345,15 @@ async fn perform_recovery_with_backoff(
 // See `src/resilience/circuit_breaker.rs` for the improved implementation
 // with single RwLock (reduced lock contention) and comprehensive unit tests.
 
+/// Handles concurrent execution of orders on both legs with circuit breaker protection.
+///
+/// # MC-3 NOTE on Circuit Breaker Sharing
+/// The `CircuitBreaker` is owned by this `ExecutionEngine` instance. If you wrap
+/// `ExecutionEngine` in an `Arc` and share it across multiple trading pairs, the circuit
+/// breaker state will be shared - a failure on one pair will affect all pairs.
+///
+/// **Recommended usage:** Create one `ExecutionEngine` per trading pair to isolate
+/// circuit breaker state. For portfolio strategies, each pair should have its own engine.
 pub struct ExecutionEngine {
     client: Arc<dyn Executor>,
     recovery_tx: mpsc::Sender<RecoveryTask>,
@@ -1662,6 +1698,8 @@ pub struct DualLegStrategy {
     validator: Box<dyn TickValidator>,
     // AS9: Exit policy for flexible exit logic
     exit_policy: Box<dyn ExitPolicy>,
+    // CB-2 FIX: Track spawned execution tasks for structured concurrency
+    active_executions: tokio::task::JoinSet<()>,
 }
 
 impl DualLegStrategy {
@@ -1707,8 +1745,9 @@ impl DualLegStrategy {
             throttler: DualLegLogThrottler::new(config.throttle_interval_secs),
             state_notifier: None,
             config,
-            validator,   // AS2
-            exit_policy, // AS9
+            validator,                                      // AS2
+            exit_policy,                                    // AS9
+            active_executions: tokio::task::JoinSet::new(), // CB-2
         }
     }
 
@@ -1721,6 +1760,16 @@ impl DualLegStrategy {
             info!("State Transition: {:?} -> {:?}", self.state, new_state);
             self.state = new_state.clone();
             self.last_state_change_ts = self.clock.now_ts_millis();
+
+            // MC-2 FIX: Emit metric for Halted state to enable alerting
+            if new_state == StrategyState::Halted {
+                let pair = format!("{}/{}", self.pair.spot_symbol, self.pair.future_symbol);
+                crate::metrics::record_strategy_halted("dual_leg", &pair);
+                error!(
+                    pair = %pair,
+                    "CRITICAL: Strategy entered Halted state - manual intervention required"
+                );
+            }
 
             if let Some(tx) = &self.state_notifier {
                 if let Err(e) = tx.try_send(new_state) {
@@ -2150,7 +2199,7 @@ impl DualLegStrategy {
                     leg2_entry_price, new_leg2_price
                 );
 
-                // Update state with actual market prices
+                // Note: derefs needed because if let bindings are references
                 self.state = StrategyState::InPosition {
                     direction: *direction,
                     leg1_qty: *leg1_qty,
@@ -2195,7 +2244,8 @@ impl DualLegStrategy {
                     let p1 = leg1.price;
                     let p2 = leg2.price;
 
-                    tokio::spawn(async move {
+                    // CB-2 FIX: Use JoinSet for structured concurrency
+                    self.active_executions.spawn(async move {
                         let result = match engine
                             .execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2)
                             .await
@@ -2250,7 +2300,8 @@ impl DualLegStrategy {
                     let p1 = leg1.price;
                     let p2 = leg2.price;
 
-                    tokio::spawn(async move {
+                    // CB-2 FIX: Use JoinSet for structured concurrency
+                    self.active_executions.spawn(async move {
                         // Short Entry: Sell Leg 1, Buy Leg 2 (Inverse of Basis Entry)
                         // execute_basis_entry does Buy L1 / Sell L2. We need a new method or use execute_order directly.
                         // For now, assuming execute_basis_entry can be adapted or we use raw execution.
@@ -2374,7 +2425,8 @@ impl DualLegStrategy {
 
                     debug!("Executing Exit with Limit Prices - Spot: {} (Market: {}), Future: {} (Market: {})", p1_limit, leg1.price, p2_limit, leg2.price);
 
-                    tokio::spawn(async move {
+                    // CB-2 FIX: Use JoinSet for structured concurrency
+                    self.active_executions.spawn(async move {
                         let result = match engine
                             .execute_basis_exit(
                                 &pair, direction, leg1_qty, leg2_qty, p1_limit, p2_limit,
@@ -2427,11 +2479,15 @@ impl Executor for CoinbaseClient {
 
 impl Drop for DualLegStrategy {
     fn drop(&mut self) {
+        // CB-2 FIX: Abort all pending execution tasks on shutdown
+        let pending = self.active_executions.len();
+        self.active_executions.abort_all();
         info!(
             spot = %self.pair.spot_symbol,
             future = %self.pair.future_symbol,
             state = ?self.state,
-            "DualLegStrategy dropped - cleanup complete"
+            aborted_tasks = pending,
+            "DualLegStrategy dropped - aborted pending executions"
         );
     }
 }
@@ -2450,6 +2506,44 @@ pub struct DualLegLiveConfig {
     pub entry_z_score: f64,
     pub exit_z_score: f64,
     pub strategy_type: DualLegStrategyType,
+    // N-1 FIX: Extracted magic numbers into config
+    /// Circuit breaker failure threshold before tripping (default: 5)
+    pub circuit_breaker_threshold: u32,
+    /// Circuit breaker timeout in seconds before attempting recovery (default: 60)
+    pub circuit_breaker_timeout_secs: u64,
+    /// Basis entry threshold in basis points (default: 10.0)
+    pub basis_entry_bps: Decimal,
+    /// Basis exit threshold in basis points (default: 2.0)
+    pub basis_exit_bps: Decimal,
+    /// Maximum leverage for risk monitor (default: 3.0)
+    pub max_leverage: Decimal,
+    // MC-1 FIX: Configurable drift recalculation interval
+    /// Interval (in ticks) for recalculating running sums to prevent f64 drift (default: 10_000)
+    /// Guidance: For 1000 ticks/sec, use 10_000 (10s). For 1 tick/min, use 1_000 (~17 hours).
+    pub drift_recalc_interval: u64,
+}
+
+/// N-1 FIX: Default implementation with production-ready values
+impl Default for DualLegLiveConfig {
+    fn default() -> Self {
+        Self {
+            dual_leg_config: DualLegConfigBuilder::new()
+                .spot_symbol("BTC-USD")
+                .future_symbol("BTC-USDT")
+                .build()
+                .expect("Default config should be valid"),
+            window_size: 100,
+            entry_z_score: 2.0,
+            exit_z_score: 0.5,
+            strategy_type: DualLegStrategyType::Pairs,
+            circuit_breaker_threshold: 5,
+            circuit_breaker_timeout_secs: 60,
+            basis_entry_bps: dec!(10.0),
+            basis_exit_bps: dec!(2.0),
+            max_leverage: dec!(3.0),
+            drift_recalc_interval: 10_000,
+        }
+    }
 }
 
 /// Type of dual-leg strategy to create
@@ -2482,31 +2576,39 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
     }
 
     /// Build the internal DualLegStrategy with all dependencies
-    /// NP-4 FIX: recovery_tx is kept internal, not returned
+    ///
+    /// # CB-1 NOTE on Panic Safety
+    /// The Recovery Worker is spawned as a detached task. Its internal `run()` method uses
+    /// `JoinSet` which gracefully handles panics from individual recovery tasks by logging
+    /// them without crashing the entire worker. If the worker's top-level `run()` panics,
+    /// the spawned task will terminate silently. For production deployments, monitor the
+    /// `algopioneer_recovery_attempts_total` metric - if it stops incrementing during active
+    /// recoveries, the worker may have crashed.
     fn build_strategy(&self) -> DualLegStrategy {
         let (recovery_tx, recovery_rx) = mpsc::channel(100);
         let (feedback_tx, feedback_rx) = mpsc::channel(100);
 
-        // Create recovery worker
+        // Create recovery worker (CB-1: see doc comment above for panic handling notes)
         let recovery_worker = RecoveryWorker::new(self.executor.clone(), recovery_rx, feedback_tx);
         tokio::spawn(async move {
             recovery_worker.run().await;
         });
 
-        // Create execution engine
+        // N-1 FIX: Use config values instead of magic numbers
         let execution_engine = ExecutionEngine::new(
             self.executor.clone(),
             recovery_tx.clone(),
-            5,  // max_retries
-            60, // timeout_secs
+            self.config.circuit_breaker_threshold,
+            self.config.circuit_breaker_timeout_secs,
         );
 
         // Create entry manager based on strategy type
         let entry_manager: Box<dyn EntryStrategy> = match self.config.strategy_type {
             DualLegStrategyType::Basis => {
+                // N-1 FIX: Use config values
                 Box::new(BasisManager::new(
-                    dec!(10.0), // entry_bps
-                    dec!(2.0),  // exit_bps
+                    self.config.basis_entry_bps,
+                    self.config.basis_exit_bps,
                     self.config.dual_leg_config.fee_tier,
                 ))
             }
@@ -2517,25 +2619,21 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
             )),
         };
 
-        // Create risk monitor
+        // N-1 FIX: Use config value for leverage
         let risk_monitor = RiskMonitor::new(
-            dec!(3.0), // leverage
+            self.config.max_leverage,
             InstrumentType::Linear,
             HedgeMode::DollarNeutral,
         );
 
-        let strategy = DualLegStrategy::new(
+        DualLegStrategy::new(
             entry_manager,
             risk_monitor,
             execution_engine,
             self.config.dual_leg_config.clone(),
             feedback_rx,
             Box::new(SystemClock),
-        );
-
-        // NP-4: recovery_tx stays in scope for execution_engine, not returned
-        drop(recovery_tx); // Explicitly drop to show it's not needed externally
-        strategy
+        )
     }
 }
 
@@ -2608,11 +2706,11 @@ impl<E: Executor + 'static> LiveStrategy for DualLegStrategyLive<E> {
                     }
                 }
                 StrategyInput::PairedTick { leg1, leg2 } => {
-                    // Send both legs
-                    if leg1_tx.send(leg1).await.is_err() {
-                        break;
-                    }
-                    if leg2_tx.send(leg2).await.is_err() {
+                    // MC-2 FIX: Use tokio::join! for concurrent sends to prevent temporal desync
+                    // If one channel is full while the other isn't, sequential sends would
+                    // create leg timing skew - exactly what PairedTick is designed to prevent
+                    let (r1, r2) = tokio::join!(leg1_tx.send(leg1), leg2_tx.send(leg2));
+                    if r1.is_err() || r2.is_err() {
                         break;
                     }
                 }

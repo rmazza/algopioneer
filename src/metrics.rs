@@ -40,6 +40,13 @@ lazy_static! {
         &["strategy_id", "from_state", "to_state"]
     ).expect("FATAL: Failed to register STRATEGY_STATE metric - check for duplicate registration");
 
+    // MC-2 FIX: Strategy halted events for alerting
+    /// Strategy entered Halted state (critical failure requiring manual intervention)
+    pub static ref STRATEGY_HALTED: IntCounterVec = register_int_counter_vec!(
+        opts!("algopioneer_strategy_halted_total", "Strategy entered Halted state"),
+        &["strategy_id", "pair"]
+    ).expect("FATAL: Failed to register STRATEGY_HALTED metric - check for duplicate registration");
+
     // --- WebSocket Metrics ---
 
     /// WebSocket ticks received
@@ -82,6 +89,21 @@ lazy_static! {
         &["symbol", "status"]
     ).expect("FATAL: Failed to register RECOVERY_ATTEMPTS metric - check for duplicate registration");
 
+    // --- Pairs Manager Precision Metrics (CB-2 FIX) ---
+
+    /// Price ratio rejections due to f64 precision limits
+    /// Triggers when price ratios exceed safe bounds (e.g., BTC/SHIB with >10^12 ratio)
+    pub static ref PAIRS_PRECISION_REJECTIONS: IntCounterVec = register_int_counter_vec!(
+        opts!("algopioneer_pairs_precision_rejections_total", "Price ratio rejections due to f64 precision limits"),
+        &["pair"]
+    ).expect("FATAL: Failed to register PAIRS_PRECISION_REJECTIONS metric - check for duplicate registration");
+
+    /// Price ratio warnings for ratios approaching precision limits
+    pub static ref PAIRS_PRECISION_WARNINGS: IntCounterVec = register_int_counter_vec!(
+        opts!("algopioneer_pairs_precision_warnings_total", "Price ratio warnings approaching f64 precision limits"),
+        &["pair"]
+    ).expect("FATAL: Failed to register PAIRS_PRECISION_WARNINGS metric - check for duplicate registration");
+
     // --- Market Data Metrics ---
 
     /// Market data polling latency in seconds
@@ -115,6 +137,13 @@ pub fn set_strategy_pnl(strategy_id: &str, strategy_type: &str, pnl: f64) {
         .set(pnl);
 }
 
+/// MC-2 FIX: Record when a strategy enters Halted state
+pub fn record_strategy_halted(strategy_id: &str, pair: &str) {
+    STRATEGY_HALTED
+        .with_label_values(&[strategy_id, pair])
+        .inc();
+}
+
 /// Record WebSocket tick
 pub fn record_ws_tick(symbol: &str) {
     WS_TICKS_TOTAL.with_label_values(&[symbol]).inc();
@@ -130,6 +159,16 @@ pub fn record_poll_latency(symbol: &str, status: &str, latency_secs: f64) {
     MARKET_DATA_POLL_LATENCY
         .with_label_values(&[symbol, status])
         .observe(latency_secs);
+}
+
+/// CB-2 FIX: Record precision rejection for extreme price ratios
+pub fn record_precision_rejection(pair: &str) {
+    PAIRS_PRECISION_REJECTIONS.with_label_values(&[pair]).inc();
+}
+
+/// CB-2 FIX: Record precision warning for price ratios approaching limits
+pub fn record_precision_warning(pair: &str) {
+    PAIRS_PRECISION_WARNINGS.with_label_values(&[pair]).inc();
 }
 
 /// Get metrics as text for /metrics endpoint
