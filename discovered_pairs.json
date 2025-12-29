@@ -1,26 +1,8 @@
 [
   {
-    "spot_symbol": "UNH",
-    "future_symbol": "HD",
-    "order_size": "100",
-    "max_tick_age_ms": 2000,
-    "execution_timeout_ms": 30000,
-    "min_profit_threshold": "0.001",
-    "stop_loss_threshold": "-0.02",
-    "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
-    },
-    "throttle_interval_secs": 5,
-    "window_size": 5,
-    "entry_z_score": "0.8000000000000000444089209847",
-    "exit_z_score": "0.2000000000000000111022302462"
-  },
-  {
     "spot_symbol": "F",
-    "future_symbol": "BAC",
-    "order_size": "100",
+    "future_symbol": "JNJ",
+    "order_size": "1000",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
     "min_profit_threshold": "0.001",
@@ -31,14 +13,14 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 7,
+    "window_size": 20,
     "entry_z_score": "2",
-    "exit_z_score": "0.2000000000000000111022302462"
+    "exit_z_score": "0.2"
   },
   {
-    "spot_symbol": "MSFT",
-    "future_symbol": "HD",
-    "order_size": "100",
+    "spot_symbol": "WFC",
+    "future_symbol": "JPM",
+    "order_size": "1000",
     "max_tick_age_ms": 2000,
     "execution_timeout_ms": 30000,
     "min_profit_threshold": "0.001",
@@ -49,8 +31,26 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
-    "window_size": 10,
-    "entry_z_score": "1.3999999999999999111821580293",
-    "exit_z_score": "0.2000000000000000111022302462"
+    "window_size": 15,
+    "entry_z_score": "2",
+    "exit_z_score": "0.2"
+  },
+  {
+    "spot_symbol": "WMT",
+    "future_symbol": "WFC",
+    "order_size": "1000",
+    "max_tick_age_ms": 2000,
+    "execution_timeout_ms": 30000,
+    "min_profit_threshold": "0.001",
+    "stop_loss_threshold": "-0.02",
+    "fee_tier": {
+      "maker_fee_bps": "10.0",
+      "taker_fee_bps": "20.0",
+      "slippage_bps": "5.0"
+    },
+    "throttle_interval_secs": 5,
+    "window_size": 25,
+    "entry_z_score": "1.8",
+    "exit_z_score": "0.2"
   }
 ]
