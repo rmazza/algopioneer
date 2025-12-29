@@ -36,8 +36,13 @@ use tracing::{error, info, warn};
 use algopioneer::logging::{CsvRecorder, TradeRecorder};
 use std::path::PathBuf;
 
+// Event sourcing
+use algopioneer::events::{EventLog, SystemEvent};
+
 // --- Constants ---
 const STATE_FILE: &str = "trade_state.json";
+/// N-1 FIX: Named constant for simulated order IDs in paper trading
+const SIMULATED_ORDER_ID: &str = "simulated";
 
 // --- Position Tracking ---
 /// Detailed position information for reconciliation
@@ -49,7 +54,15 @@ struct PositionDetail {
     entry_price: Decimal,
 }
 
-/// State persistence with proper position tracking (fixes Ghost Position risk)
+/// State persistence with event sourcing for perfect replay and crash recovery.
+///
+/// # Event Sourcing (Phase 2)
+/// Instead of destructive JSON snapshots, state changes are persisted as immutable
+/// events in a JSONL log. On startup, `hydrate()` replays all events to reconstruct
+/// the current state. This enables:
+/// - **Crash recovery**: Partial writes are safely skipped
+/// - **Audit trail**: Complete history of all state changes
+/// - **Debugging**: Replay to any point in time
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 struct TradeState {
     /// Key: Symbol (e.g., "BTC-USD"), Value: Position details
@@ -57,14 +70,76 @@ struct TradeState {
 }
 
 impl TradeState {
+    /// Load state by hydrating from event log, falling back to legacy JSON if needed.
     fn load() -> Self {
+        // Try event log first (Phase 2 path)
+        let event_log = EventLog::default_path();
+        let events = event_log.replay();
+
+        if !events.is_empty() {
+            let mut state = Self::default();
+            for event in events {
+                state.apply_event(&event);
+            }
+            info!("Hydrated TradeState from event log");
+            return state;
+        }
+
+        // Fallback to legacy JSON snapshot (migration path)
         if let Ok(data) = fs::read_to_string(STATE_FILE) {
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            Self::default()
+            if let Ok(state) = serde_json::from_str::<TradeState>(&data) {
+                warn!("Loaded state from legacy JSON file. Consider migrating to event log.");
+                return state;
+            }
+        }
+
+        Self::default()
+    }
+
+    /// Append a system event to the event log (replaces save())
+    #[allow(dead_code)]
+    fn append_event(
+        &self,
+        event: &SystemEvent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let event_log = EventLog::default_path();
+        event_log.append(event)?;
+        Ok(())
+    }
+
+    /// Apply a single event to update internal state (used during hydration)
+    fn apply_event(&mut self, event: &SystemEvent) {
+        match event {
+            SystemEvent::FillReceived {
+                symbol,
+                side,
+                quantity,
+                fill_price,
+                ..
+            } => {
+                // MC-2 FIX: Handle both buy and sell fills
+                if side == "buy" {
+                    self.open_position(PositionDetail {
+                        symbol: symbol.clone(),
+                        side: side.clone(),
+                        quantity: *quantity,
+                        entry_price: *fill_price,
+                    });
+                } else if side == "sell" {
+                    // Sell fill closes an existing position
+                    self.close_position(symbol);
+                }
+            }
+            SystemEvent::PositionClosed { symbol, .. } => {
+                self.close_position(symbol);
+            }
+            // SignalGenerated and OrderPlaced are informational, don't affect position state
+            _ => {}
         }
     }
 
+    /// Legacy save() - kept for backwards compatibility but deprecated
+    #[allow(dead_code)]
     fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let json = serde_json::to_string_pretty(self)?;
         let temp_path = format!("{}.tmp", STATE_FILE);
@@ -259,18 +334,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_history: *max_history,
                 env,
             };
-            // Create async state persistence channel
-            let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel::<TradeState>();
+            // Create async event persistence channel (Phase 2: Event Sourcing)
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SystemEvent>();
 
-            // Spawn background task for async state persistence
+            // Spawn background task for async event persistence
             tokio::spawn(async move {
-                while let Some(state) = state_rx.recv().await {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = state.save() {
-                            tracing::error!("Background state save failed: {}", e);
-                        }
-                    })
-                    .await;
+                let event_log = EventLog::default_path();
+                while let Some(event) = event_rx.recv().await {
+                    if let Err(e) = event_log.append(&event) {
+                        tracing::error!("Background event append failed: {}", e);
+                    }
                 }
             });
 
@@ -287,7 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            let mut engine = SimpleTradingEngine::new(config, state_tx, recorder).await?;
+            let mut engine = SimpleTradingEngine::new(config, event_tx, recorder).await?;
             engine.run().await?;
         }
         Commands::Backtest => {
@@ -536,18 +609,25 @@ struct SimpleTradingConfig {
     env: AppEnv,
 }
 
+/// Simple trading engine for the MovingAverageCrossover strategy.
+///
+/// # CB-1 ACKNOWLEDGEMENT (Time Travel)
+/// This engine uses `Utc::now()` for event timestamps. This is acceptable because:
+/// - SimpleTradingEngine is **live trading only** (not used in backtesting)
+/// - Event timestamps are for audit/replay, not trading decisions
+/// - For deterministic backtesting, use `DualLegStrategy` with injected `Clock` trait
 struct SimpleTradingEngine {
     client: CoinbaseClient,
     strategy: MovingAverageCrossover,
     state: TradeState,
     config: SimpleTradingConfig,
-    state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>,
 }
 
 impl SimpleTradingEngine {
     async fn new(
         config: SimpleTradingConfig,
-        state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>,
         recorder: Option<Arc<dyn TradeRecorder>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let client = CoinbaseClient::new(config.env, recorder)?;
@@ -558,7 +638,7 @@ impl SimpleTradingEngine {
             strategy,
             state,
             config,
-            state_tx,
+            event_tx,
         })
     }
 
@@ -631,18 +711,27 @@ impl SimpleTradingEngine {
                             .map_err(|e| e as Box<dyn std::error::Error>)?;
 
                         // Track position with full details for reconciliation
+                        let entry_price =
+                            Decimal::from_f64(latest_candle.close).unwrap_or(Decimal::ZERO);
                         let detail = PositionDetail {
                             symbol: self.config.product_id.clone(),
                             side: "buy".to_string(),
                             quantity: self.config.order_size,
-                            entry_price: Decimal::from_f64(latest_candle.close)
-                                .unwrap_or(Decimal::ZERO),
+                            entry_price,
                         };
                         self.state.open_position(detail);
 
-                        // Non-blocking async state persistence
-                        if let Err(e) = self.state_tx.send(self.state.clone()) {
-                            warn!("Failed to queue state save: {}", e);
+                        // Phase 2: Emit event for async persistence
+                        let event = SystemEvent::FillReceived {
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            symbol: self.config.product_id.clone(),
+                            side: "buy".to_string(),
+                            quantity: self.config.order_size,
+                            fill_price: entry_price,
+                            order_id: SIMULATED_ORDER_ID.to_string(),
+                        };
+                        if let Err(e) = self.event_tx.send(event) {
+                            warn!("Failed to queue event: {}", e);
                         }
                     }
                     Signal::Sell => {
@@ -666,11 +755,19 @@ impl SimpleTradingEngine {
                                 "Closed position: entry={}, exit={}, pnl={}",
                                 closed.entry_price, exit_price, pnl
                             );
-                        }
 
-                        // Non-blocking async state persistence
-                        if let Err(e) = self.state_tx.send(self.state.clone()) {
-                            warn!("Failed to queue state save: {}", e);
+                            // Phase 2: Emit event for async persistence
+                            let event = SystemEvent::PositionClosed {
+                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                symbol: self.config.product_id.clone(),
+                                entry_price: closed.entry_price,
+                                exit_price,
+                                quantity: closed.quantity,
+                                realized_pnl: pnl,
+                            };
+                            if let Err(e) = self.event_tx.send(event) {
+                                warn!("Failed to queue event: {}", e);
+                            }
                         }
                     }
                     Signal::Hold => {

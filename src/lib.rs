@@ -1,6 +1,7 @@
 pub mod backtest;
 pub mod coinbase;
 pub mod discovery;
+pub mod events;
 pub mod exchange;
 pub mod health;
 pub mod logging;

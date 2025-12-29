@@ -817,6 +817,11 @@ impl EntryStrategy for BasisManager {
 /// # Performance
 /// Uses O(1) sliding window statistics via running sums instead of O(n) iteration.
 /// This eliminates per-tick iteration and removes Mutex contention.
+///
+/// # Adaptive Thresholds (Phase 2)
+/// Uses EWMA (Exponentially Weighted Moving Average) of spread volatility to normalize
+/// Z-scores against changing market regimes. This prevents over-trading in low-vol
+/// environments and under-trading in high-vol environments.
 pub struct PairsManager {
     window_size: usize,
     entry_z_score: f64,
@@ -830,10 +835,47 @@ pub struct PairsManager {
     // CF3 FIX: Precision monitoring metrics
     precision_rejections: std::sync::atomic::AtomicU64,
     precision_warnings: std::sync::atomic::AtomicU64,
+    // Phase 2: EWMA volatility tracking for adaptive thresholds
+    /// Exponentially Weighted Moving Average of spread standard deviation.
+    /// NOTE: f64 is intentional - the entire PairsManager operates on f64 because
+    /// log-spread calculations (ln()) require floating-point. See CF3 DOCUMENTATION
+    /// block for precision risk assessment.
+    ewma_volatility: f64,
+    /// EWMA decay factor (alpha). Higher = more weight to recent values.
+    /// Common values: 0.06 (~30-period half-life), 0.1 (~20-period half-life).
+    ewma_alpha: f64,
+    /// Whether EWMA has been initialized (needs bootstrap period)
+    ewma_initialized: bool,
 }
 
 impl PairsManager {
+    /// Default EWMA decay factor (≈30-period half-life)
+    const DEFAULT_EWMA_ALPHA: f64 = 0.06;
+
+    /// Create a new PairsManager with default EWMA alpha for adaptive thresholds.
     pub fn new(window_size: usize, entry_z_score: f64, exit_z_score: f64) -> Self {
+        Self::new_adaptive(
+            window_size,
+            entry_z_score,
+            exit_z_score,
+            Self::DEFAULT_EWMA_ALPHA,
+        )
+    }
+
+    /// Create a new PairsManager with explicit EWMA alpha for adaptive thresholds.
+    ///
+    /// # Arguments
+    /// * `window_size` - Size of the sliding window for spread statistics
+    /// * `entry_z_score` - Z-score threshold to enter a position
+    /// * `exit_z_score` - Z-score threshold to exit a position (mean reversion)
+    /// * `ewma_alpha` - EWMA decay factor (0.0-1.0). Higher = more weight to recent volatility.
+    ///   Common values: 0.06 (~30-period half-life), 0.1 (~20-period half-life).
+    pub fn new_adaptive(
+        window_size: usize,
+        entry_z_score: f64,
+        exit_z_score: f64,
+        ewma_alpha: f64,
+    ) -> Self {
         Self {
             window_size,
             entry_z_score,
@@ -844,6 +886,10 @@ impl PairsManager {
             // CF3 FIX: Initialize precision monitoring counters
             precision_rejections: std::sync::atomic::AtomicU64::new(0),
             precision_warnings: std::sync::atomic::AtomicU64::new(0),
+            // Phase 2: EWMA volatility tracking
+            ewma_volatility: 0.0,
+            ewma_alpha,
+            ewma_initialized: false,
         }
     }
 
@@ -855,6 +901,16 @@ impl PairsManager {
             self.precision_warnings
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
+    }
+
+    /// Phase 2: Get the current EWMA volatility estimate (for monitoring/testing)
+    pub fn get_ewma_volatility(&self) -> f64 {
+        self.ewma_volatility
+    }
+
+    /// Phase 2: Check if EWMA has been initialized
+    pub fn is_ewma_initialized(&self) -> bool {
+        self.ewma_initialized
     }
 }
 
@@ -960,13 +1016,28 @@ impl EntryStrategy for PairsManager {
         let variance = (self.running_sq_sum / n - mean * mean).max(0.0);
         let std_dev = variance.sqrt();
 
-        let z_score = if std_dev == 0.0 {
-            0.0
+        // Phase 2: Update EWMA volatility estimate
+        // Initialize with first valid std_dev, then apply exponential smoothing
+        if !self.ewma_initialized {
+            self.ewma_volatility = std_dev;
+            self.ewma_initialized = true;
         } else {
-            (spread - mean) / std_dev
-        };
+            // EWMA update: σ_ewma = α * σ_current + (1 - α) * σ_previous
+            self.ewma_volatility =
+                self.ewma_alpha * std_dev + (1.0 - self.ewma_alpha) * self.ewma_volatility;
+        }
 
-        debug!("Pairs Spread: {:.6}, Z-Score: {:.4}", spread, z_score);
+        // Phase 2: Compute adaptive Z-score using EWMA volatility
+        // This normalizes signals against longer-term volatility regime,
+        // preventing over-trading in low-vol and under-trading in high-vol
+        const MIN_VOLATILITY: f64 = 1e-12; // Prevent division by zero
+        let effective_vol = self.ewma_volatility.max(MIN_VOLATILITY);
+        let z_score = (spread - mean) / effective_vol;
+
+        debug!(
+            "Pairs Spread: {:.6}, Z-Score (adaptive): {:.4}, EWMA Vol: {:.6}, Window StdDev: {:.6}",
+            spread, z_score, self.ewma_volatility, std_dev
+        );
 
         if z_score > self.entry_z_score {
             Signal::Sell // Sell A / Buy B (Short the spread)
