@@ -342,7 +342,7 @@ async fn test_pairs_trading_cycle() {
         .unwrap();
 
     // Allow processing
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
 
     // Expect Entering -> InPosition
     let state = state_rx.recv().await.expect("No state (Entering)");
@@ -352,7 +352,7 @@ async fn test_pairs_trading_cycle() {
     clock.advance_millis(100);
     tokio::time::advance(Duration::from_millis(100)).await;
     // Also yield so execution engine can process
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
 
     let state = state_rx.recv().await.expect("No state (InPosition)");
     assert!(matches!(state, StrategyState::InPosition { .. }));
@@ -367,7 +367,7 @@ async fn test_pairs_trading_cycle() {
             symbol: "A".into(),
             price: dec!(100),
             instrument_id: None,
-            timestamp: start_ts + 100,
+            timestamp: start_ts + 300,
         }))
         .await
         .unwrap();
@@ -376,13 +376,13 @@ async fn test_pairs_trading_cycle() {
             symbol: "B".into(),
             price: dec!(100),
             instrument_id: None,
-            timestamp: start_ts + 100,
+            timestamp: start_ts + 300,
         }))
         .await
         .unwrap();
 
     // Allow processing
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
 
     // Expect Exiting -> Flat
     // Allow state transition
@@ -395,7 +395,7 @@ async fn test_pairs_trading_cycle() {
     clock.advance_millis(100);
     tokio::time::advance(Duration::from_millis(100)).await;
     // Also sleep a bit to let the runtime poll
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
 
     let state = state_rx.recv().await.expect("No state (Flat)");
     assert_eq!(state, StrategyState::Flat);
@@ -499,12 +499,13 @@ async fn test_basis_trading_cycle() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
 
     let state = state_rx.recv().await.expect("No state (Entering)");
     assert!(matches!(state, StrategyState::Entering { .. }));
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    clock.advance_millis(100);
+    tokio::time::advance(Duration::from_millis(100)).await;
 
     let state = state_rx.recv().await.expect("No state (InPosition)");
     assert!(matches!(state, StrategyState::InPosition { .. }));
@@ -530,12 +531,13 @@ async fn test_basis_trading_cycle() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
 
     let state = state_rx.recv().await.expect("No state (Exiting)");
     assert!(matches!(state, StrategyState::Exiting { .. }));
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    clock.advance_millis(100);
+    tokio::time::advance(Duration::from_millis(100)).await;
 
     let state = state_rx.recv().await.expect("No state (Flat)");
     assert_eq!(state, StrategyState::Flat);
