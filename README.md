@@ -15,6 +15,9 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 ### Trading Strategies
 - **Dual-Leg Arbitrage**: Spot vs Future arbitrage with dollar-neutral hedging
 - **Basis Trading**: Spread trading with state machine and recovery system
+- **Paper Trading**:
+  - **Coinbase**: Safe testing environment using internal simulation.
+  - **Alpaca**: Full end-to-end testing using Alpaca Paper API.
 - **Moving Average Crossover**: Classic trend-following strategy
 - **Pairs Trading**: Statistical arbitrage with Z-score analysis
 - **Portfolio Mode**: Multi-strategy execution with supervisor pattern

@@ -8,9 +8,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 25,
@@ -26,9 +26,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 25,
@@ -44,9 +44,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 30,
@@ -62,9 +62,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 30,
@@ -80,9 +80,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 25,
@@ -98,9 +98,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 10,
@@ -116,9 +116,9 @@
     "min_profit_threshold": "0.001",
     "stop_loss_threshold": "-0.02",
     "fee_tier": {
-      "maker_fee_bps": "10.0",
-      "taker_fee_bps": "20.0",
-      "slippage_bps": "5.0"
+      "maker_fee_bps": "0",
+      "taker_fee_bps": "0",
+      "slippage_bps": "2.0"
     },
     "throttle_interval_secs": 5,
     "window_size": 20,

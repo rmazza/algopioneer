@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use apca::api::v2::asset;
 use apca::api::v2::order as alpaca_order;
@@ -213,40 +213,94 @@ impl AlpacaClient {
                 Ok(())
             }
             AppEnv::Paper | AppEnv::Sandbox => {
-                let price_str = price
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "MARKET".to_string());
+                // In Paper/Sandbox, we DO execute the order against the Paper API.
+                // The client is already configured with the Paper URL in the constructor.
+                // We reuse the exact same logic as Live, but we also keep the CSV recording
+                // for local verification/debugging if a recorder is configured.
 
+                let symbol = utils::to_alpaca_symbol(product_id); // Convert BTC-USD -> BTCUSD
                 info!(
-                    product_id = product_id,
+                    symbol = %symbol,
                     side = side,
                     size = %size,
-                    price = %price_str,
-                    "PAPER TRADE executed (Alpaca)"
+                    price = ?price,
+                    "Placing PAPER Alpaca order"
                 );
 
-                // Log using the recorder
+                let order_side = match side.to_lowercase().as_str() {
+                    "buy" => alpaca_order::Side::Buy,
+                    _ => alpaca_order::Side::Sell,
+                };
+
+                // Propagate conversion errors
+                let qty_num = utils::decimal_to_num(size).map_err(|e| {
+                    ExchangeError::Other(format!("Failed to convert quantity: {}", e))
+                })?;
+
+                let request = match price {
+                    Some(limit_price) => {
+                        let limit_num = utils::decimal_to_num(limit_price).map_err(|e| {
+                            ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+                        })?;
+                        alpaca_order::CreateReqInit {
+                            type_: alpaca_order::Type::Limit,
+                            limit_price: Some(limit_num),
+                            time_in_force: alpaca_order::TimeInForce::Day,
+                            ..Default::default()
+                        }
+                        .init(
+                            symbol.as_ref(),
+                            order_side,
+                            alpaca_order::Amount::quantity(qty_num),
+                        )
+                    }
+                    None => alpaca_order::CreateReqInit {
+                        type_: alpaca_order::Type::Market,
+                        time_in_force: alpaca_order::TimeInForce::Day,
+                        ..Default::default()
+                    }
+                    .init(
+                        symbol.as_ref(),
+                        order_side,
+                        alpaca_order::Amount::quantity(qty_num),
+                    ),
+                };
+
+                let client = &self.client;
+                let order = client
+                    .issue::<alpaca_order::Create>(&request)
+                    .await
+                    .map_err(|e| {
+                        ExchangeError::OrderRejected(format!("Paper Order failed: {}", e))
+                    })?;
+
+                info!(
+                    order_id = %order.id.as_hyphenated(),
+                    symbol = %symbol,
+                    status = ?order.status,
+                    "Alpaca PAPER order created successfully"
+                );
+
+                // --- CSV Recording for Paper Mode ---
                 if let Some(ref recorder) = self.recorder {
                     let trade_side = match side.to_lowercase().as_str() {
                         "buy" => TradeSide::Buy,
                         _ => TradeSide::Sell,
                     };
 
-                    // CB-3 FIX: Use injected clock for deterministic timestamps
+                    // Use injected clock for deterministic timestamps
                     let record = TradeRecord::with_timestamp(
                         product_id.to_string(),
                         trade_side,
                         size,
-                        price,
+                        price, // Note: For market orders, this might be None. Ideally we'd valid fill price later.
                         true,
                         self.clock.now(),
                     );
 
                     if let Err(e) = recorder.record(&record).await {
-                        error!("Failed to record paper trade: {}", e);
+                        error!("Failed to record paper trade to CSV: {}", e);
                     }
-                } else {
-                    warn!("Paper trading without recorder - trades not being recorded");
                 }
 
                 Ok(())
@@ -259,7 +313,9 @@ impl AlpacaClient {
         self.rate_limiter.until_ready().await;
 
         match self.mode {
-            AppEnv::Live => {
+            // Paper/Sandbox now behaves exactly like Live for querying positions
+            // because we are using the real Paper/Sandbox API.
+            AppEnv::Live | AppEnv::Paper | AppEnv::Sandbox => {
                 let symbol = utils::to_alpaca_symbol(product_id);
                 let client = &self.client;
                 let sym = asset::Symbol::Sym(symbol.clone().into_owned());
@@ -288,8 +344,7 @@ impl AlpacaClient {
                         }
                     }
                 }
-            }
-            AppEnv::Paper | AppEnv::Sandbox => Ok(Decimal::ZERO),
+            } // Removed dedicated Paper/Sandbox block because it's now merged with Live
         }
     }
 

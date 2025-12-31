@@ -57,7 +57,9 @@ Production-grade modular application with dependency injection, trait-based abst
 **Production Features:**
 
 *   **Live Trading:** Execute trades on Coinbase/Kraken with full error handling
-*   **Paper Trading:** Simulate trades without real funds
+*   **Paper Trading:**
+    *   **Coinbase:** Simulate trades without real funds (Internal Simulation)
+    *   **Alpaca:** Uses real **Alpaca Paper API** for full end-to-end verification
 *   **Backtesting:** Evaluate strategy performance using historical data
 *   **Basis Trading:** Spot vs Future arbitrage with dollar-neutral hedging
 *   **Pairs Trading:** Cointegration-based statistical arbitrage
