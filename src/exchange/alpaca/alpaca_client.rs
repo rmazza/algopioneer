@@ -103,7 +103,8 @@ impl AlpacaClient {
         let client = Client::new(api_info);
 
         // MC-1 FIX: Safe unwrapping of hardcoded constant
-        let quota = Quota::per_second(NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN));
+        // SAFETY: 3 is a non-zero constant
+        let quota = Quota::per_second(NonZeroU32::new(3).expect("3 is non-zero"));
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {
@@ -177,6 +178,7 @@ impl AlpacaClient {
     /// Place an order on Alpaca
     ///
     /// MC-3 FIX: Returns order ID for tracking, cancellation, and reconciliation.
+    /// Principal's Challenge: Deduplicated logic for Live/Paper modes.
     pub async fn place_order(
         &self,
         product_id: &str,
@@ -186,147 +188,66 @@ impl AlpacaClient {
     ) -> Result<String, ExchangeError> {
         self.rate_limiter.until_ready().await;
 
-        // MC-4 FIX: Track order execution latency
         let start = Instant::now();
-        let symbol_for_metrics = utils::to_alpaca_symbol(product_id);
+        let symbol = utils::to_alpaca_symbol(product_id);
+        let mode_str = if self.is_paper() { "PAPER" } else { "LIVE" };
 
-        match self.mode {
-            AppEnv::Live => {
-                let symbol = utils::to_alpaca_symbol(product_id); // Convert BTC-USD -> BTCUSD
-                info!(
-                    symbol = %symbol,
-                    side = side,
-                    size = %size,
-                    price = ?price,
-                    "Placing LIVE Alpaca order"
-                );
+        info!(
+            symbol = %symbol,
+            mode = mode_str,
+            side = side,
+            size = %size,
+            price = ?price,
+            "Placing Alpaca order"
+        );
 
-                // N-1 FIX: Use helper to parse side
-                let order_side = Self::parse_order_side(side);
+        // N-1 FIX: Use helper to parse side
+        let order_side = Self::parse_order_side(side);
 
-                // CB-2 FIX: Propagate conversion errors instead of silent fallback
-                let qty_num = utils::decimal_to_num(size).map_err(|e| {
-                    ExchangeError::Other(format!("Failed to convert quantity: {}", e))
-                })?;
+        // CB-2 FIX: Propagate conversion errors instead of silent fallback
+        let qty_num = utils::decimal_to_num(size)
+            .map_err(|e| ExchangeError::Other(format!("Failed to convert quantity: {}", e)))?;
 
-                // N-2 FIX: Convert limit price if present
-                let limit_num = match price {
-                    Some(p) => Some(utils::decimal_to_num(p).map_err(|e| {
-                        ExchangeError::Other(format!("Failed to convert limit price: {}", e))
-                    })?),
-                    None => None,
-                };
+        // N-2 FIX: Convert limit price if present
+        let limit_num = match price {
+            Some(p) => Some(utils::decimal_to_num(p).map_err(|e| {
+                ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+            })?),
+            None => None,
+        };
 
-                // N-2 FIX: Use helper to build request
-                let request =
-                    Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
+        // N-2 FIX: Use helper to build request
+        let request = Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
 
-                let client = &self.client;
-                let order = client
-                    .issue::<alpaca_order::Create>(&request)
-                    .await
-                    .map_err(|e| ExchangeError::OrderRejected(format!("Order failed: {}", e)))?;
+        let client = &self.client;
+        let order = client
+            .issue::<alpaca_order::Create>(&request)
+            .await
+            .map_err(|e| {
+                ExchangeError::OrderRejected(format!("{} order failed: {}", mode_str, e))
+            })?;
 
-                info!(
-                    order_id = %order.id.as_hyphenated(),
-                    symbol = %symbol,
-                    status = ?order.status,
-                    "Alpaca order created"
-                );
+        let order_id = order.id.as_hyphenated().to_string();
 
-                // MC-4 FIX: Record order latency
-                crate::metrics::record_order_latency(
-                    &symbol_for_metrics,
-                    start.elapsed().as_secs_f64(),
-                );
-                crate::metrics::record_order(&symbol_for_metrics, side, true);
+        info!(
+            order_id = %order_id,
+            symbol = %symbol,
+            status = ?order.status,
+            "Alpaca {} order created",
+            mode_str
+        );
 
-                // MC-3 FIX: Return order ID for tracking
-                Ok(order.id.as_hyphenated().to_string())
-            }
-            AppEnv::Paper | AppEnv::Sandbox => {
-                // In Paper/Sandbox, we DO execute the order against the Paper API.
-                // The client is already configured with the Paper URL in the constructor.
-                // We reuse the exact same logic as Live, but we also keep the CSV recording
-                // for local verification/debugging if a recorder is configured.
-
-                let symbol = utils::to_alpaca_symbol(product_id); // Convert BTC-USD -> BTCUSD
-                info!(
-                    symbol = %symbol,
-                    side = side,
-                    size = %size,
-                    price = ?price,
-                    "Placing PAPER Alpaca order"
-                );
-
-                // N-1 FIX: Use helper to parse side
-                let order_side = Self::parse_order_side(side);
-
-                // N-2 FIX: Propagate conversion errors
-                let qty_num = utils::decimal_to_num(size).map_err(|e| {
-                    ExchangeError::Other(format!("Failed to convert quantity: {}", e))
-                })?;
-
-                // N-2 FIX: Convert limit price if present
-                let limit_num = match price {
-                    Some(p) => Some(utils::decimal_to_num(p).map_err(|e| {
-                        ExchangeError::Other(format!("Failed to convert limit price: {}", e))
-                    })?),
-                    None => None,
-                };
-
-                // N-2 FIX: Use helper to build request
-                let request =
-                    Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
-
-                let client = &self.client;
-                let order = client
-                    .issue::<alpaca_order::Create>(&request)
-                    .await
-                    .map_err(|e| {
-                        ExchangeError::OrderRejected(format!("Paper Order failed: {}", e))
-                    })?;
-
-                info!(
-                    order_id = %order.id.as_hyphenated(),
-                    symbol = %symbol,
-                    status = ?order.status,
-                    "Alpaca PAPER order created successfully"
-                );
-
-                // --- CSV Recording for Paper Mode ---
-                if let Some(ref recorder) = self.recorder {
-                    let trade_side = match side.to_lowercase().as_str() {
-                        "buy" => TradeSide::Buy,
-                        _ => TradeSide::Sell,
-                    };
-
-                    // Use injected clock for deterministic timestamps
-                    let record = TradeRecord::with_timestamp(
-                        product_id.to_string(),
-                        trade_side,
-                        size,
-                        price, // Note: For market orders, this might be None. Ideally we'd valid fill price later.
-                        true,
-                        self.clock.now(),
-                    );
-
-                    if let Err(e) = recorder.record(&record).await {
-                        error!("Failed to record paper trade to CSV: {}", e);
-                    }
-                }
-
-                // MC-4 FIX: Record order latency
-                crate::metrics::record_order_latency(
-                    &symbol_for_metrics,
-                    start.elapsed().as_secs_f64(),
-                );
-                crate::metrics::record_order(&symbol_for_metrics, side, true);
-
-                // MC-3 FIX: Return order ID for tracking
-                Ok(order.id.as_hyphenated().to_string())
-            }
+        // Paper-only: CSV recording for local debugging
+        if self.is_paper() {
+            self.record_paper_trade(product_id, side, size, price).await;
         }
+
+        // MC-4 FIX: Record order latency
+        crate::metrics::record_order_latency(&symbol, start.elapsed().as_secs_f64());
+        crate::metrics::record_order(&symbol, side, true);
+
+        // MC-3 FIX: Return order ID for tracking
+        Ok(order_id)
     }
 
     /// Get position for a symbol
@@ -407,6 +328,42 @@ impl AlpacaClient {
             granularity,
         )
         .await
+    }
+
+    /// Check if client is in paper/sandbox mode
+    #[inline]
+    fn is_paper(&self) -> bool {
+        matches!(self.mode, AppEnv::Paper | AppEnv::Sandbox)
+    }
+
+    /// Record trade to CSV if recorder is configured (Paper only)
+    async fn record_paper_trade(
+        &self,
+        product_id: &str,
+        side: &str,
+        size: Decimal,
+        price: Option<Decimal>,
+    ) {
+        if let Some(ref recorder) = self.recorder {
+            let trade_side = match side.to_lowercase().as_str() {
+                "buy" => TradeSide::Buy,
+                _ => TradeSide::Sell,
+            };
+
+            // Use injected clock for deterministic timestamps
+            let record = TradeRecord::with_timestamp(
+                product_id.to_string(),
+                trade_side,
+                size,
+                price,
+                true,
+                self.clock.now(),
+            );
+
+            if let Err(e) = recorder.record(&record).await {
+                error!("Failed to record paper trade to CSV: {}", e);
+            }
+        }
     }
 }
 

@@ -69,6 +69,8 @@ pub struct AlpacaWebSocketProvider {
     connection_max_retries: u32,
     /// MC-3 FIX: Read timeout for WebSocket messages (seconds)
     read_timeout_secs: u64,
+    /// CB-1 FIX: Handle to the background task for observability
+    task_handle: std::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl AlpacaWebSocketProvider {
@@ -92,6 +94,7 @@ impl AlpacaWebSocketProvider {
             circuit_breaker_cooldown_secs: Self::DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS,
             connection_max_retries: Self::DEFAULT_CONNECTION_MAX_RETRIES,
             read_timeout_secs: Self::DEFAULT_READ_TIMEOUT_SECS,
+            task_handle: std::sync::RwLock::new(None),
         })
     }
 
@@ -111,6 +114,7 @@ impl AlpacaWebSocketProvider {
             circuit_breaker_cooldown_secs: Self::DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS,
             connection_max_retries: Self::DEFAULT_CONNECTION_MAX_RETRIES,
             read_timeout_secs: Self::DEFAULT_READ_TIMEOUT_SECS,
+            task_handle: std::sync::RwLock::new(None),
         })
     }
 
@@ -119,6 +123,20 @@ impl AlpacaWebSocketProvider {
     /// Call `shutdown_token().cancel()` to trigger graceful shutdown of the WebSocket task.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown_token.clone()
+    }
+
+    /// MC-1 FIX: Wait for the background task to complete
+    pub async fn join(&self) {
+        let handle = {
+            let mut guard = self.task_handle.write().unwrap();
+            guard.take()
+        };
+
+        if let Some(h) = handle {
+            if let Err(e) = h.await {
+                error!("WebSocket background task panicked: {:?}", e);
+            }
+        }
     }
 
     /// Connect to WebSocket with retry logic
@@ -247,7 +265,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         let read_timeout_secs = self.read_timeout_secs;
 
         // Spawn background WebSocket handler
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut consecutive_failures: u32 = 0;
             let mut reconnect_count: u64 = 0; // u64 for long-running processes
 
@@ -402,10 +420,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
                 // Main message loop
                 let mut heartbeat_interval = interval(Duration::from_secs(30));
-                // CB-3 FIX: Initialize to true to ensure safe behavior if loop exits unexpectedly
-                // This assignment may appear unused due to the select! macro, but provides a safe default
-                #[allow(unused_assignments)]
-                let mut should_reconnect = true;
 
                 loop {
                     // MC-3 FIX: Read timeout duration (from config)
@@ -429,7 +443,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                         timeout_secs = read_timeout_secs,
                                         "WebSocket read timeout, server may be unresponsive. Reconnecting..."
                                     );
-                                    should_reconnect = true;
                                     break;
                                 }
                                 Ok(msg) => match msg {
@@ -437,11 +450,14 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                         // Alpaca sends arrays of messages
                                         // MC-2 FIX: Parse directly, no intermediate to_string()
                                         if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                                            let arrival = std::time::Instant::now();
                                             for msg_value in messages {
                                                 if let Some(data) = Self::parse_trade_from_value(
                                                     &msg_value,
                                                     &symbol_map
                                                 ) {
+                                                    // MC-3 FIX: Record specific tick processing latency
+                                                    crate::metrics::record_ws_tick_latency("alpaca", arrival.elapsed().as_secs_f64());
                                                     // MC-3 FIX: Record metrics before send to avoid clone
                                                     crate::metrics::record_ws_tick(&data.symbol);
                                                     if let Err(_e) = sender.send(data).await {
@@ -460,17 +476,14 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                     }
                                     Some(Ok(Message::Close(frame))) => {
                                         info!("WebSocket closed by server: {:?}", frame);
-                                        should_reconnect = true;
                                         break;
                                     }
                                     Some(Err(e)) => {
                                         error!("WebSocket error: {}", e);
-                                        should_reconnect = true;
                                         break;
                                     }
                                     None => {
                                         info!("WebSocket stream ended");
-                                        should_reconnect = true;
                                         break;
                                     }
                                     _ => {}
@@ -478,20 +491,23 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                             }
                         }
                     }
-                }
+                } // End Inner Loop
 
-                if should_reconnect {
-                    crate::metrics::WS_RECONNECTIONS
-                        .with_label_values(&["reconnecting"])
-                        .inc();
-                    info!("Initiating Alpaca WebSocket reconnection...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                } else {
-                    break;
-                }
-            }
+                // If we reach here, the inner loop exited (error, timeout, or closed).
+                // We should reconnect (Outer Loop continues).
+                crate::metrics::WS_RECONNECTIONS
+                    .with_label_values(&["reconnecting"])
+                    .inc();
+                info!("Initiating Alpaca WebSocket reconnection...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            } // End Outer Loop
         });
+
+        // Store handle for observability
+        {
+            let mut guard = self.task_handle.write().unwrap();
+            *guard = Some(handle);
+        }
 
         Ok(())
     }

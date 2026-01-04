@@ -67,6 +67,14 @@ lazy_static! {
         &["status"]
     ).expect("FATAL: Failed to register WS_RECONNECTIONS metric - check for duplicate registration");
 
+    /// WebSocket tick processing latency
+    pub static ref WS_TICK_LATENCY: HistogramVec = register_histogram_vec!(
+        "algopioneer_websocket_tick_latency_seconds",
+        "WebSocket tick processing latency",
+        &["exchange"],
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
+    ).expect("FATAL: Failed to register WS_TICK_LATENCY metric - check for duplicate registration");
+
     // --- Circuit Breaker Metrics ---
 
     /// Circuit breaker state (0=closed, 1=half_open, 2=open)
@@ -142,6 +150,13 @@ pub fn record_strategy_halted(strategy_id: &str, pair: &str) {
     STRATEGY_HALTED
         .with_label_values(&[strategy_id, pair])
         .inc();
+}
+
+/// MC-3 FIX: Record WebSocket tick processing latency
+pub fn record_ws_tick_latency(exchange: &str, latency_secs: f64) {
+    WS_TICK_LATENCY
+        .with_label_values(&[exchange])
+        .observe(latency_secs);
 }
 
 /// Record WebSocket tick
