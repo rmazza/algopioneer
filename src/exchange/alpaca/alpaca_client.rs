@@ -12,6 +12,7 @@ use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
 use rust_decimal::Decimal;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tracing::{debug, error, info};
 
@@ -147,6 +148,10 @@ impl AlpacaClient {
     ) -> Result<(), ExchangeError> {
         self.rate_limiter.until_ready().await;
 
+        // MC-4 FIX: Track order execution latency
+        let start = Instant::now();
+        let symbol_for_metrics = utils::to_alpaca_symbol(product_id);
+
         match self.mode {
             AppEnv::Live => {
                 let symbol = utils::to_alpaca_symbol(product_id); // Convert BTC-USD -> BTCUSD
@@ -209,6 +214,13 @@ impl AlpacaClient {
                     status = ?order.status,
                     "Alpaca order created"
                 );
+
+                // MC-4 FIX: Record order latency
+                crate::metrics::record_order_latency(
+                    &symbol_for_metrics,
+                    start.elapsed().as_secs_f64(),
+                );
+                crate::metrics::record_order(&symbol_for_metrics, side, true);
 
                 Ok(())
             }
@@ -302,6 +314,13 @@ impl AlpacaClient {
                         error!("Failed to record paper trade to CSV: {}", e);
                     }
                 }
+
+                // MC-4 FIX: Record order latency
+                crate::metrics::record_order_latency(
+                    &symbol_for_metrics,
+                    start.elapsed().as_secs_f64(),
+                );
+                crate::metrics::record_order(&symbol_for_metrics, side, true);
 
                 Ok(())
             }

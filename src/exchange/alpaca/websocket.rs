@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::exchange::alpaca::utils;
@@ -48,9 +49,15 @@ struct AlpacaMessage {
 ///
 /// Connects to Alpaca's real-time stock data WebSocket for sub-second
 /// price updates. Uses the IEX feed (free tier).
+///
+/// # CB-1 FIX: Lifecycle Management
+/// The provider includes a `CancellationToken` for graceful shutdown.
+/// When the token is cancelled, the background WebSocket task will exit cleanly.
 pub struct AlpacaWebSocketProvider {
     api_key: String,
     api_secret: String,
+    /// CB-1 FIX: Token for graceful shutdown of the WebSocket background task
+    shutdown_token: CancellationToken,
 }
 
 impl AlpacaWebSocketProvider {
@@ -63,6 +70,7 @@ impl AlpacaWebSocketProvider {
         Ok(Self {
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
+            shutdown_token: CancellationToken::new(),
         })
     }
 
@@ -77,6 +85,7 @@ impl AlpacaWebSocketProvider {
         Ok(Self {
             api_key,
             api_secret,
+            shutdown_token: CancellationToken::new(),
         })
     }
 
@@ -196,12 +205,20 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         let api_key = self.api_key.clone();
         let api_secret = self.api_secret.clone();
 
+        // CB-1 FIX: Clone shutdown token for the spawned task
+        let shutdown_token = self.shutdown_token.clone();
+
         // Spawn background WebSocket handler
         tokio::spawn(async move {
-            const MAX_RECONNECT_ATTEMPTS: u32 = u32::MAX;
+            /// CB-2 FIX: Maximum consecutive reconnection failures before circuit breaker trips
+            const MAX_CONSECUTIVE_FAILURES: u32 = 10;
+            /// CB-2 FIX: Cooldown period after circuit breaker trips (5 minutes)
+            const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 300;
+            /// Maximum retries for each individual connection attempt
             const CONNECTION_MAX_RETRIES: u32 = 5;
 
-            let mut reconnect_count = 0;
+            let mut consecutive_failures: u32 = 0;
+            let mut reconnect_count: u64 = 0; // u64 for long-running processes
 
             loop {
                 reconnect_count += 1;
@@ -210,14 +227,53 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                     reconnect_count, alpaca_symbols
                 );
 
-                // Connect with retries
-                let ws_stream = match Self::connect_with_retry(CONNECTION_MAX_RETRIES).await {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        error!("Failed to establish WebSocket connection: {}", e);
-                        if reconnect_count == MAX_RECONNECT_ATTEMPTS {
+                // CB-2 FIX: Check circuit breaker before attempting connection
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    error!(
+                        consecutive_failures = consecutive_failures,
+                        cooldown_secs = CIRCUIT_BREAKER_COOLDOWN_SECS,
+                        "Circuit breaker tripped, entering cooldown"
+                    );
+                    crate::metrics::CIRCUIT_BREAKER_TRIPS
+                        .with_label_values(&["alpaca_websocket"])
+                        .inc();
+
+                    // Wait for cooldown or shutdown
+                    tokio::select! {
+                        _ = shutdown_token.cancelled() => {
+                            info!("Shutdown requested during circuit breaker cooldown");
                             return;
                         }
+                        _ = tokio::time::sleep(Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS)) => {
+                            info!("Circuit breaker cooldown complete, resetting failure count");
+                            consecutive_failures = 0;
+                        }
+                    }
+                }
+
+                // CB-1 FIX: Check for shutdown before connecting
+                if shutdown_token.is_cancelled() {
+                    info!("Shutdown requested, exiting WebSocket loop");
+                    return;
+                }
+
+                // Connect with retries
+                let ws_stream = match Self::connect_with_retry(CONNECTION_MAX_RETRIES).await {
+                    Ok(stream) => {
+                        // Reset failure count on successful connection
+                        consecutive_failures = 0;
+                        stream
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        error!(
+                            error = %e,
+                            consecutive_failures = consecutive_failures,
+                            "Failed to establish WebSocket connection"
+                        );
+                        crate::metrics::WS_RECONNECTIONS
+                            .with_label_values(&["failure"])
+                            .inc();
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
@@ -315,10 +371,18 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
                 // Main message loop
                 let mut heartbeat_interval = interval(Duration::from_secs(30));
-                let should_reconnect: bool;
+                // CB-3 FIX: Initialize to true to ensure safe behavior if loop exits unexpectedly
+                // This assignment may appear unused due to the select! macro, but provides a safe default
+                #[allow(unused_assignments)]
+                let mut should_reconnect = true;
 
                 loop {
                     tokio::select! {
+                        // CB-1 FIX: Check for shutdown signal
+                        _ = shutdown_token.cancelled() => {
+                            info!("Shutdown requested, closing Alpaca WebSocket");
+                            return;
+                        }
                         _ = heartbeat_interval.tick() => {
                             debug!("Alpaca WebSocket heartbeat: connection active");
                         }
@@ -333,12 +397,12 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                                 &msg_value,
                                                 &symbol_map
                                             ) {
-                                                let symbol = data.symbol.clone();
+                                                // MC-3 FIX: Record metrics before send to avoid clone
+                                                crate::metrics::record_ws_tick(&data.symbol);
                                                 if let Err(_e) = sender.send(data).await {
                                                     info!("Channel closed, stopping WebSocket");
                                                     return;
                                                 }
-                                                crate::metrics::record_ws_tick(&symbol);
                                             }
                                         }
                                     }
@@ -371,6 +435,9 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 }
 
                 if should_reconnect {
+                    crate::metrics::WS_RECONNECTIONS
+                        .with_label_values(&["reconnecting"])
+                        .inc();
                     info!("Initiating Alpaca WebSocket reconnection...");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
