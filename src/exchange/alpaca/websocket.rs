@@ -53,14 +53,31 @@ struct AlpacaMessage {
 /// # CB-1 FIX: Lifecycle Management
 /// The provider includes a `CancellationToken` for graceful shutdown.
 /// When the token is cancelled, the background WebSocket task will exit cleanly.
+///
+/// # MC-4 FIX: Configurable Circuit Breaker
+/// All circuit breaker and timeout parameters are configurable at construction time.
 pub struct AlpacaWebSocketProvider {
     api_key: String,
     api_secret: String,
     /// CB-1 FIX: Token for graceful shutdown of the WebSocket background task
     shutdown_token: CancellationToken,
+    /// MC-4 FIX: Maximum consecutive failures before circuit breaker trips
+    max_consecutive_failures: u32,
+    /// MC-4 FIX: Cooldown period after circuit breaker trips (seconds)
+    circuit_breaker_cooldown_secs: u64,
+    /// MC-4 FIX: Maximum retries for each connection attempt
+    connection_max_retries: u32,
+    /// MC-3 FIX: Read timeout for WebSocket messages (seconds)
+    read_timeout_secs: u64,
 }
 
 impl AlpacaWebSocketProvider {
+    /// Default values for circuit breaker configuration
+    const DEFAULT_MAX_CONSECUTIVE_FAILURES: u32 = 10;
+    const DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 300;
+    const DEFAULT_CONNECTION_MAX_RETRIES: u32 = 5;
+    const DEFAULT_READ_TIMEOUT_SECS: u64 = 120;
+
     /// Create a new Alpaca WebSocket provider
     pub fn new(config: &ExchangeConfig) -> Result<Self, ExchangeError> {
         info!(
@@ -71,6 +88,10 @@ impl AlpacaWebSocketProvider {
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
             shutdown_token: CancellationToken::new(),
+            max_consecutive_failures: Self::DEFAULT_MAX_CONSECUTIVE_FAILURES,
+            circuit_breaker_cooldown_secs: Self::DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS,
+            connection_max_retries: Self::DEFAULT_CONNECTION_MAX_RETRIES,
+            read_timeout_secs: Self::DEFAULT_READ_TIMEOUT_SECS,
         })
     }
 
@@ -86,7 +107,18 @@ impl AlpacaWebSocketProvider {
             api_key,
             api_secret,
             shutdown_token: CancellationToken::new(),
+            max_consecutive_failures: Self::DEFAULT_MAX_CONSECUTIVE_FAILURES,
+            circuit_breaker_cooldown_secs: Self::DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS,
+            connection_max_retries: Self::DEFAULT_CONNECTION_MAX_RETRIES,
+            read_timeout_secs: Self::DEFAULT_READ_TIMEOUT_SECS,
         })
+    }
+
+    /// MC-1 FIX: Get the shutdown token for external lifecycle management
+    ///
+    /// Call `shutdown_token().cancel()` to trigger graceful shutdown of the WebSocket task.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_token.clone()
     }
 
     /// Connect to WebSocket with retry logic
@@ -208,15 +240,14 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         // CB-1 FIX: Clone shutdown token for the spawned task
         let shutdown_token = self.shutdown_token.clone();
 
+        // MC-4 FIX: Clone config values for the spawned task
+        let max_consecutive_failures = self.max_consecutive_failures;
+        let circuit_breaker_cooldown_secs = self.circuit_breaker_cooldown_secs;
+        let connection_max_retries = self.connection_max_retries;
+        let read_timeout_secs = self.read_timeout_secs;
+
         // Spawn background WebSocket handler
         tokio::spawn(async move {
-            /// CB-2 FIX: Maximum consecutive reconnection failures before circuit breaker trips
-            const MAX_CONSECUTIVE_FAILURES: u32 = 10;
-            /// CB-2 FIX: Cooldown period after circuit breaker trips (5 minutes)
-            const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 300;
-            /// Maximum retries for each individual connection attempt
-            const CONNECTION_MAX_RETRIES: u32 = 5;
-
             let mut consecutive_failures: u32 = 0;
             let mut reconnect_count: u64 = 0; // u64 for long-running processes
 
@@ -228,10 +259,10 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 );
 
                 // CB-2 FIX: Check circuit breaker before attempting connection
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                if consecutive_failures >= max_consecutive_failures {
                     error!(
                         consecutive_failures = consecutive_failures,
-                        cooldown_secs = CIRCUIT_BREAKER_COOLDOWN_SECS,
+                        cooldown_secs = circuit_breaker_cooldown_secs,
                         "Circuit breaker tripped, entering cooldown"
                     );
                     crate::metrics::CIRCUIT_BREAKER_TRIPS
@@ -244,7 +275,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                             info!("Shutdown requested during circuit breaker cooldown");
                             return;
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS)) => {
+                        _ = tokio::time::sleep(Duration::from_secs(circuit_breaker_cooldown_secs)) => {
                             info!("Circuit breaker cooldown complete, resetting failure count");
                             consecutive_failures = 0;
                         }
@@ -258,7 +289,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 }
 
                 // Connect with retries
-                let ws_stream = match Self::connect_with_retry(CONNECTION_MAX_RETRIES).await {
+                let ws_stream = match Self::connect_with_retry(connection_max_retries).await {
                     Ok(stream) => {
                         // Reset failure count on successful connection
                         consecutive_failures = 0;
@@ -377,6 +408,9 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                 let mut should_reconnect = true;
 
                 loop {
+                    // MC-3 FIX: Read timeout duration (from config)
+                    let read_timeout = Duration::from_secs(read_timeout_secs);
+
                     tokio::select! {
                         // CB-1 FIX: Check for shutdown signal
                         _ = shutdown_token.cancelled() => {
@@ -386,49 +420,61 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                         _ = heartbeat_interval.tick() => {
                             debug!("Alpaca WebSocket heartbeat: connection active");
                         }
-                        msg = read.next() => {
-                            match msg {
-                                Some(Ok(Message::Text(text))) => {
-                                    // Alpaca sends arrays of messages
-                                    // MC-2 FIX: Parse directly, no intermediate to_string()
-                                    if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-                                        for msg_value in messages {
-                                            if let Some(data) = Self::parse_trade_from_value(
-                                                &msg_value,
-                                                &symbol_map
-                                            ) {
-                                                // MC-3 FIX: Record metrics before send to avoid clone
-                                                crate::metrics::record_ws_tick(&data.symbol);
-                                                if let Err(_e) = sender.send(data).await {
-                                                    info!("Channel closed, stopping WebSocket");
-                                                    return;
+                        // MC-3 FIX: Wrap read in timeout to detect unresponsive servers
+                        timeout_result = tokio::time::timeout(read_timeout, read.next()) => {
+                            match timeout_result {
+                                Err(_elapsed) => {
+                                    // MC-3 FIX: Timeout occurred - server is unresponsive
+                                    warn!(
+                                        timeout_secs = read_timeout_secs,
+                                        "WebSocket read timeout, server may be unresponsive. Reconnecting..."
+                                    );
+                                    should_reconnect = true;
+                                    break;
+                                }
+                                Ok(msg) => match msg {
+                                    Some(Ok(Message::Text(text))) => {
+                                        // Alpaca sends arrays of messages
+                                        // MC-2 FIX: Parse directly, no intermediate to_string()
+                                        if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                                            for msg_value in messages {
+                                                if let Some(data) = Self::parse_trade_from_value(
+                                                    &msg_value,
+                                                    &symbol_map
+                                                ) {
+                                                    // MC-3 FIX: Record metrics before send to avoid clone
+                                                    crate::metrics::record_ws_tick(&data.symbol);
+                                                    if let Err(_e) = sender.send(data).await {
+                                                        info!("Channel closed, stopping WebSocket");
+                                                        return;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                                Some(Ok(Message::Ping(payload))) => {
-                                    debug!("Received ping, sending pong");
-                                    if let Err(e) = write.send(Message::Pong(payload)).await {
-                                        warn!("Failed to send pong: {}", e);
+                                    Some(Ok(Message::Ping(payload))) => {
+                                        debug!("Received ping, sending pong");
+                                        if let Err(e) = write.send(Message::Pong(payload)).await {
+                                            warn!("Failed to send pong: {}", e);
+                                        }
                                     }
+                                    Some(Ok(Message::Close(frame))) => {
+                                        info!("WebSocket closed by server: {:?}", frame);
+                                        should_reconnect = true;
+                                        break;
+                                    }
+                                    Some(Err(e)) => {
+                                        error!("WebSocket error: {}", e);
+                                        should_reconnect = true;
+                                        break;
+                                    }
+                                    None => {
+                                        info!("WebSocket stream ended");
+                                        should_reconnect = true;
+                                        break;
+                                    }
+                                    _ => {}
                                 }
-                                Some(Ok(Message::Close(frame))) => {
-                                    info!("WebSocket closed by server: {:?}", frame);
-                                    should_reconnect = true;
-                                    break;
-                                }
-                                Some(Err(e)) => {
-                                    error!("WebSocket error: {}", e);
-                                    should_reconnect = true;
-                                    break;
-                                }
-                                None => {
-                                    info!("WebSocket stream ended");
-                                    should_reconnect = true;
-                                    break;
-                                }
-                                _ => {}
                             }
                         }
                     }

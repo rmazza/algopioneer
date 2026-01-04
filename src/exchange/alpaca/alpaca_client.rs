@@ -138,6 +138,33 @@ impl AlpacaClient {
             .map_err(|e| e.to_string().into())
     }
 
+    /// N-2 FIX: Build order request (extracted to eliminate duplication)
+    ///
+    /// Creates an Alpaca order request for both market and limit orders.
+    /// This helper is used by both Live and Paper trading modes.
+    fn build_order_request(
+        symbol: &str,
+        side: alpaca_order::Side,
+        qty: num_decimal::Num,
+        limit_price: Option<num_decimal::Num>,
+    ) -> alpaca_order::CreateReq {
+        match limit_price {
+            Some(price) => alpaca_order::CreateReqInit {
+                type_: alpaca_order::Type::Limit,
+                limit_price: Some(price),
+                time_in_force: alpaca_order::TimeInForce::Day,
+                ..Default::default()
+            }
+            .init(symbol, side, alpaca_order::Amount::quantity(qty)),
+            None => alpaca_order::CreateReqInit {
+                type_: alpaca_order::Type::Market,
+                time_in_force: alpaca_order::TimeInForce::Day,
+                ..Default::default()
+            }
+            .init(symbol, side, alpaca_order::Amount::quantity(qty)),
+        }
+    }
+
     /// Place an order on Alpaca
     pub async fn place_order(
         &self,
@@ -173,34 +200,17 @@ impl AlpacaClient {
                     ExchangeError::Other(format!("Failed to convert quantity: {}", e))
                 })?;
 
-                let request = match price {
-                    Some(limit_price) => {
-                        let limit_num = utils::decimal_to_num(limit_price).map_err(|e| {
-                            ExchangeError::Other(format!("Failed to convert limit price: {}", e))
-                        })?;
-                        alpaca_order::CreateReqInit {
-                            type_: alpaca_order::Type::Limit,
-                            limit_price: Some(limit_num),
-                            time_in_force: alpaca_order::TimeInForce::Day,
-                            ..Default::default()
-                        }
-                        .init(
-                            symbol.as_ref(),
-                            order_side,
-                            alpaca_order::Amount::quantity(qty_num),
-                        )
-                    }
-                    None => alpaca_order::CreateReqInit {
-                        type_: alpaca_order::Type::Market,
-                        time_in_force: alpaca_order::TimeInForce::Day,
-                        ..Default::default()
-                    }
-                    .init(
-                        symbol.as_ref(),
-                        order_side,
-                        alpaca_order::Amount::quantity(qty_num),
-                    ),
+                // N-2 FIX: Convert limit price if present
+                let limit_num = match price {
+                    Some(p) => Some(utils::decimal_to_num(p).map_err(|e| {
+                        ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+                    })?),
+                    None => None,
                 };
+
+                // N-2 FIX: Use helper to build request
+                let request =
+                    Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
 
                 let client = &self.client;
                 let order = client
@@ -244,39 +254,22 @@ impl AlpacaClient {
                     _ => alpaca_order::Side::Sell,
                 };
 
-                // Propagate conversion errors
+                // N-2 FIX: Propagate conversion errors
                 let qty_num = utils::decimal_to_num(size).map_err(|e| {
                     ExchangeError::Other(format!("Failed to convert quantity: {}", e))
                 })?;
 
-                let request = match price {
-                    Some(limit_price) => {
-                        let limit_num = utils::decimal_to_num(limit_price).map_err(|e| {
-                            ExchangeError::Other(format!("Failed to convert limit price: {}", e))
-                        })?;
-                        alpaca_order::CreateReqInit {
-                            type_: alpaca_order::Type::Limit,
-                            limit_price: Some(limit_num),
-                            time_in_force: alpaca_order::TimeInForce::Day,
-                            ..Default::default()
-                        }
-                        .init(
-                            symbol.as_ref(),
-                            order_side,
-                            alpaca_order::Amount::quantity(qty_num),
-                        )
-                    }
-                    None => alpaca_order::CreateReqInit {
-                        type_: alpaca_order::Type::Market,
-                        time_in_force: alpaca_order::TimeInForce::Day,
-                        ..Default::default()
-                    }
-                    .init(
-                        symbol.as_ref(),
-                        order_side,
-                        alpaca_order::Amount::quantity(qty_num),
-                    ),
+                // N-2 FIX: Convert limit price if present
+                let limit_num = match price {
+                    Some(p) => Some(utils::decimal_to_num(p).map_err(|e| {
+                        ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+                    })?),
+                    None => None,
                 };
+
+                // N-2 FIX: Use helper to build request
+                let request =
+                    Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
 
                 let client = &self.client;
                 let order = client
