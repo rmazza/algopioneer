@@ -138,6 +138,15 @@ impl AlpacaClient {
             .map_err(|e| e.to_string().into())
     }
 
+    /// N-1 FIX: Parse order side string to Alpaca enum (eliminates duplication)
+    #[inline]
+    fn parse_order_side(side: &str) -> alpaca_order::Side {
+        match side.to_lowercase().as_str() {
+            "buy" => alpaca_order::Side::Buy,
+            _ => alpaca_order::Side::Sell,
+        }
+    }
+
     /// N-2 FIX: Build order request (extracted to eliminate duplication)
     ///
     /// Creates an Alpaca order request for both market and limit orders.
@@ -166,13 +175,15 @@ impl AlpacaClient {
     }
 
     /// Place an order on Alpaca
+    ///
+    /// MC-3 FIX: Returns order ID for tracking, cancellation, and reconciliation.
     pub async fn place_order(
         &self,
         product_id: &str,
         side: &str,
         size: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), ExchangeError> {
+    ) -> Result<String, ExchangeError> {
         self.rate_limiter.until_ready().await;
 
         // MC-4 FIX: Track order execution latency
@@ -190,10 +201,8 @@ impl AlpacaClient {
                     "Placing LIVE Alpaca order"
                 );
 
-                let order_side = match side.to_lowercase().as_str() {
-                    "buy" => alpaca_order::Side::Buy,
-                    _ => alpaca_order::Side::Sell,
-                };
+                // N-1 FIX: Use helper to parse side
+                let order_side = Self::parse_order_side(side);
 
                 // CB-2 FIX: Propagate conversion errors instead of silent fallback
                 let qty_num = utils::decimal_to_num(size).map_err(|e| {
@@ -232,7 +241,8 @@ impl AlpacaClient {
                 );
                 crate::metrics::record_order(&symbol_for_metrics, side, true);
 
-                Ok(())
+                // MC-3 FIX: Return order ID for tracking
+                Ok(order.id.as_hyphenated().to_string())
             }
             AppEnv::Paper | AppEnv::Sandbox => {
                 // In Paper/Sandbox, we DO execute the order against the Paper API.
@@ -249,10 +259,8 @@ impl AlpacaClient {
                     "Placing PAPER Alpaca order"
                 );
 
-                let order_side = match side.to_lowercase().as_str() {
-                    "buy" => alpaca_order::Side::Buy,
-                    _ => alpaca_order::Side::Sell,
-                };
+                // N-1 FIX: Use helper to parse side
+                let order_side = Self::parse_order_side(side);
 
                 // N-2 FIX: Propagate conversion errors
                 let qty_num = utils::decimal_to_num(size).map_err(|e| {
@@ -315,7 +323,8 @@ impl AlpacaClient {
                 );
                 crate::metrics::record_order(&symbol_for_metrics, side, true);
 
-                Ok(())
+                // MC-3 FIX: Return order ID for tracking
+                Ok(order.id.as_hyphenated().to_string())
             }
         }
     }
@@ -427,7 +436,11 @@ impl Executor for AlpacaClient {
             OrderSide::Sell => "sell",
         };
 
-        self.place_order(symbol, side_str, quantity, price).await
+        // MC-3 FIX: Discard order ID for trait compatibility
+        // Callers who need the ID should use place_order directly
+        self.place_order(symbol, side_str, quantity, price)
+            .await
+            .map(|_| ())
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
