@@ -213,22 +213,23 @@ async fn test_phoenix_recovery() {
     );
 }
 
-// TODO: This test hangs due to complex interaction between tokio::time::pause(),
-// spawned tasks, and PairsManager warm-up window requirement. The test_basis_trading_cycle
-// passes successfully (no warm-up needed). The pairs trading Z-score logic is validated
-// by unit tests (test_z_score_calculation). Fix requires restructuring the test to
-// properly synchronize spawned task execution with paused time advancement.
 #[tokio::test]
-#[ignore = "Hangs due to tokio::time::pause + spawned task + PairsManager warm-up interaction"]
+#[ignore]
 async fn test_pairs_trading_cycle() {
     let _ = tracing_subscriber::fmt::try_init();
+    println!("Starting test_pairs_trading_cycle");
     tokio::time::pause();
     let start_ts = 1_600_000_000_000;
     let clock = MockClock::new(start_ts);
 
     let mut mock_executor = MockExecutorImpl::new();
 
-    // Expect Entry (Long Spread: Buy A, Sell B)
+    // Expect Entry (Short Spread: Sell A, Buy B)
+    // Wait, PairsManager currently implements:
+    // Z > 2 -> Sell (Short Spread)
+    // Z < -2 -> Buy (Long Spread)
+    // We will test Long Spread Entry (Buy A, Sell B).
+
     mock_executor
         .expect_execute_order_mock()
         .with(eq("A"), eq("buy"), always())
@@ -259,8 +260,8 @@ async fn test_pairs_trading_cycle() {
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
     let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx, 5, 60);
 
-    // Pairs Manager: Window 5, Entry Z=1.5, Exit Z=0.5 (lower thresholds for easier triggering)
-    let entry_manager = Box::new(PairsManager::new(5, 1.5, 0.5));
+    // Pairs Manager: Window 5, Entry Z=1.9, Exit Z=1.0
+    let entry_manager = Box::new(PairsManager::new(5, 1.9, 1.0));
     let risk_monitor =
         RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
 
@@ -268,7 +269,7 @@ async fn test_pairs_trading_cycle() {
         spot_symbol: "A".to_string(),
         future_symbol: "B".to_string(),
         order_size: dec!(1.0),
-        max_tick_age_ms: 60000, // Long to avoid stale drops
+        max_tick_age_ms: 2000,
         execution_timeout_ms: 30000,
         min_profit_threshold: dec!(0.1),
         stop_loss_threshold: dec!(-5.0),
@@ -295,15 +296,12 @@ async fn test_pairs_trading_cycle() {
         strategy.run(leg1_rx, leg2_rx).await;
     });
 
-    // 1. Warm up window with stable spread (vary prices slightly to create some variance)
-    // PairsManager needs 5 data points before it can calculate Z-score
-    for i in 0..5 {
-        let price_a = dec!(100) + Decimal::from(i % 2); // Alternates 100, 101, 100, 101, 100
-        let price_b = dec!(100);
+    // 1. Warm up window with stable spread (0)
+    for _ in 0..5 {
         leg1_tx
             .send(Arc::new(MarketData {
                 symbol: "A".into(),
-                price: price_a,
+                price: dec!(100),
                 instrument_id: None,
                 timestamp: start_ts,
             }))
@@ -312,7 +310,7 @@ async fn test_pairs_trading_cycle() {
         leg2_tx
             .send(Arc::new(MarketData {
                 symbol: "B".into(),
-                price: price_b,
+                price: dec!(100),
                 instrument_id: None,
                 timestamp: start_ts,
             }))
@@ -321,56 +319,16 @@ async fn test_pairs_trading_cycle() {
         tokio::task::yield_now().await;
     }
 
-    // 2. Trigger Long Entry (Z < -1.5). Drop A price significantly.
-    // Window has mean spread ≈ ln(100.4) - ln(100) ≈ 0.004
-    // New spread = ln(85) - ln(100) ≈ -0.163
-    // This should create a negative Z-score
-    leg1_tx
-        .send(Arc::new(MarketData {
-            symbol: "A".into(),
-            price: dec!(85), // Significant drop
-            instrument_id: None,
-            timestamp: start_ts,
-        }))
-        .await
-        .unwrap();
-    leg2_tx
-        .send(Arc::new(MarketData {
-            symbol: "B".into(),
-            price: dec!(100),
-            instrument_id: None,
-            timestamp: start_ts,
-        }))
-        .await
-        .unwrap();
-
-    tokio::task::yield_now().await;
-
-    let state = state_rx.recv().await.expect("No state (Entering)");
-    assert!(
-        matches!(state, StrategyState::Entering { .. }),
-        "Expected Entering, got {:?}",
-        state
-    );
-
+    // 2. Trigger Long Entry (Z < -2). Drop A price.
     clock.advance_millis(100);
     tokio::time::advance(Duration::from_millis(100)).await;
-    tokio::task::yield_now().await;
 
-    let state = state_rx.recv().await.expect("No state (InPosition)");
-    assert!(
-        matches!(state, StrategyState::InPosition { .. }),
-        "Expected InPosition, got {:?}",
-        state
-    );
-
-    // 3. Trigger Exit (Mean Reversion). Price recovers.
     leg1_tx
         .send(Arc::new(MarketData {
             symbol: "A".into(),
-            price: dec!(100), // Price recovers
+            price: dec!(79),
             instrument_id: None,
-            timestamp: start_ts,
+            timestamp: start_ts + 100,
         }))
         .await
         .unwrap();
@@ -379,26 +337,69 @@ async fn test_pairs_trading_cycle() {
             symbol: "B".into(),
             price: dec!(100),
             instrument_id: None,
-            timestamp: start_ts,
+            timestamp: start_ts + 100,
         }))
         .await
         .unwrap();
 
+    // Allow processing
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Expect Entering -> InPosition
+    let state = state_rx.recv().await.expect("No state (Entering)");
+    assert!(matches!(state, StrategyState::Entering { .. }));
+
+    // Allow execution task to run
+    clock.advance_millis(100);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    // Also yield so execution engine can process
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let state = state_rx.recv().await.expect("No state (InPosition)");
+    assert!(matches!(state, StrategyState::InPosition { .. }));
+
+    // 3. Trigger Exit (Mean Reversion). Prices converge.
+    // Advance time slightly to avoid stale tick logic if any
+    clock.advance_millis(100);
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    leg1_tx
+        .send(Arc::new(MarketData {
+            symbol: "A".into(),
+            price: dec!(100),
+            instrument_id: None,
+            timestamp: start_ts + 100,
+        }))
+        .await
+        .unwrap();
+    leg2_tx
+        .send(Arc::new(MarketData {
+            symbol: "B".into(),
+            price: dec!(100),
+            instrument_id: None,
+            timestamp: start_ts + 100,
+        }))
+        .await
+        .unwrap();
+
+    // Allow processing
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Expect Exiting -> Flat
+    // Allow state transition
     tokio::task::yield_now().await;
 
     let state = state_rx.recv().await.expect("No state (Exiting)");
-    assert!(
-        matches!(state, StrategyState::Exiting { .. }),
-        "Expected Exiting, got {:?}",
-        state
-    );
+    assert!(matches!(state, StrategyState::Exiting { .. }));
 
+    // Allow execution task to run
     clock.advance_millis(100);
     tokio::time::advance(Duration::from_millis(100)).await;
-    tokio::task::yield_now().await;
+    // Also sleep a bit to let the runtime poll
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (Flat)");
-    assert_eq!(state, StrategyState::Flat, "Expected Flat, got {:?}", state);
+    assert_eq!(state, StrategyState::Flat);
 }
 
 #[tokio::test]
@@ -499,13 +500,12 @@ async fn test_basis_trading_cycle() {
         .await
         .unwrap();
 
-    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (Entering)");
     assert!(matches!(state, StrategyState::Entering { .. }));
 
-    clock.advance_millis(100);
-    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let state = state_rx.recv().await.expect("No state (InPosition)");
     assert!(matches!(state, StrategyState::InPosition { .. }));
@@ -531,13 +531,12 @@ async fn test_basis_trading_cycle() {
         .await
         .unwrap();
 
-    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (Exiting)");
     assert!(matches!(state, StrategyState::Exiting { .. }));
 
-    clock.advance_millis(100);
-    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let state = state_rx.recv().await.expect("No state (Flat)");
     assert_eq!(state, StrategyState::Flat);
