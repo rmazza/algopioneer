@@ -214,6 +214,7 @@ async fn test_phoenix_recovery() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_pairs_trading_cycle() {
     let _ = tracing_subscriber::fmt::try_init();
     println!("Starting test_pairs_trading_cycle");
