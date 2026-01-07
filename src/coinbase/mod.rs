@@ -11,7 +11,7 @@ use std::sync::Arc;
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
 use std::num::NonZeroU32;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum AppEnv {
     Live,
     Sandbox,
