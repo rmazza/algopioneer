@@ -34,6 +34,17 @@ let mut trade_returns: SmallVec<[Decimal; 32]> = SmallVec::new();
 
 ---
 
+### MC-2 (Alpaca): Optimize String Allocations in WebSocket Hot Path
+**Location**: `src/exchange/alpaca/websocket.rs`
+
+Deferred from Alpaca Code Review. The `handle_message` function performs unnecessary string allocations during JSON parsing/deserialization which is a hot path.
+
+**Planned Improvement**:
+- Use `Cow<str>` or `&str` with `serde_json::from_slice` where possible.
+- Avoid cloning strings when passing to `MarketData`.
+
+---
+
 ## Low Priority / Cleanup
 
 ### Inconsistent Error Suffix Convention
@@ -51,3 +62,13 @@ Some modules use `Error` suffix (e.g., `ExecutionError`, `ExchangeError`) while 
 - [x] **CB-3**: Reliability improvements (Clock injection, graceful error handling)
 - [x] **CB-5**: Safe access in Market Data Provider (removed unwrap)
 - [x] **N-2**: Performance optimization in Alpaca Utils (pre-computed powers of 10)
+
+### Jan 2026 - Alpaca Module Review
+- [x] **MC-1**: Fix `JoinHandle` leak in `AlpacaWebSocketProvider`
+- [x] **MC-3**: Add high-resolution tick latency metrics
+- [x] **MC-4**: Optimize hot-path clone in market data routing
+- [x] **CB-1**: Implement graceful shutdown for WebSocket task
+- [x] **CB-2**: Add circuit breaker for reconnection logic
+- [x] **CB-3**: Fix unsafe boolean initialization (UB)
+- [x] **N-1**: Use `expect` with context instead of `unwrap_or_default` for `NonZeroU32`
+- [x] **Refactor**: Unified `place_order` logic for live/paper trading

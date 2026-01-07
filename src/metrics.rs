@@ -91,6 +91,16 @@ lazy_static! {
         &["symbol", "status"],
         vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
     ).expect("FATAL: Failed to register MARKET_DATA_POLL_LATENCY metric - check for duplicate registration");
+
+    // MC-3 FIX: WebSocket tick latency histogram
+    /// Latency between exchange timestamp and local receive time (ms)
+    /// Critical for detecting stale data during network degradation
+    pub static ref WS_TICK_LATENCY: HistogramVec = register_histogram_vec!(
+        "algopioneer_websocket_tick_latency_ms",
+        "WebSocket tick latency (exchange timestamp to local receive)",
+        &["symbol", "exchange"],
+        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
+    ).expect("FATAL: Failed to register WS_TICK_LATENCY metric - check for duplicate registration");
 }
 
 /// Record an order execution
@@ -130,6 +140,14 @@ pub fn record_poll_latency(symbol: &str, status: &str, latency_secs: f64) {
     MARKET_DATA_POLL_LATENCY
         .with_label_values(&[symbol, status])
         .observe(latency_secs);
+}
+
+/// MC-3 FIX: Record WebSocket tick latency (exchange timestamp to local receive)
+/// Critical for detecting stale data during network degradation
+pub fn record_ws_tick_latency(symbol: &str, exchange: &str, latency_ms: f64) {
+    WS_TICK_LATENCY
+        .with_label_values(&[symbol, exchange])
+        .observe(latency_ms);
 }
 
 /// Get metrics as text for /metrics endpoint

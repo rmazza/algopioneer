@@ -136,13 +136,24 @@ impl SimpleTradingEngine {
                             .await
                             .map_err(|e| e as Box<dyn std::error::Error>)?;
 
+                        // CB-1 FIX: Fail loudly on price conversion failure
+                        let entry_price = match Decimal::from_f64(latest_candle.close) {
+                            Some(p) => p,
+                            None => {
+                                tracing::error!(
+                                    price = latest_candle.close,
+                                    "CRITICAL: Cannot convert entry price to Decimal (NaN/Inf). Skipping trade cycle."
+                                );
+                                continue; // Skip this cycle, don't corrupt state
+                            }
+                        };
+
                         // Track position with full details for reconciliation
                         let detail = PositionDetail {
                             symbol: self.config.product_id.clone(),
                             side: "buy".to_string(),
                             quantity: self.config.order_size,
-                            entry_price: Decimal::from_f64(latest_candle.close)
-                                .unwrap_or(Decimal::ZERO),
+                            entry_price,
                         };
                         self.state.open_position(detail);
 
@@ -163,10 +174,22 @@ impl SimpleTradingEngine {
                             .await
                             .map_err(|e| e as Box<dyn std::error::Error>)?;
 
+                        // CB-1 FIX: Fail loudly on price conversion failure
+                        let exit_price = match Decimal::from_f64(latest_candle.close) {
+                            Some(p) => p,
+                            None => {
+                                tracing::error!(
+                                    price = latest_candle.close,
+                                    "CRITICAL: Cannot convert exit price to Decimal (NaN/Inf). Position closed without PnL tracking."
+                                );
+                                // Still close position but skip PnL calculation
+                                self.state.close_position(&self.config.product_id);
+                                continue;
+                            }
+                        };
+
                         // Close position and log details
                         if let Some(closed) = self.state.close_position(&self.config.product_id) {
-                            let exit_price =
-                                Decimal::from_f64(latest_candle.close).unwrap_or(Decimal::ZERO);
                             let pnl = (exit_price - closed.entry_price) * closed.quantity;
                             info!(
                                 "Closed position: entry={}, exit={}, pnl={}",
