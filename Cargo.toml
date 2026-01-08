@@ -1,6 +1,6 @@
 [package]
 name = "algopioneer"
-version = "1.4.2"
+version = "1.4.3"
 edition = "2021"  # NP1: Fixed from "2024"
 
 [dependencies]
