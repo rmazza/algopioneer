@@ -40,13 +40,6 @@ lazy_static! {
         &["strategy_id", "from_state", "to_state"]
     ).expect("FATAL: Failed to register STRATEGY_STATE metric - check for duplicate registration");
 
-    // MC-2 FIX: Strategy halted events for alerting
-    /// Strategy entered Halted state (critical failure requiring manual intervention)
-    pub static ref STRATEGY_HALTED: IntCounterVec = register_int_counter_vec!(
-        opts!("algopioneer_strategy_halted_total", "Strategy entered Halted state"),
-        &["strategy_id", "pair"]
-    ).expect("FATAL: Failed to register STRATEGY_HALTED metric - check for duplicate registration");
-
     // --- WebSocket Metrics ---
 
     /// WebSocket ticks received
@@ -66,14 +59,6 @@ lazy_static! {
         opts!("algopioneer_websocket_reconnections_total", "WebSocket reconnection attempts"),
         &["status"]
     ).expect("FATAL: Failed to register WS_RECONNECTIONS metric - check for duplicate registration");
-
-    /// WebSocket tick processing latency
-    pub static ref WS_TICK_LATENCY: HistogramVec = register_histogram_vec!(
-        "algopioneer_websocket_tick_latency_seconds",
-        "WebSocket tick processing latency",
-        &["exchange"],
-        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
-    ).expect("FATAL: Failed to register WS_TICK_LATENCY metric - check for duplicate registration");
 
     // --- Circuit Breaker Metrics ---
 
@@ -97,6 +82,26 @@ lazy_static! {
         &["symbol", "status"]
     ).expect("FATAL: Failed to register RECOVERY_ATTEMPTS metric - check for duplicate registration");
 
+    // --- Market Data Metrics ---
+
+    /// Market data polling latency in seconds
+    pub static ref MARKET_DATA_POLL_LATENCY: HistogramVec = register_histogram_vec!(
+        "algopioneer_market_data_poll_latency_seconds",
+        "Market data polling latency",
+        &["symbol", "status"],
+        vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    ).expect("FATAL: Failed to register MARKET_DATA_POLL_LATENCY metric - check for duplicate registration");
+
+    // MC-3 FIX: WebSocket tick latency histogram
+    /// Latency between exchange timestamp and local receive time (ms)
+    /// Critical for detecting stale data during network degradation
+    pub static ref WS_TICK_LATENCY: HistogramVec = register_histogram_vec!(
+        "algopioneer_websocket_tick_latency_ms",
+        "WebSocket tick latency (exchange timestamp to local receive)",
+        &["symbol", "exchange"],
+        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
+    ).expect("FATAL: Failed to register WS_TICK_LATENCY metric - check for duplicate registration");
+
     // --- Pairs Manager Precision Metrics (CB-2 FIX) ---
 
     /// Price ratio rejections due to f64 precision limits
@@ -112,15 +117,12 @@ lazy_static! {
         &["pair"]
     ).expect("FATAL: Failed to register PAIRS_PRECISION_WARNINGS metric - check for duplicate registration");
 
-    // --- Market Data Metrics ---
-
-    /// Market data polling latency in seconds
-    pub static ref MARKET_DATA_POLL_LATENCY: HistogramVec = register_histogram_vec!(
-        "algopioneer_market_data_poll_latency_seconds",
-        "Market data polling latency",
-        &["symbol", "status"],
-        vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
-    ).expect("FATAL: Failed to register MARKET_DATA_POLL_LATENCY metric - check for duplicate registration");
+    // MC-2 FIX: Strategy halted events for alerting
+    /// Strategy entered Halted state (critical failure requiring manual intervention)
+    pub static ref STRATEGY_HALTED: IntCounterVec = register_int_counter_vec!(
+        opts!("algopioneer_strategy_halted_total", "Strategy entered Halted state"),
+        &["strategy_id", "pair"]
+    ).expect("FATAL: Failed to register STRATEGY_HALTED metric - check for duplicate registration");
 }
 
 /// Record an order execution
@@ -145,20 +147,6 @@ pub fn set_strategy_pnl(strategy_id: &str, strategy_type: &str, pnl: f64) {
         .set(pnl);
 }
 
-/// MC-2 FIX: Record when a strategy enters Halted state
-pub fn record_strategy_halted(strategy_id: &str, pair: &str) {
-    STRATEGY_HALTED
-        .with_label_values(&[strategy_id, pair])
-        .inc();
-}
-
-/// MC-3 FIX: Record WebSocket tick processing latency
-pub fn record_ws_tick_latency(exchange: &str, latency_secs: f64) {
-    WS_TICK_LATENCY
-        .with_label_values(&[exchange])
-        .observe(latency_secs);
-}
-
 /// Record WebSocket tick
 pub fn record_ws_tick(symbol: &str) {
     WS_TICKS_TOTAL.with_label_values(&[symbol]).inc();
@@ -176,6 +164,14 @@ pub fn record_poll_latency(symbol: &str, status: &str, latency_secs: f64) {
         .observe(latency_secs);
 }
 
+/// MC-3 FIX: Record WebSocket tick latency (exchange timestamp to local receive)
+/// Critical for detecting stale data during network degradation
+pub fn record_ws_tick_latency(symbol: &str, exchange: &str, latency_ms: f64) {
+    WS_TICK_LATENCY
+        .with_label_values(&[symbol, exchange])
+        .observe(latency_ms);
+}
+
 /// CB-2 FIX: Record precision rejection for extreme price ratios
 pub fn record_precision_rejection(pair: &str) {
     PAIRS_PRECISION_REJECTIONS.with_label_values(&[pair]).inc();
@@ -184,6 +180,13 @@ pub fn record_precision_rejection(pair: &str) {
 /// CB-2 FIX: Record precision warning for price ratios approaching limits
 pub fn record_precision_warning(pair: &str) {
     PAIRS_PRECISION_WARNINGS.with_label_values(&[pair]).inc();
+}
+
+/// MC-2 FIX: Record when a strategy enters Halted state
+pub fn record_strategy_halted(strategy_id: &str, pair: &str) {
+    STRATEGY_HALTED
+        .with_label_values(&[strategy_id, pair])
+        .inc();
 }
 
 /// Get metrics as text for /metrics endpoint

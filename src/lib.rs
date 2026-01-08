@@ -1,5 +1,7 @@
 pub mod backtest;
+pub mod cli;
 pub mod coinbase;
+pub mod commands;
 pub mod discovery;
 pub mod events;
 pub mod exchange;
@@ -9,5 +11,7 @@ pub mod metrics;
 pub mod observability;
 pub mod resilience;
 pub mod sandbox;
+pub mod state;
 pub mod strategy;
+pub mod trading;
 pub mod types;

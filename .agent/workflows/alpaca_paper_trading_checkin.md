@@ -24,6 +24,16 @@ echo "EC2 IP: $EC2_IP"
 
 ## Steps
 
+### 0. Reference Cheat Sheet
+// turbo
+View the project cheat sheet for useful commands and deployment details (ignores gitignore):
+
+```bash
+cat CHEATSHEET.md || echo "Cheat sheet not found"
+```
+
+---
+
 ### 1. Check Container Status
 // turbo
 Verify the Alpaca paper trading container is running on EC2:
