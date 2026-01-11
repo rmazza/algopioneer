@@ -143,6 +143,23 @@ ssh -i ~/.ssh/trading-key.pem ec2-user@$(cd terraform && terraform output -raw p
 
 ---
 
+### 8. Archive and Log (Housekeeping)
+
+After deploying, archive the config and update the trading log:
+
+```bash
+# Archive dated config
+mkdir -p config_archive
+cp discovered_pairs_new.json config_archive/discovered_pairs_$(date +%Y-%m-%d).json
+
+# Show what to add to TRADING_LOG.md
+echo "Update TRADING_LOG.md with today's health check results"
+```
+
+Then add an entry to `TRADING_LOG.md` with the account snapshot, pair changes, and notes.
+
+---
+
 ## Health Check Summary Template
 
 After running this workflow, document:
