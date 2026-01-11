@@ -1,0 +1,46 @@
+# Agent Configuration for algopioneer
+# This file controls agent behavior and preferences
+
+# Git settings
+git:
+  default_branch: develop
+  release_branch: main
+  commit_style: conventional  # conventional, angular, or custom
+
+# Build and test
+build:
+  test_command: cargo test
+  format_command: cargo fmt --all
+  lint_command: cargo clippy --all-targets --all-features -- -D warnings
+  deny_command: cargo deny check
+  release_build: cargo build --release
+
+# Code quality
+quality:
+  auto_format: true
+  run_clippy_before_commit: true
+  require_tests: true
+  max_complexity: 10
+
+# Trading-specific
+trading:
+  paper_mode_default: true
+  require_risk_review_for_live: true
+  max_position_size_usd: 1000
+  allowed_exchanges:
+    - coinbase
+    - alpaca
+    - kraken
+
+# Deployment
+deploy:
+  ssh_key_path: ~/.ssh/trading-key.pem
+  ec2_user: ec2-user
+  docker_platform: linux/amd64
+  container_prefix: algopioneer
+
+# Observability
+observability:
+  health_endpoint: /health
+  metrics_endpoint: /metrics
+  log_format: structured  # structured or plain
