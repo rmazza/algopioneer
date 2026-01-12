@@ -17,6 +17,22 @@ Technical debt and enhancement tracking for algopioneer.
 
 ---
 
+### MC-3: Portfolio-Level Risk Limits
+**Status**: Strategy-level limits exist (1 position per pair/symbol), but no portfolio-level controls.
+
+**Existing Safeguards** (no action needed):
+- `DualLegStrategy` uses `StrategyState::Flat` gate - prevents double entry
+- `MovingAverageStrategy` uses `position_open: bool` flag - same effect
+
+**Actual Gap** (future enhancement):
+- No cap on total notional deployed across all pairs
+- No pre-trade check against account buying power
+- No limit on concurrent active positions
+
+**Deferred**: Acceptable for paper trading. Required before significant live capital.
+
+---
+
 ## Medium Priority
 
 ### N-4: SmallVec for Trade Returns
