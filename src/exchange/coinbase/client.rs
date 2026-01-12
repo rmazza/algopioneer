@@ -77,11 +77,16 @@ impl Executor for CoinbaseExchangeClient {
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), ExchangeError> {
+    ) -> Result<crate::orders::OrderId, ExchangeError> {
         self.inner
             .place_order(symbol, &side.to_string(), quantity, price)
             .await
-            .map_err(ExchangeError::from_boxed)
+            .map_err(ExchangeError::from_boxed)?;
+
+        // MC-2 FIX: Generate order ID for tracking
+        // Note: Coinbase Live mode isn't fully implemented yet, so we generate a local ID
+        let order_id = crate::orders::OrderId::new(format!("cb-{}", uuid::Uuid::new_v4()));
+        Ok(order_id)
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {

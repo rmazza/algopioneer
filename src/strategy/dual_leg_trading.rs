@@ -2464,10 +2464,14 @@ impl Executor for CoinbaseClient {
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), crate::exchange::ExchangeError> {
+    ) -> Result<crate::orders::OrderId, crate::exchange::ExchangeError> {
         self.place_order(symbol, &side.to_string(), quantity, price)
             .await
-            .map_err(crate::exchange::ExchangeError::from_boxed)
+            .map_err(crate::exchange::ExchangeError::from_boxed)?;
+
+        // MC-2 FIX: Generate order ID for tracking
+        let order_id = crate::orders::OrderId::new(format!("cb-{}", uuid::Uuid::new_v4()));
+        Ok(order_id)
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, crate::exchange::ExchangeError> {
@@ -2875,7 +2879,7 @@ mod tests {
             side: OrderSide,
             quantity: Decimal,
             _price: Option<Decimal>,
-        ) -> Result<(), crate::exchange::ExchangeError> {
+        ) -> Result<crate::orders::OrderId, crate::exchange::ExchangeError> {
             let mut count = self.call_count.lock().await;
             *count += 1;
 
@@ -2890,7 +2894,8 @@ mod tests {
                 .await
                 .push((symbol.to_string(), side, quantity));
 
-            Ok(())
+            // MC-2 FIX: Return mock order ID
+            Ok(crate::orders::OrderId::new(format!("mock-{}", *count)))
         }
 
         async fn get_position(

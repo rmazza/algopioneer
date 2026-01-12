@@ -387,17 +387,15 @@ impl Executor for AlpacaClient {
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), ExchangeError> {
+    ) -> Result<crate::orders::OrderId, ExchangeError> {
         let side_str = match side {
             OrderSide::Buy => "buy",
             OrderSide::Sell => "sell",
         };
 
-        // MC-3 FIX: Discard order ID for trait compatibility
-        // Callers who need the ID should use place_order directly
-        self.place_order(symbol, side_str, quantity, price)
-            .await
-            .map(|_| ())
+        // MC-2 FIX: Return the actual order ID from place_order
+        let order_id_str = self.place_order(symbol, side_str, quantity, price).await?;
+        Ok(crate::orders::OrderId::new(order_id_str))
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {

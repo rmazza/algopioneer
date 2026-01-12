@@ -9,6 +9,7 @@ pub mod health;
 pub mod logging;
 pub mod metrics;
 pub mod observability;
+pub mod orders;
 pub mod resilience;
 pub mod sandbox;
 pub mod state;

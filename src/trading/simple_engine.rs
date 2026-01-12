@@ -87,9 +87,31 @@ impl SimpleTradingEngine {
             )
             .await?;
 
-        let mut closes: Vec<f64> = initial_candles.iter().map(|c| c.close).collect();
+        // MC-1 FIX: Convert to Decimal first to validate (reject NaN/Inf), then to f64 for strategy.
+        // This establishes an explicit precision boundary with validation at the exchange edge.
+        // The MA strategy internally uses f64 for mathematical operations (sums, averages),
+        // which is acceptable for relative comparisons. The validation here ensures we don't
+        // propagate invalid data from the exchange.
+        let mut closes: Vec<f64> = initial_candles
+            .iter()
+            .filter_map(|c| {
+                // Step 1: Validate via Decimal (rejects NaN/Inf)
+                let decimal = Decimal::from_f64(c.close)?;
+                // Step 2: Convert back to f64 for strategy (internal calculation precision)
+                decimal.to_f64()
+            })
+            .collect();
 
-        // Initial truncation
+        // Early failure if we don't have enough valid data points for the strategy
+        if closes.len() < self.config.long_window {
+            return Err(format!(
+                "Insufficient valid warmup data: got {}, need {} (some candles may have had invalid prices)",
+                closes.len(),
+                self.config.long_window
+            ).into());
+        }
+
+        // Truncate to max history size
         if closes.len() > self.config.max_history {
             let remove_count = closes.len() - self.config.max_history;
             closes.drain(0..remove_count);

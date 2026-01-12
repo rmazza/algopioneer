@@ -64,7 +64,7 @@ impl Executor for KrakenExchangeClient {
         _side: OrderSide,
         _quantity: Decimal,
         _price: Option<Decimal>,
-    ) -> Result<(), ExchangeError> {
+    ) -> Result<crate::orders::OrderId, ExchangeError> {
         Err(ExchangeError::Other(
             "Kraken order execution not yet implemented".to_string(),
         ))

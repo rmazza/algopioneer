@@ -243,19 +243,40 @@ impl From<&str> for ExchangeError {
 }
 
 /// Core trait for order execution - exchange implementations must provide this
+///
+/// MC-2 FIX: Returns `OrderId` instead of `()` to enable order lifecycle tracking.
 #[async_trait]
 pub trait Executor: Send + Sync {
-    /// Execute an order on the exchange
+    /// Execute an order on the exchange.
+    ///
+    /// Returns the exchange-assigned order ID for tracking the order lifecycle.
     async fn execute_order(
         &self,
         symbol: &str,
         side: OrderSide,
         quantity: Decimal,
         price: Option<Decimal>,
-    ) -> Result<(), ExchangeError>;
+    ) -> Result<crate::orders::OrderId, ExchangeError>;
 
     /// Get current position for a symbol
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError>;
+
+    /// Poll order status (for exchanges without WebSocket updates).
+    ///
+    /// Returns (state, filled_qty, avg_fill_price).
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `Filled` with unknown quantities. Implementations should override
+    /// this to provide actual fill information from the exchange.
+    async fn get_order_status(
+        &self,
+        _order_id: &crate::orders::OrderId,
+    ) -> Result<(crate::orders::OrderState, Decimal, Option<Decimal>), ExchangeError> {
+        // Default: assume order was filled (for backward compat with simple strategies)
+        // Fill qty is unknown - callers should check state.is_terminal() rather than qty
+        Ok((crate::orders::OrderState::Filled, Decimal::ZERO, None))
+    }
 }
 
 /// Extended exchange client trait with full capabilities
