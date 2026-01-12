@@ -100,6 +100,7 @@ pub struct StrategyRunResult {
     pub id: String,
     pub panicked: bool,
     pub error: Option<String>,
+    pub final_pnl: Decimal,
 }
 
 /// Generic supervisor for managing multiple `LiveStrategy` instances
@@ -107,6 +108,7 @@ pub struct StrategySupervisor {
     strategies: Vec<Box<dyn LiveStrategy>>,
     pnl_tracker: Arc<PortfolioPnL>,
     restart_policy: RestartPolicy,
+    risk_engine: Arc<crate::risk::DailyRiskEngine>,
     /// Map of symbol -> list of (strategy_id, sender) for routing
     symbol_routes: HashMap<String, Vec<(String, mpsc::Sender<StrategyInput>)>>,
 }
@@ -118,8 +120,15 @@ impl StrategySupervisor {
             strategies: Vec::new(),
             pnl_tracker: Arc::new(PortfolioPnL::new()),
             restart_policy: RestartPolicy::default(),
+            risk_engine: Arc::new(crate::risk::DailyRiskEngine::with_defaults()),
             symbol_routes: HashMap::new(),
         }
+    }
+
+    /// Set risk configuration
+    pub fn with_risk_config(mut self, config: crate::risk::DailyRiskConfig) -> Self {
+        self.risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(config));
+        self
     }
 
     /// Set the restart policy
@@ -279,6 +288,7 @@ impl StrategySupervisor {
                     id: strategy_id,
                     panicked,
                     error: if panicked { Some("Strategy panicked".to_string()) } else { None },
+                    final_pnl,
                 }
             });
         }
@@ -315,6 +325,9 @@ impl StrategySupervisor {
         while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(run_result) => {
+                    // MC-4: Record PnL in daily risk engine
+                    self.risk_engine.record_pnl(run_result.final_pnl);
+
                     if run_result.panicked {
                         error!(
                             strategy_id = %run_result.id,

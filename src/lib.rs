@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod observability;
 pub mod orders;
 pub mod resilience;
+pub mod risk;
 pub mod sandbox;
 pub mod state;
 pub mod strategy;

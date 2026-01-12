@@ -80,10 +80,19 @@ pub async fn run_portfolio(
             };
 
             let alpaca_client = Arc::new(AlpacaClient::new(env, recorder)?);
+            
+            let risk_config = if paper {
+                crate::risk::DailyRiskConfig::paper_trading()
+            } else {
+                crate::risk::DailyRiskConfig::default()
+            };
+            let risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(risk_config.clone()));
+            let alpaca_client = Arc::new(crate::risk::RiskManagedExecutor::new(alpaca_client, risk_engine));
+
             let ws_client = Box::new(AlpacaWebSocketProvider::from_env()?);
 
             // Initialize Supervisor
-            let mut supervisor = StrategySupervisor::new();
+            let mut supervisor = StrategySupervisor::new().with_risk_config(risk_config);
 
             for (idx, json_config) in config_list.into_iter().enumerate() {
                 let pair_id = format!(
@@ -143,11 +152,19 @@ pub async fn run_portfolio(
     };
 
     let client = Arc::new(CoinbaseClient::new(env, recorder)?);
+    let risk_config = if paper {
+        crate::risk::DailyRiskConfig::paper_trading()
+    } else {
+        crate::risk::DailyRiskConfig::default()
+    };
+    let risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(risk_config.clone()));
+    let client = Arc::new(crate::risk::RiskManagedExecutor::new(client, risk_engine));
+
     // Use CoinbaseWebSocketProvider which implements WebSocketProvider trait
     let ws_client = Box::new(CoinbaseWebSocketProvider::from_env()?);
 
-    // Initialize Supervisor
-    let mut supervisor = StrategySupervisor::new();
+    // Initialize Supervisor with risk config
+    let mut supervisor = StrategySupervisor::new().with_risk_config(risk_config);
 
     for (idx, json_config) in config_list.into_iter().enumerate() {
         let pair_id = format!(

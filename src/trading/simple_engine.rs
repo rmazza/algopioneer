@@ -30,6 +30,7 @@ pub struct SimpleTradingEngine {
     state: TradeState,
     config: SimpleTradingConfig,
     state_tx: tokio::sync::mpsc::UnboundedSender<TradeState>,
+    risk_engine: Arc<crate::risk::DailyRiskEngine>,
 }
 
 impl SimpleTradingEngine {
@@ -50,12 +51,22 @@ impl SimpleTradingEngine {
         let client = CoinbaseClient::new(config.env, recorder)?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
+        
+        // MC-4: Initialize Daily Risk Engine
+        let risk_config = if matches!(config.env, crate::exchange::coinbase::AppEnv::Paper) {
+            crate::risk::DailyRiskConfig::paper_trading()
+        } else {
+            crate::risk::DailyRiskConfig::default()
+        };
+        let risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(risk_config));
+
         Ok(Self {
             client,
             strategy,
             state,
             config,
             state_tx,
+            risk_engine,
         })
     }
 
@@ -147,6 +158,12 @@ impl SimpleTradingEngine {
 
                 match signal {
                     Signal::Buy => {
+                        // MC-4: Check daily loss limit
+                        if !self.risk_engine.is_trading_enabled() {
+                            warn!("Buy signal ignored: Daily Risk Limit breached");
+                            continue;
+                        }
+
                         info!("Buy signal received. Placing order.");
                         self.client
                             .place_order(
@@ -185,6 +202,12 @@ impl SimpleTradingEngine {
                         }
                     }
                     Signal::Sell => {
+                        // MC-4: Check daily loss limit
+                        if !self.risk_engine.is_trading_enabled() {
+                            warn!("Sell signal ignored: Daily Risk Limit breached");
+                            continue;
+                        }
+
                         info!("Sell signal received. Placing order.");
                         self.client
                             .place_order(
@@ -213,6 +236,10 @@ impl SimpleTradingEngine {
                         // Close position and log details
                         if let Some(closed) = self.state.close_position(&self.config.product_id) {
                             let pnl = (exit_price - closed.entry_price) * closed.quantity;
+                            
+                            // MC-4: Record PnL
+                            self.risk_engine.record_pnl(pnl);
+                            
                             info!(
                                 "Closed position: entry={}, exit={}, pnl={}",
                                 closed.entry_price, exit_price, pnl

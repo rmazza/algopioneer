@@ -69,6 +69,16 @@ pub async fn run_dual_leg_trading(
 
     let client = Arc::new(CoinbaseClient::new(env, recorder)?);
 
+    // MC-4: Initialize Daily Risk Engine and wrap client
+    let risk_config = if paper {
+        crate::risk::DailyRiskConfig::paper_trading()
+    } else {
+        // For live, default to -$500 or make configurable
+        crate::risk::DailyRiskConfig::default()
+    };
+    let risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(risk_config));
+    let client = Arc::new(crate::risk::RiskManagedExecutor::new(client, risk_engine));
+
     // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure
     // This prevents unbounded queuing and ensures recovery tasks are never dropped
     let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(20);
