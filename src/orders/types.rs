@@ -72,13 +72,13 @@ impl std::fmt::Display for OrderId {
 
 impl From<String> for OrderId {
     fn from(s: String) -> Self {
-        Self(s)
+        Self::new(s)
     }
 }
 
 impl From<&str> for OrderId {
     fn from(s: &str) -> Self {
-        Self(s.to_string())
+        Self::new(s)
     }
 }
 

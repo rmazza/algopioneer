@@ -20,7 +20,8 @@ use tokio::time::Duration;
 
 /// Type alias the async Result type to reduce complexity warnings
 type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-type ExecuteOrderResult = BoxedFuture<Result<algopioneer::orders::OrderId, algopioneer::exchange::ExchangeError>>;
+type ExecuteOrderResult =
+    BoxedFuture<Result<algopioneer::orders::OrderId, algopioneer::exchange::ExchangeError>>;
 
 mock! {
     pub ExecutorImpl {
@@ -234,26 +235,34 @@ async fn test_pairs_trading_cycle() {
         .expect_execute_order_mock()
         .with(eq("A"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-1")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-1")) })
+        });
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("B"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-2")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-2")) })
+        });
 
     // Expect Exit (Sell A, Buy B)
     mock_executor
         .expect_execute_order_mock()
         .with(eq("A"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-3")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-3")) })
+        });
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("B"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-4")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-pairs-4")) })
+        });
 
     let mock_executor = Arc::new(mock_executor);
     let (_recovery_tx, _recovery_rx) = mpsc::channel(10);
@@ -417,26 +426,34 @@ async fn test_basis_trading_cycle() {
         .expect_execute_order_mock()
         .with(eq("BTC-USD"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-1")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-1")) })
+        });
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("BTC-USDT"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-2")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-2")) })
+        });
 
     // Expect Exit (Sell Spot, Buy Future)
     mock_executor
         .expect_execute_order_mock()
         .with(eq("BTC-USD"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-3")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-3")) })
+        });
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("BTC-USDT"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-4")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-basis-4")) })
+        });
 
     let mock_executor = Arc::new(mock_executor);
     let (_recovery_tx, _recovery_rx) = mpsc::channel(10);
@@ -570,7 +587,9 @@ async fn test_recovery_worker_retry() {
         .with(eq("BTC-USD"), eq("buy"), always())
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _, _| Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-recovery")) }));
+        .returning(|_, _, _| {
+            Box::pin(async { Ok(algopioneer::orders::OrderId::new("mock-recovery")) })
+        });
 
     let mock_executor = Arc::new(mock_executor);
     let (recovery_tx, recovery_rx) = mpsc::channel(10);
