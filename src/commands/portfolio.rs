@@ -80,14 +80,17 @@ pub async fn run_portfolio(
             };
 
             let alpaca_client = Arc::new(AlpacaClient::new(env, recorder)?);
-            
+
             let risk_config = if paper {
                 crate::risk::DailyRiskConfig::paper_trading()
             } else {
                 crate::risk::DailyRiskConfig::default()
             };
             let risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(risk_config.clone()));
-            let alpaca_client = Arc::new(crate::risk::RiskManagedExecutor::new(alpaca_client, risk_engine));
+            let alpaca_client = Arc::new(crate::risk::RiskManagedExecutor::new(
+                alpaca_client,
+                risk_engine,
+            ));
 
             let ws_client = Box::new(AlpacaWebSocketProvider::from_env()?);
 

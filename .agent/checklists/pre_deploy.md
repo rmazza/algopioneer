@@ -11,6 +11,7 @@ Complete all items before deploying to production or paper trading.
 
 ## Configuration
 - [ ] Correct environment variables in `.env`
+- [ ] **`--exchange` flag explicitly set** (alpaca/coinbase) — defaults to coinbase!
 - [ ] Config file validated (JSON syntax, required fields)
 - [ ] `max_tick_age_ms` appropriate for exchange (2000 crypto, 120000 equity)
 - [ ] Position sizes within limits

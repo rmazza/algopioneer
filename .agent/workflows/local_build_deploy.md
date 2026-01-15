@@ -26,6 +26,19 @@ echo "EC2 IP: $EC2_IP"
 
 ## Steps
 
+### 0. Review Pre-Deploy Checklist
+
+Before deploying, review the pre-deploy checklist:
+
+```bash
+cat .agent/checklists/pre_deploy.md
+```
+
+> [!CAUTION]
+> Confirm `--exchange alpaca` is set (defaults to coinbase otherwise).
+
+---
+
 ### 1. Clean Working Directory
 
 Verify git status is clean:
@@ -96,8 +109,11 @@ ssh -i ~/.ssh/trading-key.pem ec2-user@$EC2_IP 'docker run -d \
   -v /home/ec2-user/paper_trades_alpaca.csv:/app/paper_trades_alpaca.csv \
   -p 8080:8080 \
   algopioneer:latest \
-  portfolio --config /app/discovered_pairs.json --paper'
+  portfolio --config /app/discovered_pairs.json --exchange alpaca --paper'
 ```
+
+> [!WARNING]
+> The `--exchange alpaca` flag is **required**. Without it, the application defaults to Coinbase and will fail if Coinbase credentials are not present.
 
 ---
 
@@ -129,7 +145,7 @@ For subsequent deploys after initial setup:
 EC2_IP=$(cd terraform && terraform output -raw public_ip) && \
 docker build --platform linux/amd64 -t algopioneer:latest . && \
 docker save algopioneer:latest | gzip | ssh -i ~/.ssh/trading-key.pem ec2-user@$EC2_IP 'gunzip | docker load' && \
-ssh -i ~/.ssh/trading-key.pem ec2-user@$EC2_IP 'docker stop algopioneer-alpaca; docker rm algopioneer-alpaca; docker run -d --name algopioneer-alpaca --restart unless-stopped --env-file ~/.env -v ~/discovered_pairs.json:/app/discovered_pairs.json:ro -v ~/paper_trades_alpaca.csv:/app/paper_trades_alpaca.csv -p 8080:8080 algopioneer:latest portfolio --config /app/discovered_pairs.json --paper'
+ssh -i ~/.ssh/trading-key.pem ec2-user@$EC2_IP 'docker stop algopioneer-alpaca; docker rm algopioneer-alpaca; docker run -d --name algopioneer-alpaca --restart unless-stopped --env-file ~/.env -v ~/discovered_pairs.json:/app/discovered_pairs.json:ro -v ~/paper_trades_alpaca.csv:/app/paper_trades_alpaca.csv -p 8080:8080 algopioneer:latest portfolio --config /app/discovered_pairs.json --exchange alpaca --paper'
 ```
 
 ---

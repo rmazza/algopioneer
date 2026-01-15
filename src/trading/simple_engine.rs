@@ -51,7 +51,7 @@ impl SimpleTradingEngine {
         let client = CoinbaseClient::new(config.env, recorder)?;
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
-        
+
         // MC-4: Initialize Daily Risk Engine
         let risk_config = if matches!(config.env, crate::exchange::coinbase::AppEnv::Paper) {
             crate::risk::DailyRiskConfig::paper_trading()
@@ -236,10 +236,10 @@ impl SimpleTradingEngine {
                         // Close position and log details
                         if let Some(closed) = self.state.close_position(&self.config.product_id) {
                             let pnl = (exit_price - closed.entry_price) * closed.quantity;
-                            
+
                             // MC-4: Record PnL
                             self.risk_engine.record_pnl(pnl);
-                            
+
                             info!(
                                 "Closed position: entry={}, exit={}, pnl={}",
                                 closed.entry_price, exit_price, pnl

@@ -36,6 +36,8 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 - ✅ **PnL Aggregation**: Portfolio-level risk monitoring and tracking
 - ✅ **Health Monitoring**: `/health` HTTP endpoint for Kubernetes/Docker
 - ✅ **Distributed Tracing**: OpenTelemetry integration for observability
+- ✅ **Prometheus Metrics**: `/metrics` endpoint with order latency, PnL, and circuit breaker state
+- ✅ **Daily Risk Limits**: Configurable daily loss thresholds with automatic trading halt
 - ✅ **Panic Recovery**: Supervisor pattern with automatic strategy restart
 - ✅ **WebSocket Stability**: Proper task cleanup preventing resource leaks
 - ✅ **Trade Recording**: Modular trade logging to CSV or DynamoDB (via feature flag)
@@ -44,7 +46,9 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 ## Prerequisites
 
 *   **Rust**: Stable release (install via [rustup](https://rustup.rs/)).
-*   **Coinbase API Credentials**: You need an API Key and Secret from Coinbase Advanced Trade.
+*   **Coinbase API Credentials**: API Key and Secret from Coinbase Advanced Trade.
+*   **Alpaca API Credentials** (optional): API Key and Secret for US Equities trading.
+*   **Kraken API Credentials** (optional): API Key and Secret for Kraken exchange.
 
 ## Setup
 
@@ -63,8 +67,14 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
     ```env
     COINBASE_API_KEY=your_api_key
     COINBASE_API_SECRET=your_api_secret
-    # Optional: Set to true if using Sandbox API (if supported)
-    # COINBASE_USE_SANDBOX=true
+    
+    # Optional: Alpaca API (for US Equities)
+    ALPACA_KEY_ID=your_alpaca_key
+    ALPACA_SECRET_KEY=your_alpaca_secret
+    
+    # Optional: Kraken API
+    KRAKEN_API_KEY=your_kraken_key
+    KRAKEN_API_SECRET=your_kraken_secret
     ```
 
 3.  **Build the Project**:
@@ -102,13 +112,16 @@ cargo run --release -- discover-pairs \
 **Options:**
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--symbols` | `default` | Comma-separated pairs or "default" for top 20 |
+| `--exchange` | `coinbase` | Exchange: "coinbase" (crypto) or "alpaca" (stocks) |
+| `--symbols` | `default` | Comma-separated pairs or "default" for built-in list |
 | `--min-correlation` | `0.8` | Minimum Pearson correlation |
-| `--max-half-life` | `24.0` | Maximum mean-reversion half-life (hours) |
+| `--max-half-life` | `48.0` | Maximum mean-reversion half-life (hours) |
 | `--min-sharpe` | `0.5` | Minimum Sharpe ratio filter |
-| `--lookback-days` | `14` | Historical data window |
-| `--max-pairs` | `10` | Number of pairs to output |
-| `--output` | `discovered_pairs.json` | Output file path |
+| `--lookback-days` | `90` | Historical lookback period in days |
+| `--max-pairs` | `10` | Maximum number of pairs to output |
+| `--output` | `discovered_pairs.json` | Output file path for discovered pairs |
+| `--initial-capital` | `10000.0` | Initial capital for backtests (USD) |
+| `--no-cointegration` | `false` | Skip ADF cointegration test |
 
 ### 2. Standard Trading (Moving Average Crossover)
 
@@ -160,44 +173,61 @@ cargo run --release -- backtest
 ```
 algopioneer/
 ├── src/
-│   ├── main.rs                 # CLI entry point with subcommands
+│   ├── main.rs                 # CLI entry point with jemalloc and command dispatch
 │   ├── lib.rs                  # Library root
+│   ├── cli/                    # CLI definitions
+│   │   ├── mod.rs              # Cli struct and Commands enum
+│   │   └── config.rs           # Configuration structs (DualLegCliConfig, etc.)
+│   ├── commands/               # Command handlers
+│   │   ├── mod.rs              # Command exports
+│   │   ├── trade.rs            # Moving average trade handler
+│   │   ├── backtest.rs         # Backtest handler
+│   │   ├── dual_leg.rs         # Dual-leg trading handler
+│   │   ├── portfolio.rs        # Portfolio mode handler
+│   │   └── discover.rs         # Pair discovery handler
 │   ├── coinbase/               # Legacy Coinbase integration
 │   │   ├── mod.rs              # Coinbase API client
 │   │   ├── websocket.rs        # Real-time WebSocket data streaming
 │   │   └── market_data_provider.rs
 │   ├── exchange/               # Exchange abstraction layer
-│   │   ├── mod.rs              # Traits (Executor, MarketDataProvider)
+│   │   ├── mod.rs              # Traits (Executor, ExchangeClient, WebSocketProvider)
 │   │   ├── coinbase/           # Coinbase implementation
-│   │   ├── kraken/             # Kraken implementation
+│   │   ├── kraken/             # Kraken implementation (experimental)
 │   │   └── alpaca/             # Alpaca implementation (US Equities)
-│   ├── sandbox/                # Simulation environment
-│   ├── logging/                # Trade recording and metrics
+│   ├── orders/                 # Order management
+│   │   ├── mod.rs              # Order types and traits
+│   │   ├── tracker.rs          # Order state tracking
+│   │   ├── reconciler.rs       # Position reconciliation
+│   │   └── types.rs            # Order domain types
+│   ├── risk/                   # Risk management
+│   │   ├── mod.rs              # Risk module exports
+│   │   ├── daily_limit.rs      # Daily loss limit engine
+│   │   └── executor.rs         # Risk-aware order executor
+│   ├── logging/                # Trade recording
 │   │   ├── mod.rs              # Logging traits
 │   │   ├── recorder.rs         # Recorder implementations
 │   │   ├── csv_recorder.rs     # CSV file recorder
-│   │   └── dynamodb_recorder.rs # AWS DynamoDB recorder
+│   │   └── dynamodb_recorder.rs # AWS DynamoDB recorder (feature-gated)
 │   ├── discovery/              # Automated pair discovery
 │   │   ├── mod.rs              # Module exports
 │   │   ├── config.rs           # DiscoveryConfig with serde support
 │   │   ├── error.rs            # Typed errors with thiserror
 │   │   ├── filter.rs           # Correlation + half-life filtering
 │   │   ├── optimizer.rs        # Grid search parameter optimization
-│   │   └── sector.rs           # Token sector classification (DeFi, L1, etc.)
-│   ├── strategy/
-│   │   ├── dual_leg_trading.rs # Main arbitrage strategy with state machine
+│   │   └── sector.rs           # Token sector classification
+│   ├── strategy/               # Trading strategies
+│   │   ├── mod.rs              # Strategy traits
+│   │   ├── dual_leg_trading.rs # Dual-leg arbitrage with state machine
 │   │   ├── moving_average.rs   # Moving average crossover strategy
-│   │   ├── supervisor.rs       # Strategy supervisor for multi-strategy
+│   │   ├── supervisor.rs       # Strategy supervisor with panic recovery
 │   │   └── tick_router.rs      # Market data routing with backpressure
-│   ├── resilience/
-│   │   ├── mod.rs              # Resilience patterns
+│   ├── resilience/             # Resilience patterns
+│   │   ├── mod.rs              # Resilience exports
 │   │   └── circuit_breaker.rs  # Circuit breaker with RwLock
 │   ├── health.rs               # HTTP health check endpoint (/health)
+│   ├── metrics.rs              # Prometheus metrics (/metrics)
 │   ├── observability.rs        # OpenTelemetry tracing integration
-│   └── examples/
-│       ├── optimize_pairs.rs   # Pairs optimization example
-│       ├── check_sectors.rs    # Sector classification viewer
-│       └── debug_config.rs     # Config deserialization debug
+│   └── types.rs                # Shared domain types (MarketData, OrderSide)
 ├── tests/
 │   ├── integration_test.rs     # Integration tests with mock executor
 │   └── proptest_financial.rs   # Property-based tests for financial math

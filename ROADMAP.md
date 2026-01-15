@@ -4,19 +4,6 @@ Technical debt and enhancement tracking for algopioneer.
 
 ## High Priority
 
-### NP-5: Strategy Restart Policy Implementation
-**Location**: `src/strategy/supervisor.rs:31-57`
-
-`RestartPolicy` struct exists but restart logic is not implemented. Panicked strategies remain stopped and require manual intervention.
-
-**Planned Features**:
-- Exponential backoff with jitter
-- Per-strategy restart budgets
-- Cooldown periods after repeated failures
-- Integration with health monitoring
-
----
-
 ### MC-3: Portfolio-Level Risk Limits
 **Status**: Strategy-level limits exist (1 position per pair/symbol), but no portfolio-level controls.
 
@@ -88,3 +75,6 @@ Some modules use `Error` suffix (e.g., `ExecutionError`, `ExchangeError`) while 
 - [x] **CB-3**: Fix unsafe boolean initialization (UB)
 - [x] **N-1**: Use `expect` with context instead of `unwrap_or_default` for `NonZeroU32`
 - [x] **Refactor**: Unified `place_order` logic for live/paper trading
+
+### Jan 2026 - Supervisor Resilience
+- [x] **NP-5**: Strategy Restart Policy - Exponential backoff with jitter, per-strategy restart budgets, cooldown reset

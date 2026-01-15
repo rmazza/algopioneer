@@ -150,3 +150,33 @@ curl -s -H "APCA-API-KEY-ID: $ALPACA_API_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_A
 | Polling | Real-time WebSocket | 1-minute polling |
 | API | CloudWatch logs | Direct Alpaca API |
 | Positions | Container logs | Alpaca Positions API |
+
+---
+
+## Troubleshooting
+
+### "Ghost Trades" — Logs Show Activity but API Shows Nothing
+
+**Symptom:** Container logs show `Entry Signal`, `Exit Signal`, `order created`, but the Alpaca API returns no orders/positions.
+
+**Cause:** The container is running outdated/mock code that simulates trades internally instead of calling the real Alpaca API.
+
+**Fix:**
+1. Redeploy the container with current local code using `/local_build_deploy`
+2. Ensure `--exchange alpaca` flag is explicitly set in the docker run command
+
+### Container Crash Loop (RestartCount > 0)
+
+**Symptom:** `docker ps` shows container restarting repeatedly.
+
+**Common Causes:**
+- Missing `--exchange alpaca` flag (defaults to coinbase, which fails without coinbase credentials)
+- Missing environment variables in `.env` file on EC2
+- Invalid `discovered_pairs.json` config
+
+**Debug:** `docker logs algopioneer-alpaca 2>&1 | head -30`
+
+### jq: command not found
+
+The workflow uses `jq` for JSON parsing. If unavailable, use raw curl output.
+

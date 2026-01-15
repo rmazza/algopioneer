@@ -1,4 +1,3 @@
-
 use crate::exchange::{ExchangeError, Executor};
 use crate::orders::{OrderId, OrderState};
 use crate::risk::DailyRiskEngine;
@@ -42,11 +41,15 @@ impl<E: Executor + Send + Sync> Executor for RiskManagedExecutor<E> {
                 quantity = %quantity,
                 "Order blocked by Daily Risk Limit"
             );
-            return Err(ExchangeError::Other("Order blocked: Daily Risk Limit breached".to_string()));
+            return Err(ExchangeError::Other(
+                "Order blocked: Daily Risk Limit breached".to_string(),
+            ));
         }
 
         // Delegate to inner executor
-        self.inner.execute_order(symbol, side, quantity, price).await
+        self.inner
+            .execute_order(symbol, side, quantity, price)
+            .await
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
@@ -109,7 +112,7 @@ mod tests {
         let result = executor
             .execute_order("BTC-USD", OrderSide::Buy, dec!(1), None)
             .await;
-        
+
         match result {
             Err(ExchangeError::Other(msg)) => {
                 assert!(msg.contains("Order blocked"));

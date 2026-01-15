@@ -45,7 +45,7 @@ pub struct DailyRiskConfig {
 impl Default for DailyRiskConfig {
     fn default() -> Self {
         Self {
-            max_daily_loss: Decimal::new(-500, 0),     // -$500
+            max_daily_loss: Decimal::new(-500, 0),    // -$500
             warning_threshold: Decimal::new(-300, 0), // -$300 warning
         }
     }
@@ -55,8 +55,8 @@ impl DailyRiskConfig {
     /// Conservative config for paper trading
     pub fn paper_trading() -> Self {
         Self {
-            max_daily_loss: Decimal::new(-100, 0),    // -$100
-            warning_threshold: Decimal::new(-50, 0),  // -$50 warning
+            max_daily_loss: Decimal::new(-100, 0),   // -$100
+            warning_threshold: Decimal::new(-50, 0), // -$50 warning
         }
     }
 
@@ -137,22 +137,25 @@ impl DailyRiskEngine {
     pub fn record_pnl(&self, pnl: Decimal) -> RiskStatus {
         // Convert Decimal to micros (multiply by 1_000_000)
         let pnl_micros = decimal_to_micros(pnl);
-        
+
         // Atomically add to cumulative PnL
-        let new_total_micros = self.realized_pnl_micros.fetch_add(pnl_micros, Ordering::SeqCst) + pnl_micros;
+        let new_total_micros = self
+            .realized_pnl_micros
+            .fetch_add(pnl_micros, Ordering::SeqCst)
+            + pnl_micros;
         let new_total = micros_to_decimal(new_total_micros);
 
         // Check thresholds
         if new_total <= self.config.max_daily_loss {
             // CRITICAL: Daily loss limit breached
             self.trading_enabled.store(false, Ordering::SeqCst);
-            
+
             error!(
                 daily_pnl = %new_total,
                 max_daily_loss = %self.config.max_daily_loss,
                 "CRITICAL: DAILY LOSS LIMIT BREACHED - TRADING HALTED"
             );
-            
+
             RiskStatus::Halted
         } else if new_total <= self.config.warning_threshold {
             // Warning threshold
@@ -205,7 +208,7 @@ impl DailyRiskEngine {
         self.realized_pnl_micros.store(0, Ordering::SeqCst);
         self.trading_enabled.store(true, Ordering::SeqCst);
         self.warning_issued.store(false, Ordering::SeqCst);
-        
+
         info!(
             previous_day_pnl = %old_pnl,
             "Daily risk counters reset"
@@ -331,18 +334,18 @@ mod tests {
 
     #[test]
     fn test_micros_conversion_roundtrip() {
-        let values = vec![
-            dec!(0),
-            dec!(100.123456),
-            dec!(-50.5),
-            dec!(999999.999999),
-        ];
+        let values = vec![dec!(0), dec!(100.123456), dec!(-50.5), dec!(999999.999999)];
 
         for v in values {
             let micros = decimal_to_micros(v);
             let back = micros_to_decimal(micros);
             // Allow for minor rounding at 6 decimal places
-            assert!((v - back).abs() < dec!(0.000001), "Failed for {}: got {}", v, back);
+            assert!(
+                (v - back).abs() < dec!(0.000001),
+                "Failed for {}: got {}",
+                v,
+                back
+            );
         }
     }
 }
