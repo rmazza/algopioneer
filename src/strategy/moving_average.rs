@@ -3,10 +3,31 @@ use polars::prelude::*;
 use std::collections::VecDeque;
 
 /// Configuration for the Moving Average Crossover strategy.
+///
+/// # Precision Boundary (CB-1 Documentation)
+///
+/// This strategy deliberately uses `f64` for price history and moving average
+/// calculations. This is an acceptable trade-off for the following reasons:
+///
+/// 1. **Signal Generation**: MA crossover detection only requires relative
+///    comparisons (short_ma > long_ma). Small floating-point errors do not
+///    affect whether a crossover occurs, as the difference must be meaningful.
+///
+/// 2. **Performance**: O(1) incremental updates via running sums require
+///    efficient arithmetic. Decimal operations would be significantly slower.
+///
+/// 3. **Not Used for Financial Calculations**: Entry/exit prices and PnL are
+///    calculated using `rust_decimal::Decimal` at the order execution layer,
+///    NOT using values from this strategy.
+///
+/// **WARNING**: Do NOT use `short_sum`, `long_sum`, or any values from this
+/// strategy for position sizing, PnL calculation, or order amounts. Those
+/// calculations MUST use `Decimal` types from the exchange/orders modules.
 pub struct MovingAverageCrossover {
     short_window: usize,
     long_window: usize,
     // OW1: State for incremental calculation
+    // NOTE: f64 is intentional here for performance - see struct docs for precision boundary
     history: VecDeque<f64>,
     short_sum: f64,
     long_sum: f64,

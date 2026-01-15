@@ -71,6 +71,16 @@ pub struct HealthResponse {
 }
 
 impl Default for HealthResponse {
+    /// Create a default health response.
+    ///
+    /// # MC-1 Documentation: Wall Clock Usage
+    ///
+    /// This module uses `Utc::now()` directly because:
+    /// 1. Health endpoints are for operational monitoring, not strategy logic
+    /// 2. Timestamps here are for human/system observability only
+    /// 3. These values never affect trading decisions or backtesting
+    ///
+    /// Clock injection is NOT required for health/metrics modules.
     fn default() -> Self {
         Self {
             status: "healthy".to_string(),
@@ -79,7 +89,7 @@ impl Default for HealthResponse {
             active_positions: 0,
             recovery_queue_depth: 0,
             uptime_seconds: 0,
-            timestamp: Utc::now().timestamp(),
+            timestamp: Utc::now().timestamp(), // MC-1: Acceptable for operational monitoring
         }
     }
 }

@@ -242,6 +242,62 @@ impl From<&str> for ExchangeError {
     }
 }
 
+// --- CB-2 FIX: Structured Concurrency for WebSocket Tasks ---
+
+/// Handle to a WebSocket background task for structured concurrency.
+///
+/// This type wraps a `JoinHandle` and provides methods for:
+/// - Checking if the task is still running
+/// - Gracefully awaiting task completion
+/// - Detecting panics in the background task
+///
+/// # Example
+///
+/// ```ignore
+/// let handle = provider.spawn_and_subscribe(symbols, sender).await?;
+///
+/// // Later, on shutdown:
+/// if let Err(e) = handle.join().await {
+///     error!("WebSocket task panicked: {:?}", e);
+/// }
+/// ```
+pub struct WebSocketHandle {
+    handle: tokio::task::JoinHandle<()>,
+    exchange: ExchangeId,
+}
+
+impl WebSocketHandle {
+    /// Create a new WebSocket handle
+    pub fn new(handle: tokio::task::JoinHandle<()>, exchange: ExchangeId) -> Self {
+        Self { handle, exchange }
+    }
+
+    /// Check if the background task has finished
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    /// Await the task completion.
+    ///
+    /// Returns `Ok(())` if task completed normally, `Err` if it panicked.
+    pub async fn join(self) -> Result<(), tokio::task::JoinError> {
+        self.handle.await
+    }
+
+    /// Abort the background task.
+    ///
+    /// The task will be cancelled at the next await point.
+    pub fn abort(&self) {
+        tracing::info!(exchange = %self.exchange, "Aborting WebSocket task");
+        self.handle.abort();
+    }
+
+    /// Get the exchange this handle is for
+    pub fn exchange(&self) -> ExchangeId {
+        self.exchange
+    }
+}
+
 /// Core trait for order execution - exchange implementations must provide this
 ///
 /// MC-2 FIX: Returns `OrderId` instead of `()` to enable order lifecycle tracking.
@@ -314,12 +370,50 @@ pub trait ExchangeClient: Executor + Send + Sync {
 /// Trait for WebSocket market data providers
 #[async_trait]
 pub trait WebSocketProvider: Send + Sync {
-    /// Connect and subscribe to market data for given symbols
+    /// Connect and subscribe to market data for given symbols.
+    ///
+    /// **Deprecated**: Use `spawn_and_subscribe` instead for proper task lifecycle management.
+    /// This method exists for backward compatibility but orphans the background task.
     async fn connect_and_subscribe(
         &self,
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
     ) -> Result<(), ExchangeError>;
+
+    /// CB-2 FIX: Spawn WebSocket task and return handle for structured concurrency.
+    ///
+    /// This is the preferred method for WebSocket connections. The returned handle
+    /// enables proper shutdown and panic detection.
+    ///
+    /// # Returns
+    ///
+    /// A `WebSocketHandle` that can be used to:
+    /// - Check if the task is still running
+    /// - Await graceful completion
+    /// - Abort the task on shutdown
+    ///
+    /// # Default Implementation
+    ///
+    /// Delegates to `connect_and_subscribe` and returns a **dummy handle**.
+    /// The dummy handle does NOT track the actual WebSocket task.
+    ///
+    /// **Providers should override this method** to return a real handle
+    /// that tracks the spawned task. Currently only Alpaca implements this.
+    /// Coinbase/Kraken use the default (backward compatible but no lifecycle mgmt).
+    async fn spawn_and_subscribe(
+        &self,
+        symbols: Vec<String>,
+        sender: mpsc::Sender<MarketData>,
+    ) -> Result<WebSocketHandle, ExchangeError> {
+        // Default: call legacy method (for backward compatibility)
+        self.connect_and_subscribe(symbols, sender).await?;
+        // KNOWN LIMITATION: This dummy handle does NOT track the real task.
+        // Providers that need proper shutdown should override this method.
+        Ok(WebSocketHandle::new(
+            tokio::spawn(async {}),
+            ExchangeId::Coinbase, // Placeholder - providers should override
+        ))
+    }
 }
 
 /// Exchange identifier for factory/registry

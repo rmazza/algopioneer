@@ -30,19 +30,39 @@ pub enum SupervisorError {
 
 /// Policy for restarting crashed strategies
 ///
-/// TODO(NP-5): Automatic restart is a planned enhancement. Currently, panicked
-/// strategies remain stopped and require manual intervention. The full restart
-/// implementation will include:
-/// - Exponential backoff with jitter
-/// - Per-strategy restart budgets
-/// - Cooldown periods after repeated failures
-/// - Integration with health monitoring
+/// Implements exponential backoff with jitter for resilient strategy recovery.
+/// Strategies that panic will be automatically restarted up to `max_restarts`
+/// times with increasing delays between attempts.
+///
+/// # MC-5 Known Limitation: Auto-Restart Not Implemented
+///
+/// **IMPORTANT**: While this policy calculates backoff delays and tracks restart
+/// budgets, the actual restart logic is NOT YET IMPLEMENTED. Currently, when a
+/// strategy panics:
+///
+/// 1. The supervisor logs the failure with backoff timing info
+/// 2. The restart budget is decremented
+/// 3. But the strategy is NOT automatically restarted
+///
+/// Implementing auto-restart requires a "Strategy Factory" pattern where the
+/// supervisor can reconstruct a strategy from its configuration. This is tracked
+/// as a future enhancement.
+///
+/// For now, strategy panics require manual intervention or process restart.
 #[derive(Debug, Clone)]
 pub struct RestartPolicy {
-    /// Maximum restart attempts before giving up
+    /// Maximum restart attempts before giving up (0 = no restarts)
     pub max_restarts: u32,
-    /// Delay between restart attempts (seconds)
-    pub restart_delay_secs: u64,
+    /// Initial delay before first restart attempt (milliseconds)
+    pub initial_delay_ms: u64,
+    /// Maximum delay cap (milliseconds)
+    pub max_delay_ms: u64,
+    /// Multiplier for exponential backoff (e.g., 2.0 = doubling)
+    pub backoff_multiplier: f64,
+    /// Random jitter as fraction of delay (e.g., 0.1 = ±10%)
+    pub jitter_fraction: f64,
+    /// Reset restart count after this many seconds of stable operation
+    pub cooldown_period_secs: u64,
     /// Whether to halt all strategies if one fails permanently
     pub halt_on_permanent_failure: bool,
 }
@@ -51,9 +71,81 @@ impl Default for RestartPolicy {
     fn default() -> Self {
         Self {
             max_restarts: 3,
-            restart_delay_secs: 5,
+            initial_delay_ms: 1000,    // 1 second
+            max_delay_ms: 60_000,      // 1 minute cap
+            backoff_multiplier: 2.0,   // Double each time
+            jitter_fraction: 0.1,      // ±10%
+            cooldown_period_secs: 300, // 5 minutes of stability resets count
             halt_on_permanent_failure: false,
         }
+    }
+}
+
+impl RestartPolicy {
+    /// Calculate backoff delay with jitter for the given attempt number
+    pub fn calculate_delay(&self, attempt: u32) -> std::time::Duration {
+        use rand::Rng;
+
+        // Exponential backoff: initial * multiplier^attempt
+        let base_delay =
+            self.initial_delay_ms as f64 * self.backoff_multiplier.powi(attempt as i32);
+
+        // Cap at max delay
+        let capped_delay = base_delay.min(self.max_delay_ms as f64);
+
+        // Add jitter: ±jitter_fraction
+        let jitter_range = capped_delay * self.jitter_fraction;
+        let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
+        let final_delay = (capped_delay + jitter).max(0.0) as u64;
+
+        std::time::Duration::from_millis(final_delay)
+    }
+}
+
+/// Tracks restart state for a single strategy
+#[derive(Debug, Clone, Default)]
+struct StrategyRestartState {
+    /// Number of restart attempts since last cooldown reset
+    restart_count: u32,
+    /// When the strategy last started successfully
+    last_start: Option<std::time::Instant>,
+    /// When the strategy last failed
+    last_failure: Option<std::time::Instant>,
+}
+
+impl StrategyRestartState {
+    /// Check if cooldown period has passed and reset count if so
+    fn maybe_reset_cooldown(&mut self, cooldown_secs: u64) {
+        if let Some(last_start) = self.last_start {
+            if last_start.elapsed().as_secs() >= cooldown_secs {
+                debug!(
+                    "Cooldown period passed ({} secs), resetting restart count from {}",
+                    cooldown_secs, self.restart_count
+                );
+                self.restart_count = 0;
+            }
+        }
+    }
+
+    /// Record a successful start
+    fn record_start(&mut self) {
+        self.last_start = Some(std::time::Instant::now());
+    }
+
+    /// Record a failure and increment restart count
+    fn record_failure(&mut self) {
+        self.restart_count += 1;
+        self.last_failure = Some(std::time::Instant::now());
+    }
+
+    /// Check if more restarts are allowed
+    fn can_restart(&self, max_restarts: u32) -> bool {
+        self.restart_count < max_restarts
+    }
+
+    /// Get time since last failure (for crash loop detection logging)
+    fn time_since_last_failure(&self) -> Option<std::time::Duration> {
+        self.last_failure.map(|t| t.elapsed())
     }
 }
 
@@ -186,13 +278,18 @@ impl StrategySupervisor {
         // Create WebSocket data channel
         let (ws_tx, mut ws_rx) = mpsc::channel::<MarketData>(1000);
 
-        // Spawn WebSocket connection
+        // MC-3 FIX: Use spawn_and_subscribe which returns handle for structured concurrency
         let ws_symbols = all_symbols.clone();
-        tokio::spawn(async move {
-            if let Err(e) = ws_provider.connect_and_subscribe(ws_symbols, ws_tx).await {
-                error!("WebSocket connection failed: {}", e);
+        let ws_handle = match ws_provider.spawn_and_subscribe(ws_symbols, ws_tx).await {
+            Ok(handle) => {
+                info!("WebSocket task spawned with handle for lifecycle management");
+                Some(handle)
             }
-        });
+            Err(e) => {
+                error!("WebSocket connection failed: {}", e);
+                return Err(SupervisorError::WebSocketError(e.to_string()));
+            }
+        };
 
         // Create channels for each strategy and build routing table
         let mut strategy_senders: HashMap<String, mpsc::Sender<StrategyInput>> = HashMap::new();
@@ -321,24 +418,73 @@ impl StrategySupervisor {
             }
         });
 
-        // Wait for strategies to complete
+        // Wait for strategies to complete with restart tracking
+        // NP-5 FIX: Track restart state per strategy
+        let mut restart_states: HashMap<String, StrategyRestartState> = HashMap::new();
+
         while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(run_result) => {
                     // MC-4: Record PnL in daily risk engine
                     self.risk_engine.record_pnl(run_result.final_pnl);
 
+                    // Get or create restart state for this strategy
+                    let restart_state = restart_states.entry(run_result.id.clone()).or_default();
+
                     if run_result.panicked {
-                        error!(
-                            strategy_id = %run_result.id,
-                            error = ?run_result.error,
-                            "Strategy panicked - automatic restart not yet implemented. Manual intervention required."
-                        );
-                        // NP-3 FIX: Restart logic is a future enhancement tracked in project roadmap.
-                        // For now, panicked strategies remain stopped and require manual restart.
+                        // NP-5 FIX: Check cooldown BEFORE recording failure
+                        // If enough time has passed since last successful start, reset the budget
+                        restart_state
+                            .maybe_reset_cooldown(self.restart_policy.cooldown_period_secs);
+
+                        // Capture time since PREVIOUS failure (before we update the timestamp)
+                        let time_since_last_failure = restart_state
+                            .time_since_last_failure()
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        // Record the failure (updates last_failure timestamp)
+                        restart_state.record_failure();
+
+                        // Check if we can restart
+                        if restart_state.can_restart(self.restart_policy.max_restarts) {
+                            let delay = self
+                                .restart_policy
+                                .calculate_delay(restart_state.restart_count.saturating_sub(1));
+
+                            // NP-5 FIX: Log restart attempt with backoff info
+                            // Note: Actual restart not implemented - requires strategy factory pattern
+                            error!(
+                                strategy_id = %run_result.id,
+                                error = ?run_result.error,
+                                restart_attempt = restart_state.restart_count,
+                                max_restarts = self.restart_policy.max_restarts,
+                                would_backoff_delay_ms = delay.as_millis(),
+                                secs_since_last_failure = time_since_last_failure,
+                                "Strategy panicked! Restart budget remaining but auto-restart NOT implemented. Manual intervention required."
+                            );
+                        } else {
+                            // Restart budget exhausted
+                            error!(
+                                strategy_id = %run_result.id,
+                                restart_attempts = restart_state.restart_count,
+                                max_restarts = self.restart_policy.max_restarts,
+                                secs_since_last_failure = time_since_last_failure,
+                                "CRITICAL: Strategy restart budget exhausted! Manual intervention required."
+                            );
+
+                            if self.restart_policy.halt_on_permanent_failure {
+                                error!("halt_on_permanent_failure is set - supervisor should halt all strategies");
+                                // Future: signal other strategies to gracefully shutdown
+                            }
+                        }
                     } else {
+                        // Strategy exited normally - record stable start time for cooldown tracking
+                        restart_state.record_start();
+
                         info!(
                             strategy_id = %run_result.id,
+                            final_pnl = %run_result.final_pnl,
                             "Strategy exited normally"
                         );
                     }
@@ -346,6 +492,21 @@ impl StrategySupervisor {
                 Err(e) => {
                     error!("Strategy task failed: {}", e);
                 }
+            }
+        }
+
+        // MC-3 FIX: Cleanup WebSocket handle on supervisor exit
+        if let Some(handle) = ws_handle {
+            if handle.is_finished() {
+                // Task already finished - check if it panicked
+                match handle.join().await {
+                    Ok(()) => info!("WebSocket task completed normally"),
+                    Err(e) => error!("WebSocket task panicked: {:?}", e),
+                }
+            } else {
+                // Task still running - abort it
+                info!("Aborting WebSocket task on supervisor shutdown");
+                handle.abort();
             }
         }
 
@@ -378,7 +539,75 @@ mod tests {
     fn test_restart_policy_default() {
         let policy = RestartPolicy::default();
         assert_eq!(policy.max_restarts, 3);
-        assert_eq!(policy.restart_delay_secs, 5);
+        assert_eq!(policy.initial_delay_ms, 1000);
+        assert_eq!(policy.max_delay_ms, 60_000);
+        assert!((policy.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+        assert!((policy.jitter_fraction - 0.1).abs() < f64::EPSILON);
+        assert_eq!(policy.cooldown_period_secs, 300);
         assert!(!policy.halt_on_permanent_failure);
+    }
+
+    #[test]
+    fn test_restart_policy_backoff_calculation() {
+        let policy = RestartPolicy {
+            max_restarts: 5,
+            initial_delay_ms: 1000,
+            max_delay_ms: 10_000,
+            backoff_multiplier: 2.0,
+            jitter_fraction: 0.0, // No jitter for deterministic test
+            cooldown_period_secs: 300,
+            halt_on_permanent_failure: false,
+        };
+
+        // Attempt 0: 1000 * 2^0 = 1000ms
+        let delay0 = policy.calculate_delay(0);
+        assert_eq!(delay0.as_millis(), 1000);
+
+        // Attempt 1: 1000 * 2^1 = 2000ms
+        let delay1 = policy.calculate_delay(1);
+        assert_eq!(delay1.as_millis(), 2000);
+
+        // Attempt 2: 1000 * 2^2 = 4000ms
+        let delay2 = policy.calculate_delay(2);
+        assert_eq!(delay2.as_millis(), 4000);
+
+        // Attempt 3: 1000 * 2^3 = 8000ms
+        let delay3 = policy.calculate_delay(3);
+        assert_eq!(delay3.as_millis(), 8000);
+
+        // Attempt 4: 1000 * 2^4 = 16000ms, but capped at 10000ms
+        let delay4 = policy.calculate_delay(4);
+        assert_eq!(delay4.as_millis(), 10_000);
+    }
+
+    #[test]
+    fn test_strategy_restart_state() {
+        let mut state = StrategyRestartState::default();
+
+        assert_eq!(state.restart_count, 0);
+        assert!(state.can_restart(3));
+
+        state.record_failure();
+        assert_eq!(state.restart_count, 1);
+        assert!(state.can_restart(3));
+
+        state.record_failure();
+        state.record_failure();
+        assert_eq!(state.restart_count, 3);
+        assert!(!state.can_restart(3)); // Budget exhausted
+    }
+
+    #[test]
+    fn test_time_since_last_failure() {
+        let mut state = StrategyRestartState::default();
+
+        // No failure yet
+        assert!(state.time_since_last_failure().is_none());
+
+        // Record a failure
+        state.record_failure();
+        let elapsed = state.time_since_last_failure().unwrap();
+        // Should be very recent (within 100ms of recording)
+        assert!(elapsed.as_millis() < 100);
     }
 }

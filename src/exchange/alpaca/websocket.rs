@@ -26,7 +26,9 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 
 use crate::exchange::alpaca::utils;
-use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
+use crate::exchange::{
+    ExchangeConfig, ExchangeError, ExchangeId, WebSocketHandle, WebSocketProvider,
+};
 use crate::types::MarketData;
 
 /// Static instrument_id to avoid heap allocation per tick
@@ -176,11 +178,12 @@ impl AlpacaWebSocketProvider {
 
 #[async_trait]
 impl WebSocketProvider for AlpacaWebSocketProvider {
-    async fn connect_and_subscribe(
+    /// CB-2 FIX: Spawn WebSocket task and return handle for structured concurrency.
+    async fn spawn_and_subscribe(
         &self,
         symbols: Vec<String>,
         sender: mpsc::Sender<MarketData>,
-    ) -> Result<(), ExchangeError> {
+    ) -> Result<WebSocketHandle, ExchangeError> {
         info!(
             symbols_count = symbols.len(),
             "Starting Alpaca WebSocket streaming"
@@ -199,8 +202,8 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         let api_secret = self.api_secret.clone();
 
         // CB-2 FIX: Store JoinHandle for structured concurrency
-        // The handle is spawned but not awaited here - caller can use it for graceful shutdown
-        let _handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        // The handle is returned to caller for proper lifecycle management
+        let handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
             const MAX_RECONNECT_ATTEMPTS: u32 = u32::MAX;
             const CONNECTION_MAX_RETRIES: u32 = 5;
 
@@ -399,11 +402,21 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             info!("Alpaca WebSocket task exiting");
         });
 
-        // CB-2 FIX: Log that handle is available for observability
-        // In production, the caller should store this handle in a JoinSet for structured concurrency
-        // For now, we log that the task was spawned - the handle is dropped but task continues
-        info!("Alpaca WebSocket task spawned (handle available for structured concurrency)");
+        // CB-2 FIX: Return the handle for structured concurrency
+        Ok(WebSocketHandle::new(handle, ExchangeId::Alpaca))
+    }
 
+    /// CB-2 FIX: Legacy method - delegates to spawn_and_subscribe but discards handle.
+    ///
+    /// Use `spawn_and_subscribe` for new code to enable proper shutdown.
+    async fn connect_and_subscribe(
+        &self,
+        symbols: Vec<String>,
+        sender: mpsc::Sender<MarketData>,
+    ) -> Result<(), ExchangeError> {
+        // Delegate to spawn_and_subscribe, discard handle
+        let _handle = self.spawn_and_subscribe(symbols, sender).await?;
+        info!("WebSocket handle created but discarded (use spawn_and_subscribe for structured concurrency)");
         Ok(())
     }
 }

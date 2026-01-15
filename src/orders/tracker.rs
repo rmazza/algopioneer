@@ -177,16 +177,39 @@ impl OrderTracker {
     }
 
     /// Mark order as cancelled.
+    ///
+    /// MC-2 FIX: Uses single write lock to eliminate TOCTOU race condition.
+    /// Atomically transitions order to Cancelled state while preserving
+    /// any fills that occurred before cancellation.
     pub async fn mark_cancelled(&self, id: &OrderId) -> Option<TrackedOrder> {
-        let orders = self.orders.read().await;
-        let current_fill = orders
-            .get(id)
-            .map(|o| o.fill.filled_qty)
-            .unwrap_or_default();
-        drop(orders);
+        let mut orders = self.orders.write().await;
 
-        self.update_order(id, OrderState::Cancelled, current_fill, None)
-            .await
+        let order = orders.get_mut(id)?;
+
+        // Validate state transition (cancellation is only valid from non-terminal states)
+        if order.state.is_terminal() {
+            warn!(
+                order_id = %id,
+                state = %order.state,
+                "Cannot cancel order in terminal state"
+            );
+            return Some(order.clone());
+        }
+
+        let old_state = order.state;
+        order.state = OrderState::Cancelled;
+        order.updated_at = Utc::now();
+
+        info!(
+            order_id = %id,
+            symbol = %order.symbol,
+            old_state = %old_state,
+            new_state = %OrderState::Cancelled,
+            filled = %order.fill.filled_qty,
+            "Order cancelled"
+        );
+
+        Some(order.clone())
     }
 
     /// Mark order as rejected.
