@@ -28,6 +28,13 @@ pub fn to_alpaca_symbol(symbol: &str) -> Cow<'_, str> {
 }
 
 /// Convert Decimal to num_decimal::Num with error handling.
+///
+/// # Performance Note
+/// Uses string roundtrip for cross-crate compatibility. This allocates
+/// a temporary String (~32 bytes) per call. Acceptable at current order
+/// volume (<100/day). Consider `num_decimal` trait implementation if
+/// scaling to HFT frequencies.
+///
 /// N-4 FIX: #[inline] for hot path (called per-tick)
 #[inline]
 pub fn decimal_to_num(d: Decimal) -> Result<Num, ExchangeError> {

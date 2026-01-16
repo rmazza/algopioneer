@@ -1543,6 +1543,16 @@ impl ExecutionEngine {
             ));
         }
 
+        // N-1 FIX: Skip execution if quantity is zero (matching exit behavior)
+        if quantity.is_zero() || hedge_qty.is_zero() {
+            warn!(
+                quantity = %quantity,
+                hedge_qty = %hedge_qty,
+                "Skipping entry with zero quantity"
+            );
+            return Ok(ExecutionResult::Success);
+        }
+
         // Concurrently execute both legs to minimize leg risk
         let spot_leg = self.client.execute_order(
             &pair.spot_symbol,
@@ -1611,6 +1621,16 @@ impl ExecutionEngine {
             return Err(ExecutionError::CircuitBreakerOpen(
                 "Circuit breaker is OPEN due to recent failures".to_string(),
             ));
+        }
+
+        // N-1 FIX: Skip execution if quantity is zero (matching exit behavior)
+        if quantity.is_zero() || hedge_qty.is_zero() {
+            warn!(
+                quantity = %quantity,
+                hedge_qty = %hedge_qty,
+                "Skipping short entry with zero quantity"
+            );
+            return Ok(ExecutionResult::Success);
         }
 
         // Short Entry: Sell Spot, Buy Future

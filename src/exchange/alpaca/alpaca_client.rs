@@ -102,9 +102,10 @@ impl AlpacaClient {
 
         let client = Client::new(api_info);
 
-        // MC-1 FIX: Safe unwrapping of hardcoded constant
-        // SAFETY: 3 is a non-zero constant
-        let quota = Quota::per_second(NonZeroU32::new(3).expect("3 is non-zero"));
+        // N-2 FIX: Const assertion ensures compile-time safety
+        const RATE_LIMIT_RPS: u32 = 3;
+        const _: () = assert!(RATE_LIMIT_RPS > 0, "Rate limit must be positive");
+        let quota = Quota::per_second(NonZeroU32::new(RATE_LIMIT_RPS).expect("asserted above"));
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {
@@ -187,6 +188,26 @@ impl AlpacaClient {
         price: Option<Decimal>,
     ) -> Result<String, ExchangeError> {
         self.rate_limiter.until_ready().await;
+
+        // MC-1 FIX: Check market hours before order submission
+        // US equities only trade 9:30 AM - 4:00 PM ET (Mon-Fri)
+        // Paper trading is exempt since Alpaca Paper API accepts orders 24/7
+        if !self.is_paper() {
+            let clock = self
+                .client
+                .issue::<apca::api::v2::clock::Get>(&())
+                .await
+                .map_err(|e| {
+                    ExchangeError::Network(format!("Failed to check market hours: {}", e))
+                })?;
+
+            if !clock.open {
+                return Err(ExchangeError::Other(
+                    "Market is closed. US equities trade 9:30 AM - 4:00 PM ET (Mon-Fri)"
+                        .to_string(),
+                ));
+            }
+        }
 
         let start = Instant::now();
         let symbol = utils::to_alpaca_symbol(product_id);

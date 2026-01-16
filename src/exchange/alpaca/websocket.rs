@@ -141,11 +141,18 @@ impl AlpacaWebSocketProvider {
         let alpaca_symbol = value.get("S")?.as_str()?;
         let timestamp_str = value.get("t")?.as_str()?;
 
-        // O(1) symbol lookup (MC-3 FIX)
-        let original_symbol = symbol_map
-            .get(alpaca_symbol)
-            .cloned()
-            .unwrap_or_else(|| alpaca_symbol.to_string());
+        // MC-2 FIX: Explicitly reject unexpected symbols instead of silent fallback
+        let original_symbol = match symbol_map.get(alpaca_symbol) {
+            Some(s) => s.clone(),
+            None => {
+                warn!(
+                    received = alpaca_symbol,
+                    subscribed_count = symbol_map.len(),
+                    "Received tick for unsubscribed symbol, dropping"
+                );
+                return None;
+            }
+        };
 
         // CB-1 FIX: Precision-safe price parsing
         // Try string first (preferred), fall back to f64 if Alpaca sends numeric
@@ -499,5 +506,21 @@ mod tests {
 
         let result = AlpacaWebSocketProvider::parse_trade_from_value(&value, &symbol_map);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_trade_unsubscribed_symbol_returns_none() {
+        // MC-2 FIX: Verify that unexpected symbols are dropped, not silently accepted
+        let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
+
+        let value: serde_json::Value = serde_json::json!({
+            "T": "t",
+            "S": "MSFT",  // Not in symbol_map
+            "p": "150.25",
+            "t": "2024-01-15T10:30:00Z"
+        });
+
+        let result = AlpacaWebSocketProvider::parse_trade_from_value(&value, &symbol_map);
+        assert!(result.is_none()); // Should be dropped, not accepted
     }
 }
