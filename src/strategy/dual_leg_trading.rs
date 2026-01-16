@@ -848,6 +848,10 @@ pub struct PairsManager {
     ewma_initialized: bool,
     // MC-1 FIX: Counter for periodic recalculation to prevent f64 drift
     tick_count: u64,
+    // P2: Dynamic hedge ratio via Kalman Filter
+    /// Optional Kalman Filter for tracking time-varying hedge ratio (beta).
+    /// When enabled, updates beta estimate on each tick for regime adaptation.
+    kalman: Option<crate::math::KalmanHedgeRatio>,
 }
 
 impl PairsManager {
@@ -878,6 +882,25 @@ impl PairsManager {
         exit_z_score: f64,
         ewma_alpha: f64,
     ) -> Self {
+        Self::new_with_kalman(window_size, entry_z_score, exit_z_score, ewma_alpha, false)
+    }
+
+    /// Create a new PairsManager with dynamic hedge ratio tracking via Kalman Filter.
+    ///
+    /// # Arguments
+    /// * `window_size` - Size of the sliding window for spread statistics
+    /// * `entry_z_score` - Z-score threshold to enter a position
+    /// * `exit_z_score` - Z-score threshold to exit a position (mean reversion)
+    /// * `ewma_alpha` - EWMA decay factor (0.0-1.0). Higher = more weight to recent volatility.
+    /// * `enable_kalman` - Whether to enable dynamic hedge ratio estimation via Kalman Filter.
+    ///   When true, the hedge ratio updates each tick to track cointegration drift.
+    pub fn new_with_kalman(
+        window_size: usize,
+        entry_z_score: f64,
+        exit_z_score: f64,
+        ewma_alpha: f64,
+        enable_kalman: bool,
+    ) -> Self {
         Self {
             window_size,
             entry_z_score,
@@ -893,6 +916,12 @@ impl PairsManager {
             ewma_alpha,
             ewma_initialized: false,
             tick_count: 0, // MC-1
+            // P2: Initialize Kalman Filter if requested
+            kalman: if enable_kalman {
+                Some(crate::math::KalmanHedgeRatio::default_for_pairs())
+            } else {
+                None
+            },
         }
     }
 
@@ -914,6 +943,35 @@ impl PairsManager {
     /// Phase 2: Check if EWMA has been initialized
     pub fn is_ewma_initialized(&self) -> bool {
         self.ewma_initialized
+    }
+
+    /// P2: Get the current dynamic hedge ratio from Kalman Filter.
+    ///
+    /// Returns the Kalman-estimated beta if enabled and warmed up.
+    /// This value should be used by `RiskMonitor` to calculate the actual hedge quantity.
+    ///
+    /// # Returns
+    /// - `Some(beta)` if Kalman is enabled and warmed up (>100 updates)
+    /// - `None` if Kalman is disabled or not yet warmed up
+    ///
+    /// # Precision Warning
+    /// The returned f64 is suitable for hedge ratio estimation but MUST be
+    /// converted to `Decimal` before being used in position sizing or PnL calculations.
+    pub fn get_dynamic_hedge_ratio(&self) -> Option<f64> {
+        // N-1 FIX: Named constant instead of magic number
+        const KALMAN_WARMUP_TICKS: u64 = 100;
+        self.kalman.as_ref().and_then(|k| {
+            if k.is_warmed_up(KALMAN_WARMUP_TICKS) {
+                Some(k.get_beta())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// P2: Check if Kalman Filter is enabled
+    pub fn is_kalman_enabled(&self) -> bool {
+        self.kalman.is_some()
     }
 }
 
@@ -1000,7 +1058,19 @@ impl EntryStrategy for PairsManager {
             }
         };
 
-        let spread = p1.ln() - p2.ln();
+        // P2: Update Kalman Filter and compute spread
+        // When Kalman is enabled, the spread uses dynamic beta: spread = ln(p1) - β * ln(p2)
+        // When Kalman is disabled, use static 1:1 spread: spread = ln(p1) - ln(p2)
+        let spread = if let Some(ref mut kalman) = self.kalman {
+            // Update Kalman with current prices (in log-space for stability)
+            let ln_p1 = p1.ln();
+            let ln_p2 = p2.ln();
+            let beta = kalman.update(ln_p2, ln_p1); // Regress ln(p1) on ln(p2)
+            ln_p1 - beta * ln_p2
+        } else {
+            // Static 1:1 log-spread (original behavior)
+            p1.ln() - p2.ln()
+        };
 
         // O(1) sliding window statistics via running sums
         // Add new value to running sums

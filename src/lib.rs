@@ -7,6 +7,7 @@ pub mod events;
 pub mod exchange;
 pub mod health;
 pub mod logging;
+pub mod math;
 pub mod metrics;
 pub mod observability;
 pub mod orders;

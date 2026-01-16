@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tracing::{error, info, warn};
@@ -242,16 +243,65 @@ impl Default for DailyRiskEngine {
     }
 }
 
+// --- Principal's Challenge: Improved Micros Conversion ---
+
+/// Micros precision: 6 decimal places (0.000001)
+const MICROS_SCALE: u32 = 6;
+const MICROS_MULTIPLIER: i64 = 1_000_000;
+
 /// Convert Decimal to micros (i64) for atomic storage.
+///
+/// # Precision
+/// Truncates to 6 decimal places (toward zero).
+///
+/// # Overflow Handling
+/// Never panics. Overflows saturate to `i64::MAX`/`i64::MIN` with error log.
 fn decimal_to_micros(d: Decimal) -> i64 {
-    // Multiply by 1_000_000 and truncate to i64
-    let scaled = d * Decimal::new(1_000_000, 0);
-    scaled.mantissa() as i64 / 10i64.pow(scaled.scale())
+    // Scale to micros with explicit rounding mode
+    let scaled = match d.checked_mul(Decimal::new(MICROS_MULTIPLIER, 0)) {
+        Some(s) => s,
+        None => {
+            // Overflow during scaling - saturate
+            let saturated = if d.is_sign_positive() {
+                i64::MAX
+            } else {
+                i64::MIN
+            };
+            error!(
+                value = %d,
+                saturated = saturated,
+                "Decimal overflow in micros conversion - saturating"
+            );
+            return saturated;
+        }
+    };
+
+    // Truncate toward zero (financial standard for intermediate calculations)
+    let truncated = scaled.trunc();
+
+    // Convert to i64 with saturation
+    truncated.to_i64().unwrap_or_else(|| {
+        let saturated = if truncated.is_sign_positive() {
+            i64::MAX
+        } else {
+            i64::MIN
+        };
+        error!(
+            value = %d,
+            truncated = %truncated,
+            saturated = saturated,
+            "i64 overflow in micros conversion - saturating"
+        );
+        saturated
+    })
 }
 
 /// Convert micros (i64) back to Decimal.
+///
+/// This is a lossless operation for values within i64 range.
+#[inline]
 fn micros_to_decimal(micros: i64) -> Decimal {
-    Decimal::new(micros, 6) // 6 decimal places
+    Decimal::new(micros, MICROS_SCALE)
 }
 
 #[cfg(test)]
@@ -347,5 +397,27 @@ mod tests {
                 back
             );
         }
+    }
+
+    // Principal's Challenge: Overflow saturation tests
+    #[test]
+    fn test_overflow_saturation() {
+        // Test positive overflow
+        let huge = Decimal::MAX;
+        let result = decimal_to_micros(huge);
+        assert_eq!(
+            result,
+            i64::MAX,
+            "Positive overflow should saturate to i64::MAX"
+        );
+
+        // Test negative overflow
+        let neg_huge = Decimal::MIN;
+        let result = decimal_to_micros(neg_huge);
+        assert_eq!(
+            result,
+            i64::MIN,
+            "Negative overflow should saturate to i64::MIN"
+        );
     }
 }

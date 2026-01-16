@@ -209,10 +209,14 @@ impl AlpacaClient {
             .map_err(|e| ExchangeError::Other(format!("Failed to convert quantity: {}", e)))?;
 
         // N-2 FIX: Convert limit price if present
+        // ALPACA FIX: Round prices to 2 decimal places for US equities (tick size = $0.01)
         let limit_num = match price {
-            Some(p) => Some(utils::decimal_to_num(p).map_err(|e| {
-                ExchangeError::Other(format!("Failed to convert limit price: {}", e))
-            })?),
+            Some(p) => {
+                let rounded = p.round_dp(2);
+                Some(utils::decimal_to_num(rounded).map_err(|e| {
+                    ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+                })?)
+            }
             None => None,
         };
 
