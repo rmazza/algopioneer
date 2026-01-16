@@ -168,11 +168,20 @@ impl PortfolioPnL {
         }
     }
 
+    /// Update PnL for a strategy.
+    ///
+    /// # Performance (P-CB-2 FIX)
+    /// Uses `get_mut` to avoid allocation when key exists (common case).
+    /// Only allocates on first insertion per strategy.
+    #[inline]
     pub fn update(&self, strategy_id: &str, pnl: Decimal) {
-        self.strategy_pnl
-            .entry(strategy_id.to_string())
-            .and_modify(|p| *p = pnl)
-            .or_insert(pnl);
+        // Fast path: key already exists (no allocation)
+        if let Some(mut entry) = self.strategy_pnl.get_mut(strategy_id) {
+            *entry = pnl;
+            return;
+        }
+        // Slow path: first time seeing this strategy
+        self.strategy_pnl.insert(strategy_id.to_string(), pnl);
     }
 
     pub fn total(&self) -> Decimal {

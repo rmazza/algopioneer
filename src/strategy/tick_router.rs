@@ -69,6 +69,7 @@ impl TickRouter {
     /// Uses `try_send` to prevent blocking on slow strategies.
     /// Drops ticks on backpressure and logs at debug level.
     /// Automatically cleans up closed channels.
+    #[inline]
     #[instrument(skip(self, tick), fields(symbol = %tick.symbol))]
     pub fn route(&self, tick: Arc<MarketData>) {
         if let Some(mut senders) = self.routes.get_mut(&tick.symbol) {

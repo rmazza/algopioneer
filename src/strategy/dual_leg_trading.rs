@@ -1841,6 +1841,8 @@ pub struct DualLegStrategy {
     exit_policy: Box<dyn ExitPolicy>,
     // CB-2 FIX: Track spawned execution tasks for structured concurrency
     active_executions: tokio::task::JoinSet<()>,
+    // P-MC-3 FIX: Pre-computed pair name for metrics (avoids format! per-call)
+    pair_name: String,
 }
 
 impl DualLegStrategy {
@@ -1872,6 +1874,9 @@ impl DualLegStrategy {
             config.stop_loss_threshold,
         ));
 
+        // P-MC-3 FIX: Pre-compute pair name once at construction
+        let pair_name = format!("{}/{}", config.spot_symbol, config.future_symbol);
+
         Self {
             entry_manager,
             risk_monitor,
@@ -1889,6 +1894,7 @@ impl DualLegStrategy {
             validator,                                      // AS2
             exit_policy,                                    // AS9
             active_executions: tokio::task::JoinSet::new(), // CB-2
+            pair_name,                                      // P-MC-3
         }
     }
 
@@ -1903,11 +1909,11 @@ impl DualLegStrategy {
             self.last_state_change_ts = self.clock.now_ts_millis();
 
             // MC-2 FIX: Emit metric for Halted state to enable alerting
+            // P-MC-3 FIX: Use pre-computed pair_name
             if new_state == StrategyState::Halted {
-                let pair = format!("{}/{}", self.pair.spot_symbol, self.pair.future_symbol);
-                crate::metrics::record_strategy_halted("dual_leg", &pair);
+                crate::metrics::record_strategy_halted("dual_leg", &self.pair_name);
                 error!(
-                    pair = %pair,
+                    pair = %self.pair_name,
                     "CRITICAL: Strategy entered Halted state - manual intervention required"
                 );
             }

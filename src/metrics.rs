@@ -148,6 +148,7 @@ pub fn set_strategy_pnl(strategy_id: &str, strategy_type: &str, pnl: f64) {
 }
 
 /// Record WebSocket tick
+#[inline]
 pub fn record_ws_tick(symbol: &str) {
     WS_TICKS_TOTAL.with_label_values(&[symbol]).inc();
 }
@@ -166,6 +167,7 @@ pub fn record_poll_latency(symbol: &str, status: &str, latency_secs: f64) {
 
 /// MC-3 FIX: Record WebSocket tick latency (exchange timestamp to local receive)
 /// Critical for detecting stale data during network degradation
+#[inline]
 pub fn record_ws_tick_latency(symbol: &str, exchange: &str, latency_ms: f64) {
     WS_TICK_LATENCY
         .with_label_values(&[symbol, exchange])
