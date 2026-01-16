@@ -1690,40 +1690,91 @@ impl ExecutionEngine {
             PositionDirection::Short => (OrderSide::Buy, OrderSide::Sell),
         };
 
-        let spot_leg =
-            self.client
-                .execute_order(&pair.spot_symbol, spot_side, quantity, Some(leg1_price));
-        let future_leg = self.client.execute_order(
-            &pair.future_symbol,
-            future_side,
-            hedge_qty,
-            Some(leg2_price),
-        );
+        // BUG FIX: Skip execution if quantity is zero
+        let spot_leg = if quantity > Decimal::ZERO {
+            Some(self.client.execute_order(
+                &pair.spot_symbol,
+                spot_side,
+                quantity,
+                Some(leg1_price),
+            ))
+        } else {
+            None
+        };
 
-        let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
+        let future_leg = if hedge_qty > Decimal::ZERO {
+            Some(self.client.execute_order(
+                &pair.future_symbol,
+                future_side,
+                hedge_qty,
+                Some(leg2_price),
+            ))
+        } else {
+            None
+        };
 
-        let spot_res = spot_res.map_err(ExecutionError::from);
-        let future_res = future_res.map_err(ExecutionError::from);
-
-        if spot_res.is_err() && future_res.is_err() {
-            self.circuit_breaker.record_failure();
-            return Ok(ExecutionResult::TotalFailure(
-                ExecutionError::ExchangeError(format!(
-                    "Both legs failed to exit. Spot: {:?}, Future: {:?}",
-                    spot_res.err(),
-                    future_res.err()
-                )),
-            ));
+        // If both are None, we have nothing to do
+        if spot_leg.is_none() && future_leg.is_none() {
+            return Ok(ExecutionResult::Success);
         }
 
-        // For exit, failures require retrying the same action (not reversal)
-        if spot_res.is_err() || future_res.is_err() {
-            if let Err(e) = spot_res {
+        // Execute concurrently if both exist, or just await the one that exists
+        let (spot_res, future_res) = match (spot_leg, future_leg) {
+            (Some(s), Some(f)) => {
+                let (s_res, f_res) = tokio::join!(s, f);
+                (Some(s_res), Some(f_res))
+            }
+            (Some(s), None) => (Some(s.await), None),
+            (None, Some(f)) => (None, Some(f.await)),
+            (None, None) => unreachable!(),
+        };
+
+        // Process results
+        let mut failed = false;
+
+        let spot_err = if let Some(res) = spot_res {
+            match res.map_err(ExecutionError::from) {
+                Ok(_) => None,
+                Err(e) => {
+                    failed = true;
+                    Some(e)
+                }
+            }
+        } else {
+            None
+        };
+
+        let future_err = if let Some(res) = future_res {
+            match res.map_err(ExecutionError::from) {
+                Ok(_) => None,
+                Err(e) => {
+                    failed = true;
+                    Some(e)
+                }
+            }
+        } else {
+            None
+        };
+
+        if failed {
+            // If both failed (and both existed and were attempted)
+            if spot_err.is_some() && future_err.is_some() {
+                self.circuit_breaker.record_failure();
+                return Ok(ExecutionResult::TotalFailure(
+                    ExecutionError::ExchangeError(format!(
+                        "Both legs failed to exit. Spot: {:?}, Future: {:?}",
+                        spot_err, future_err
+                    )),
+                ));
+            }
+
+            // If one failed (or the only one attempted failed)
+            if let Some(e) = spot_err {
                 self.queue_exit_retry(&pair.spot_symbol, spot_side, quantity, e, "Spot")
                     .await?;
             }
 
-            if let Err(e) = future_res {
+            if let Some(e) = future_err {
                 self.queue_exit_retry(&pair.future_symbol, future_side, hedge_qty, e, "Future")
                     .await?;
             }
@@ -2995,5 +3046,66 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(executor.get_call_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_exit_zero_quantity() {
+        let executor = Arc::new(MockExecutor::new());
+        let (recovery_tx, _recovery_rx) = mpsc::channel(100);
+        let engine = ExecutionEngine::new(executor.clone(), recovery_tx, 5, 60);
+
+        let pair = InstrumentPair {
+            spot_symbol: "SPOT".to_string(),
+            future_symbol: "FUTURE".to_string(),
+        };
+
+        // Test 1: Only Spot has quantity
+        let res = engine
+            .execute_basis_exit(
+                &pair,
+                PositionDirection::Long,
+                dec!(10.0), // Spot
+                dec!(0),    // Future (Empty)
+                dec!(100.0),
+                dec!(100.0),
+            )
+            .await;
+        assert!(res.is_ok());
+        assert_eq!(executor.get_call_count().await, 1);
+
+        // Verify order details (mock stores them)
+        let orders = executor.executed_orders.lock().await;
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0, "SPOT");
+        assert_eq!(orders[0].2, dec!(10.0));
+        drop(orders);
+
+        // Test 2: Only Future has quantity
+        let res = engine
+            .execute_basis_exit(
+                &pair,
+                PositionDirection::Long,
+                dec!(0),   // Spot (Empty)
+                dec!(5.0), // Future
+                dec!(100.0),
+                dec!(100.0),
+            )
+            .await;
+        assert!(res.is_ok());
+        assert_eq!(executor.get_call_count().await, 2); // 1 previous + 1 new
+
+        // Test 3: Both zero
+        let res = engine
+            .execute_basis_exit(
+                &pair,
+                PositionDirection::Long,
+                dec!(0),
+                dec!(0),
+                dec!(100.0),
+                dec!(100.0),
+            )
+            .await;
+        assert!(res.is_ok());
+        assert_eq!(executor.get_call_count().await, 2); // Unchanged
     }
 }
