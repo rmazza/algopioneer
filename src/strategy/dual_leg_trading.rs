@@ -1843,6 +1843,14 @@ pub struct DualLegStrategy {
     active_executions: tokio::task::JoinSet<()>,
     // P-MC-3 FIX: Pre-computed pair name for metrics (avoids format! per-call)
     pair_name: String,
+    // STATE PERSISTENCE: Optional state store for surviving restarts
+    state_store: Option<std::sync::Arc<dyn crate::logging::StateStore>>,
+    // STATE PERSISTENCE: Position ID for state storage (e.g., "pairs:AAPL:MSFT")
+    position_id: Option<String>,
+    // STATE PERSISTENCE: Strategy type for state records
+    strategy_type: String,
+    // STATE PERSISTENCE: Paper trading mode flag
+    is_paper: bool,
 }
 
 impl DualLegStrategy {
@@ -1895,7 +1903,41 @@ impl DualLegStrategy {
             exit_policy,                                    // AS9
             active_executions: tokio::task::JoinSet::new(), // CB-2
             pair_name,                                      // P-MC-3
+            state_store: None,                              // STATE PERSISTENCE
+            position_id: None,                              // STATE PERSISTENCE
+            strategy_type: "pairs".to_string(),             // STATE PERSISTENCE (default)
+            is_paper: false,                                // STATE PERSISTENCE (default)
         }
+    }
+
+    /// Configure optional state persistence for surviving container restarts.
+    ///
+    /// When a `StateStore` is provided, the strategy will:
+    /// 1. Save state to storage on every state transition
+    /// 2. Attempt to load prior state on startup (before reconcile_state)
+    ///
+    /// # Arguments
+    /// * `store` - StateStore implementation (e.g., DynamoDbRecorder)
+    /// * `strategy_type` - Type of strategy: "pairs" or "basis"
+    /// * `is_paper` - Whether this is paper trading
+    #[must_use]
+    pub fn with_state_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::logging::StateStore>,
+        strategy_type: impl Into<String>,
+        is_paper: bool,
+    ) -> Self {
+        let position_id = format!(
+            "{}:{}:{}",
+            strategy_type.into(),
+            self.config.spot_symbol,
+            self.config.future_symbol
+        );
+        self.state_store = Some(store);
+        self.position_id = Some(position_id.clone());
+        self.strategy_type = position_id.split(':').next().unwrap_or("pairs").to_string();
+        self.is_paper = is_paper;
+        self
     }
 
     pub fn set_observer(&mut self, tx: mpsc::Sender<StrategyState>) {
@@ -1922,6 +1964,208 @@ impl DualLegStrategy {
                 if let Err(e) = tx.try_send(new_state) {
                     warn!("State update dropped due to backpressure: {}", e);
                 }
+            }
+
+            // STATE PERSISTENCE: Persist state to durable storage (async, best-effort)
+            self.persist_state_async();
+        }
+    }
+
+    /// STATE PERSISTENCE: Convert current state to a PositionStateRecord for storage.
+    fn to_position_state_record(&self) -> Option<crate::logging::PositionStateRecord> {
+        let position_id = self.position_id.as_ref()?;
+
+        let (state_str, direction, leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price) =
+            match &self.state {
+                StrategyState::Flat => (
+                    "flat".to_string(),
+                    None,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                ),
+                StrategyState::Entering {
+                    direction,
+                    leg1_qty,
+                    leg2_qty,
+                    leg1_entry_price,
+                    leg2_entry_price,
+                } => (
+                    "entering".to_string(),
+                    Some(direction.to_string().to_lowercase()),
+                    *leg1_qty,
+                    *leg2_qty,
+                    *leg1_entry_price,
+                    *leg2_entry_price,
+                ),
+                StrategyState::InPosition {
+                    direction,
+                    leg1_qty,
+                    leg2_qty,
+                    leg1_entry_price,
+                    leg2_entry_price,
+                } => (
+                    "in_position".to_string(),
+                    Some(direction.to_string().to_lowercase()),
+                    *leg1_qty,
+                    *leg2_qty,
+                    *leg1_entry_price,
+                    *leg2_entry_price,
+                ),
+                StrategyState::Exiting {
+                    direction,
+                    leg1_qty,
+                    leg2_qty,
+                    leg1_entry_price,
+                    leg2_entry_price,
+                } => (
+                    "exiting".to_string(),
+                    Some(direction.to_string().to_lowercase()),
+                    *leg1_qty,
+                    *leg2_qty,
+                    *leg1_entry_price,
+                    *leg2_entry_price,
+                ),
+                StrategyState::Reconciling => (
+                    "reconciling".to_string(),
+                    None,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                ),
+                StrategyState::Halted => (
+                    "halted".to_string(),
+                    None,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                ),
+            };
+
+        Some(crate::logging::PositionStateRecord {
+            position_id: position_id.clone(),
+            strategy_type: self.strategy_type.clone(),
+            state: state_str,
+            direction,
+            leg1_symbol: self.config.spot_symbol.clone(),
+            leg2_symbol: self.config.future_symbol.clone(),
+            leg1_qty: leg1_qty.to_string(),
+            leg2_qty: leg2_qty.to_string(),
+            leg1_entry_price: leg1_entry_price.to_string(),
+            leg2_entry_price: leg2_entry_price.to_string(),
+            updated_at: self.clock.now(),
+            is_paper: self.is_paper,
+        })
+    }
+
+    /// STATE PERSISTENCE: Persist current state asynchronously (fire-and-forget).
+    /// Errors are logged but don't block the strategy.
+    fn persist_state_async(&self) {
+        if let (Some(store), Some(record)) =
+            (self.state_store.clone(), self.to_position_state_record())
+        {
+            tokio::spawn(async move {
+                if let Err(e) = store.save_state(&record).await {
+                    // Log error but don't fail - state persistence is best-effort
+                    warn!(error = %e, "Failed to persist strategy state");
+                }
+            });
+        }
+    }
+
+    /// STATE PERSISTENCE: Load prior state from storage.
+    /// Returns true if state was restored, false otherwise.
+    async fn load_persisted_state(&mut self) -> bool {
+        let Some(store) = &self.state_store else {
+            return false;
+        };
+        let Some(position_id) = &self.position_id else {
+            return false;
+        };
+
+        match store.load_state(position_id).await {
+            Ok(Some(record)) => {
+                info!(
+                    position_id = %record.position_id,
+                    saved_state = %record.state,
+                    direction = ?record.direction,
+                    "Loaded persisted state from storage"
+                );
+
+                // Parse quantities and prices from strings
+                let leg1_qty = record.leg1_qty.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+                let leg2_qty = record.leg2_qty.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+                let leg1_entry_price = record
+                    .leg1_entry_price
+                    .parse::<Decimal>()
+                    .unwrap_or(UNKNOWN_ENTRY_PRICE);
+                let leg2_entry_price = record
+                    .leg2_entry_price
+                    .parse::<Decimal>()
+                    .unwrap_or(UNKNOWN_ENTRY_PRICE);
+
+                // Parse direction
+                let direction = match record.direction.as_deref() {
+                    Some("long") => PositionDirection::Long,
+                    Some("short") => PositionDirection::Short,
+                    _ => PositionDirection::Long, // Default
+                };
+
+                // Restore state based on saved state string
+                match record.state.as_str() {
+                    "in_position" => {
+                        if leg1_qty > Decimal::ZERO || leg2_qty > Decimal::ZERO {
+                            self.state = StrategyState::InPosition {
+                                direction,
+                                leg1_qty,
+                                leg2_qty,
+                                leg1_entry_price,
+                                leg2_entry_price,
+                            };
+                            info!(
+                                leg1_qty = %leg1_qty,
+                                leg2_qty = %leg2_qty,
+                                leg1_entry_price = %leg1_entry_price,
+                                leg2_entry_price = %leg2_entry_price,
+                                "Restored InPosition state with entry prices from storage"
+                            );
+                            return true;
+                        }
+                    }
+                    "entering" | "exiting" => {
+                        // For transitional states, just restore InPosition and let reconcile handle it
+                        if leg1_qty > Decimal::ZERO || leg2_qty > Decimal::ZERO {
+                            self.state = StrategyState::InPosition {
+                                direction,
+                                leg1_qty,
+                                leg2_qty,
+                                leg1_entry_price,
+                                leg2_entry_price,
+                            };
+                            warn!(
+                                saved_state = %record.state,
+                                "Restored transitional state as InPosition - will reconcile with exchange"
+                            );
+                            return true;
+                        }
+                    }
+                    _ => {
+                        // Keep Flat state for "flat", "reconciling", "halted", or unknown
+                        debug!("Persisted state was Flat or terminal, starting fresh");
+                    }
+                }
+                false
+            }
+            Ok(None) => {
+                debug!("No persisted state found, starting fresh");
+                false
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load persisted state, starting fresh");
+                false
             }
         }
     }
@@ -2020,8 +2264,20 @@ impl DualLegStrategy {
             self.pair.spot_symbol, self.pair.future_symbol
         );
 
-        // STATE AMNESIA FIX: Reconcile position state before processing any ticks
-        self.reconcile_state().await;
+        // STATE PERSISTENCE: Try to load prior state from storage first.
+        // This restores entry prices from the last session if available.
+        let state_restored = self.load_persisted_state().await;
+
+        // STATE AMNESIA FIX: Reconcile position state with exchange.
+        // If we restored state from storage, reconcile will validate quantities match.
+        // If not, reconcile will detect positions but use UNKNOWN_ENTRY_PRICE.
+        if !state_restored {
+            self.reconcile_state().await;
+        } else {
+            // Still verify exchange positions match our restored state
+            info!("State restored from storage - verifying with exchange...");
+            self.reconcile_state().await;
+        }
 
         let mut latest_leg1: Option<Arc<MarketData>> = None;
         let mut latest_leg2: Option<Arc<MarketData>> = None;
@@ -2712,6 +2968,10 @@ pub struct DualLegStrategyLive<E: Executor + 'static> {
     executor: Arc<E>,
     pnl: Decimal,
     healthy: bool,
+    // STATE PERSISTENCE: Optional state store for surviving restarts
+    state_store: Option<std::sync::Arc<dyn crate::logging::StateStore>>,
+    // STATE PERSISTENCE: Whether running in paper mode
+    is_paper: bool,
 }
 
 impl<E: Executor + 'static> DualLegStrategyLive<E> {
@@ -2723,7 +2983,21 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
             executor,
             pnl: Decimal::ZERO,
             healthy: true,
+            state_store: None,
+            is_paper: false,
         }
+    }
+
+    /// Configure optional state persistence for surviving container restarts.
+    #[must_use]
+    pub fn with_state_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::logging::StateStore>,
+        is_paper: bool,
+    ) -> Self {
+        self.state_store = Some(store);
+        self.is_paper = is_paper;
+        self
     }
 
     /// Build the internal DualLegStrategy with all dependencies
@@ -2777,14 +3051,25 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
             HedgeMode::DollarNeutral,
         );
 
-        DualLegStrategy::new(
+        let mut strategy = DualLegStrategy::new(
             entry_manager,
             risk_monitor,
             execution_engine,
             self.config.dual_leg_config.clone(),
             feedback_rx,
             Box::new(SystemClock),
-        )
+        );
+
+        // STATE PERSISTENCE: Wire up state store if configured
+        if let Some(store) = &self.state_store {
+            let strategy_type = match self.config.strategy_type {
+                DualLegStrategyType::Basis => "basis",
+                DualLegStrategyType::Pairs => "pairs",
+            };
+            strategy = strategy.with_state_store(store.clone(), strategy_type, self.is_paper);
+        }
+
+        strategy
     }
 }
 

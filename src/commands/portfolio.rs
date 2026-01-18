@@ -94,6 +94,17 @@ pub async fn run_portfolio(
 
             let ws_client = Box::new(AlpacaWebSocketProvider::from_env()?);
 
+            // STATE PERSISTENCE: Initialize DynamoDB state store when feature is enabled
+            #[cfg(feature = "dynamodb")]
+            let state_store: Option<Arc<dyn crate::logging::StateStore>> = {
+                info!("Initializing DynamoDB state store for position persistence");
+                let recorder =
+                    crate::logging::DynamoDbRecorder::from_env("algopioneer-trades").await;
+                Some(Arc::new(recorder) as Arc<dyn crate::logging::StateStore>)
+            };
+            #[cfg(not(feature = "dynamodb"))]
+            let state_store: Option<Arc<dyn crate::logging::StateStore>> = None;
+
             // Initialize Supervisor
             let mut supervisor = StrategySupervisor::new().with_risk_config(risk_config);
 
@@ -119,8 +130,16 @@ pub async fn run_portfolio(
                     drift_recalc_interval: 10_000,
                 };
 
+                // Create base strategy
                 let strategy =
                     DualLegStrategyLive::new(pair_id.clone(), live_config, alpaca_client.clone());
+
+                // STATE PERSISTENCE: Wire up state store if initialized
+                let strategy = if let Some(ref store) = state_store {
+                    strategy.with_state_store(store.clone(), paper)
+                } else {
+                    strategy
+                };
 
                 supervisor.add_strategy(Box::new(strategy));
                 info!("Added Alpaca strategy #{} ({})", idx + 1, pair_id);

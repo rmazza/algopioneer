@@ -16,7 +16,10 @@ pub mod dynamodb_recorder;
 
 // Re-exports for convenience
 pub use csv_recorder::CsvRecorder;
-pub use recorder::{MultiRecorder, RecordError, TradeRecord, TradeRecorder, TradeSide};
+pub use recorder::{
+    MultiRecorder, PositionStateRecord, RecordError, StateStore, TradeRecord, TradeRecorder,
+    TradeSide,
+};
 pub use tracing_recorder::TracingRecorder;
 
 #[cfg(feature = "dynamodb")]

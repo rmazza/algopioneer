@@ -166,6 +166,88 @@ pub trait TradeRecorder: Send + Sync {
     }
 }
 
+// ============================================================================
+// Position State Persistence
+// ============================================================================
+
+/// Persistent position state for recovery across container restarts.
+///
+/// This record captures all necessary information to restore a strategy's
+/// state, including entry prices that would otherwise be lost.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PositionStateRecord {
+    /// Unique identifier: "strategy_type:leg1_symbol:leg2_symbol"
+    /// e.g., "pairs:AAPL:MSFT"
+    pub position_id: String,
+    /// Strategy type: "pairs" or "basis"
+    pub strategy_type: String,
+    /// Current state: "flat", "entering", "in_position", "exiting", "reconciling", "halted"
+    pub state: String,
+    /// Position direction: "long" or "short" (None if flat)
+    pub direction: Option<String>,
+    /// Leg 1 symbol
+    pub leg1_symbol: String,
+    /// Leg 2 symbol
+    pub leg2_symbol: String,
+    /// Leg 1 quantity (Decimal serialized as string for precision)
+    pub leg1_qty: String,
+    /// Leg 2 quantity
+    pub leg2_qty: String,
+    /// Leg 1 entry price (Decimal serialized as string)
+    pub leg1_entry_price: String,
+    /// Leg 2 entry price
+    pub leg2_entry_price: String,
+    /// Timestamp of last update
+    pub updated_at: DateTime<Utc>,
+    /// Whether this is paper trading
+    pub is_paper: bool,
+}
+
+impl PositionStateRecord {
+    /// Create a new position state record for a flat (no position) state.
+    pub fn flat(
+        position_id: impl Into<String>,
+        strategy_type: impl Into<String>,
+        leg1_symbol: impl Into<String>,
+        leg2_symbol: impl Into<String>,
+        is_paper: bool,
+    ) -> Self {
+        Self {
+            position_id: position_id.into(),
+            strategy_type: strategy_type.into(),
+            state: "flat".to_string(),
+            direction: None,
+            leg1_symbol: leg1_symbol.into(),
+            leg2_symbol: leg2_symbol.into(),
+            leg1_qty: "0".to_string(),
+            leg2_qty: "0".to_string(),
+            leg1_entry_price: "0".to_string(),
+            leg2_entry_price: "0".to_string(),
+            updated_at: Utc::now(),
+            is_paper,
+        }
+    }
+}
+
+/// Trait for persisting and retrieving strategy position state.
+///
+/// Implementations should provide durable storage (e.g., DynamoDB, PostgreSQL)
+/// that survives container restarts.
+#[async_trait]
+pub trait StateStore: Send + Sync {
+    /// Save current position state. Overwrites any previous state for this position_id.
+    async fn save_state(&self, state: &PositionStateRecord) -> Result<(), RecordError>;
+
+    /// Load position state by ID. Returns None if no state exists.
+    async fn load_state(
+        &self,
+        position_id: &str,
+    ) -> Result<Option<PositionStateRecord>, RecordError>;
+
+    /// Delete position state (for graceful shutdown or manual cleanup).
+    async fn delete_state(&self, position_id: &str) -> Result<(), RecordError>;
+}
+
 /// A recorder that fans out to multiple backends
 pub struct MultiRecorder {
     recorders: Vec<Box<dyn TradeRecorder>>,
