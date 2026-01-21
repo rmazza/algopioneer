@@ -14,7 +14,7 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use algopioneer::cli::{Cli, Commands, DualLegCliConfig};
+use algopioneer::cli::{BacktestCliConfig, BacktestStrategyType, Cli, Commands, DualLegCliConfig};
 use algopioneer::commands;
 use algopioneer::exchange::coinbase::AppEnv;
 use clap::Parser;
@@ -54,8 +54,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Commands::Backtest => {
-            commands::run_backtest()?;
+        Commands::Backtest {
+            strategy,
+            exchange,
+            symbols,
+            duration,
+            output_dir,
+            initial_capital,
+            synthetic,
+        } => {
+            let strategy_type: BacktestStrategyType = strategy.parse().map_err(|e: String| {
+                error!("{}", e);
+                std::io::Error::other(e)
+            })?;
+
+            let symbols_vec: Vec<String> =
+                symbols.split(',').map(|s| s.trim().to_string()).collect();
+
+            let initial_capital_decimal = rust_decimal::Decimal::try_from(initial_capital)
+                .map_err(|e| {
+                    error!("Invalid initial capital '{}': {}", initial_capital, e);
+                    std::io::Error::other(format!("Invalid initial capital: {}", e))
+                })?;
+
+            let config = BacktestCliConfig {
+                strategy: strategy_type,
+                exchange,
+                symbols: symbols_vec,
+                duration,
+                output_dir,
+                initial_capital: initial_capital_decimal,
+                synthetic,
+            };
+
+            commands::run_backtest(config)?;
         }
         Commands::DualLeg {
             strategy,

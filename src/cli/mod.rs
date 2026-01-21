@@ -5,7 +5,10 @@
 
 mod config;
 
-pub use config::{DualLegCliConfig, SimpleTradingConfig};
+pub use config::{
+    BacktestCliConfig, BacktestConfigError, BacktestStrategyType, DualLegCliConfig,
+    SimpleTradingConfig,
+};
 
 use clap::{Parser, Subcommand};
 
@@ -51,7 +54,29 @@ pub enum Commands {
     },
 
     /// Run a backtest on historical data
-    Backtest,
+    Backtest {
+        /// Strategy to backtest: 'moving-average' or 'dual-leg'
+        #[arg(long, default_value = "moving-average")]
+        strategy: String,
+        /// Exchange context: 'coinbase' or 'alpaca'
+        #[arg(long, default_value = "coinbase")]
+        exchange: String,
+        /// Symbols to backtest (comma-separated, e.g., "BTC-USD" or "BTC-USD,ETH-USD")
+        #[arg(long, default_value = "BTC-USD")]
+        symbols: String,
+        /// Backtest duration (e.g., "7d", "30d", "1y")
+        #[arg(long, default_value = "7d")]
+        duration: String,
+        /// Output directory for results
+        #[arg(long, default_value = "backtest_results")]
+        output_dir: String,
+        /// Initial capital in USD
+        #[arg(long, default_value_t = 10000.0)]
+        initial_capital: f64,
+        /// Use synthetic data for CI (no CSV files required)
+        #[arg(long, default_value_t = false)]
+        synthetic: bool,
+    },
 
     /// Run the Dual-Leg Trading Strategy (Basis or Pairs)
     DualLeg {

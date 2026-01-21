@@ -16,15 +16,15 @@ env:
   # Coinbase credentials (crypto)
   COINBASE_API_KEY: ${{ secrets.COINBASE_API_KEY || 'test-key-ci' }}
   COINBASE_API_SECRET: ${{ secrets.COINBASE_API_SECRET || 'test-secret-ci' }}
-  # Alpaca credentials (equities) - Paper trading endpoint used for backtesting
-  ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY || 'test-key-ci' }}
-  ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET || 'test-secret-ci' }}
+  # Alpaca credentials (equities) - uses APCA_ prefix as expected by apca crate
+  APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID || 'test-key-ci' }}
+  APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY || 'test-secret-ci' }}
 
 jobs:
   backtest:
     name: Backtest (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -76,13 +76,22 @@ jobs:
       - name: Run Backtest
         id: backtest
         run: |
-          mkdir -p backtest_results
           cargo run --release -- backtest \
-            --exchange ${{ matrix.exchange }} \
             --strategy ${{ matrix.strategy }} \
+            --exchange ${{ matrix.exchange }} \
             --symbols ${{ matrix.symbols }} \
             --duration ${{ github.event.inputs.duration || '7d' }} \
-            --output-dir backtest_results
+            --output-dir backtest_results \
+            --synthetic
+          
+          # Validate results file exists
+          if [ -f backtest_results/results.json ]; then
+            echo "✅ Backtest completed - results.json created"
+            cat backtest_results/results.json
+          else
+            echo "❌ Backtest failed - no results.json"
+            exit 1
+          fi
 
       - name: Upload Backtest Results
         uses: actions/upload-artifact@v4
