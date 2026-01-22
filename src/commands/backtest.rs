@@ -13,7 +13,33 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use tracing::{error, info, warn};
+use thiserror::Error;
+use tracing::{error, info};
+
+/// Errors that can occur during backtesting.
+#[derive(Debug, Error)]
+pub enum BacktestError {
+    #[error("Configuration error: {0}")]
+    Config(#[from] crate::cli::BacktestConfigError),
+
+    #[error("Data loading error: {0}")]
+    Data(String),
+
+    #[error("Strategy execution error: {0}")]
+    Execution(#[from] crate::backtest::BacktestError),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("CSV parsing error: {0}")]
+    Csv(#[from] polars::error::PolarsError),
+
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("Dual-leg strategy backtesting is not yet implemented")]
+    NotImplemented,
+}
 
 /// Backtest results in JSON-serializable format.
 #[derive(Debug, Serialize)]
@@ -42,7 +68,7 @@ struct BacktestOutput {
 ///
 /// # Errors
 /// Returns error if data loading or backtest fails.
-pub fn run_backtest(config: BacktestCliConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError> {
     info!("--- Running Backtest ---");
     info!(
         strategy = %format!("{:?}", config.strategy),
@@ -76,12 +102,8 @@ pub fn run_backtest(config: BacktestCliConfig) -> Result<(), Box<dyn std::error:
             backtest::run(&strategy, &df, &bt_config)?
         }
         BacktestStrategyType::DualLeg => {
-            // For dual-leg, we use the same MA strategy as a placeholder
-            // TODO: Implement a proper pairs backtest strategy
-            warn!("dual-leg backtest not fully implemented, using moving-average as fallback");
-            let strategy = MovingAverageCrossover::new(5, 20);
-            let bt_config = BacktestConfig::with_capital(config.initial_capital);
-            backtest::run(&strategy, &df, &bt_config)?
+            error!("Dual-leg backtesting is not yet implemented.");
+            return Err(BacktestError::NotImplemented);
         }
     };
 
@@ -127,7 +149,7 @@ pub fn run_backtest(config: BacktestCliConfig) -> Result<(), Box<dyn std::error:
 }
 
 /// Load historical data from a CSV file.
-fn load_csv_data(symbol: &str, max_rows: usize) -> Result<DataFrame, Box<dyn std::error::Error>> {
+fn load_csv_data(symbol: &str, max_rows: usize) -> Result<DataFrame, BacktestError> {
     // Try multiple paths: data/{symbol}.csv, sample_data.csv
     let paths = [
         format!("data/{}.csv", symbol),
@@ -153,18 +175,14 @@ fn load_csv_data(symbol: &str, max_rows: usize) -> Result<DataFrame, Box<dyn std
     }
 
     error!("No CSV data found for symbol: {}", symbol);
-    Err(format!(
+    Err(BacktestError::Data(format!(
         "No CSV data found. Tried: {:?}. Use --synthetic for CI mode.",
         paths
-    )
-    .into())
+    )))
 }
 
 /// Generate synthetic price data for testing.
-fn generate_synthetic_data(
-    symbol: &str,
-    candle_count: usize,
-) -> Result<DataFrame, Box<dyn std::error::Error>> {
+fn generate_synthetic_data(symbol: &str, candle_count: usize) -> Result<DataFrame, BacktestError> {
     info!(
         symbol = %symbol,
         candles = candle_count,
@@ -209,7 +227,8 @@ mod tests {
 
     #[test]
     fn test_synthetic_data_generation() {
-        let df = generate_synthetic_data("BTC-USD", 100).unwrap();
+        let df =
+            generate_synthetic_data("BTC-USD", 100).expect("failed to generate synthetic data");
         assert_eq!(df.height(), 100);
         assert!(df.column("close").is_ok());
     }
