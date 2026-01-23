@@ -15,8 +15,8 @@ fi
 echo "Logging into ECR..."
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 756471705399.dkr.ecr.us-east-1.amazonaws.com
 
-echo "Pulling image..."
-docker pull 756471705399.dkr.ecr.us-east-1.amazonaws.com/algopioneer:v1.4.0
+# echo "Pulling image..."
+# docker pull 756471705399.dkr.ecr.us-east-1.amazonaws.com/algopioneer:v1.4.0
 
 # 3. Stop/Clean existing container
 echo "Stopping old container..."
@@ -37,7 +37,7 @@ docker run -d \
   -e ALPACA_API_SECRET="$ALPACA_API_SECRET" \
   -v /home/ec2-user/discovered_pairs.json:/app/discovered_pairs.json:ro \
   -v /home/ec2-user/paper_trades_alpaca.csv:/app/paper_trades_alpaca.csv \
-  756471705399.dkr.ecr.us-east-1.amazonaws.com/algopioneer:v1.4.0 \
+  algopioneer:v1.6.0 \
   portfolio \
   --config /app/discovered_pairs.json \
   --exchange alpaca \

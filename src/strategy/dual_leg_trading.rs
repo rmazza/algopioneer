@@ -2142,12 +2142,12 @@ impl DualLegStrategy {
 
                 if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
                     // We have an open position - transition to InPosition
-                    
+
                     // FIXED LOGIC: Infer direction from available legs
                     // If Leg 1 has size, its sign dictates direction (Long Leg1 = Long Strategy)
                     // If Leg 1 is flat, Leg 2's sign dictates direction (Short Leg2 = Long Strategy)
                     let direction = if leg1_qty.abs() > threshold {
-                         if leg1_qty >= Decimal::ZERO {
+                        if leg1_qty >= Decimal::ZERO {
                             PositionDirection::Long
                         } else {
                             PositionDirection::Short

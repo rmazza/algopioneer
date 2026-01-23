@@ -47,6 +47,12 @@ This workflow guides you through the process of creating a production release, f
     - Save the file.
     *(You can use `sed` if you are confident, but manual is safer to avoid accidents).*
 
+5.  **Update Changelog**:
+    - Open `CHANGELOG.md`.
+    - Add a new section for `[X.Y.Z] - YYYY-MM-DD`.
+    - Move "Unreleased" changes (if any) to this new section.
+    - Save the file.
+
 6.  **Running Tests**: Ensure the release is stable (This step runs automatically).
     // turbo
     ```bash
@@ -55,7 +61,7 @@ This workflow guides you through the process of creating a production release, f
 
 7.  **Commit Changes**:
     ```bash
-    git add Cargo.toml
+    git add Cargo.toml CHANGELOG.md
     git commit -m "chore: bump version to vX.Y.Z"
     ```
 
