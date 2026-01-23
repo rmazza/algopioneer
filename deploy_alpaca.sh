@@ -36,6 +36,7 @@ docker run -d \
   -e ALPACA_API_KEY="$ALPACA_API_KEY" \
   -e ALPACA_API_SECRET="$ALPACA_API_SECRET" \
   -v /home/ec2-user/discovered_pairs.json:/app/discovered_pairs.json:ro \
+  -v /home/ec2-user/paper_trades_alpaca.csv:/app/paper_trades_alpaca.csv \
   756471705399.dkr.ecr.us-east-1.amazonaws.com/algopioneer:v1.4.0 \
   portfolio \
   --config /app/discovered_pairs.json \

@@ -1412,8 +1412,8 @@ async fn perform_recovery_with_backoff(
 }
 
 // AS2: CircuitBreaker moved to `crate::resilience::CircuitBreaker`
-// See `src/resilience/circuit_breaker.rs` for the improved implementation
-// with single RwLock (reduced lock contention) and comprehensive unit tests.
+// See `src/resilience/circuit_breaker.rs` for the lock-free implementation
+// using atomics (AtomicU32/AtomicU64 with CAS) and comprehensive unit tests.
 
 /// Handles concurrent execution of orders on both legs with circuit breaker protection.
 ///
@@ -1527,10 +1527,17 @@ impl ExecutionEngine {
         Ok(())
     }
 
+    /// Execute a dual-leg entry (Long or Short) based on direction.
+    ///
+    /// - **Long Entry**: Buy Spot, Sell Future
+    /// - **Short Entry**: Sell Spot, Buy Future
+    ///
+    /// This is a unified method consolidating execute_basis_entry and execute_basis_short_entry.
     #[instrument(skip(self))]
     pub async fn execute_basis_entry(
         &self,
         pair: &InstrumentPair,
+        direction: PositionDirection,
         quantity: Decimal,
         hedge_qty: Decimal,
         leg1_price: Decimal,
@@ -1543,26 +1550,32 @@ impl ExecutionEngine {
             ));
         }
 
-        // N-1 FIX: Skip execution if quantity is zero (matching exit behavior)
+        // N-1 FIX: Skip execution if quantity is zero
         if quantity.is_zero() || hedge_qty.is_zero() {
             warn!(
                 quantity = %quantity,
                 hedge_qty = %hedge_qty,
+                direction = %direction,
                 "Skipping entry with zero quantity"
             );
             return Ok(ExecutionResult::Success);
         }
 
+        // Direction-aware order sides:
+        // Long Entry: Buy Spot (leg1), Sell Future (leg2)
+        // Short Entry: Sell Spot (leg1), Buy Future (leg2)
+        let (spot_side, future_side) = match direction {
+            PositionDirection::Long => (OrderSide::Buy, OrderSide::Sell),
+            PositionDirection::Short => (OrderSide::Sell, OrderSide::Buy),
+        };
+
         // Concurrently execute both legs to minimize leg risk
-        let spot_leg = self.client.execute_order(
-            &pair.spot_symbol,
-            OrderSide::Buy,
-            quantity,
-            Some(leg1_price),
-        );
+        let spot_leg =
+            self.client
+                .execute_order(&pair.spot_symbol, spot_side, quantity, Some(leg1_price));
         let future_leg = self.client.execute_order(
             &pair.future_symbol,
-            OrderSide::Sell,
+            future_side,
             hedge_qty,
             Some(leg2_price),
         );
@@ -1573,6 +1586,15 @@ impl ExecutionEngine {
         let spot_res = spot_res.map_err(ExecutionError::from);
         let future_res = future_res.map_err(ExecutionError::from);
 
+        // Kill switch action is opposite of entry action
+        let spot_kill_switch_side = future_side; // If spot fails, unwind future
+        let future_kill_switch_side = spot_side; // If future fails, unwind spot
+
+        let direction_name = match direction {
+            PositionDirection::Long => "entry",
+            PositionDirection::Short => "short entry",
+        };
+
         // Handle failures using DRY helper
         if let Err(e) = spot_res {
             if future_res.is_ok() {
@@ -1580,9 +1602,9 @@ impl ExecutionEngine {
                     .queue_kill_switch(
                         e,
                         &pair.future_symbol,
-                        OrderSide::Buy,
+                        spot_kill_switch_side,
                         hedge_qty,
-                        "Spot entry",
+                        &format!("Spot {}", direction_name),
                     )
                     .await;
             }
@@ -1595,88 +1617,9 @@ impl ExecutionEngine {
                 .queue_kill_switch(
                     e,
                     &pair.spot_symbol,
-                    OrderSide::Sell,
+                    future_kill_switch_side,
                     quantity,
-                    "Future entry",
-                )
-                .await;
-        }
-
-        self.circuit_breaker.record_success();
-        Ok(ExecutionResult::Success)
-    }
-
-    /// CF1 FIX: Execute Short Entry (Sell Spot, Buy Future)
-    #[instrument(skip(self))]
-    pub async fn execute_basis_short_entry(
-        &self,
-        pair: &InstrumentPair,
-        quantity: Decimal,
-        hedge_qty: Decimal,
-        leg1_price: Decimal,
-        leg2_price: Decimal,
-    ) -> Result<ExecutionResult, ExecutionError> {
-        // CR1: Check Circuit Breaker
-        if self.circuit_breaker.is_open() {
-            return Err(ExecutionError::CircuitBreakerOpen(
-                "Circuit breaker is OPEN due to recent failures".to_string(),
-            ));
-        }
-
-        // N-1 FIX: Skip execution if quantity is zero (matching exit behavior)
-        if quantity.is_zero() || hedge_qty.is_zero() {
-            warn!(
-                quantity = %quantity,
-                hedge_qty = %hedge_qty,
-                "Skipping short entry with zero quantity"
-            );
-            return Ok(ExecutionResult::Success);
-        }
-
-        // Short Entry: Sell Spot, Buy Future
-        let spot_leg = self.client.execute_order(
-            &pair.spot_symbol,
-            OrderSide::Sell,
-            quantity,
-            Some(leg1_price),
-        );
-        let future_leg = self.client.execute_order(
-            &pair.future_symbol,
-            OrderSide::Buy,
-            hedge_qty,
-            Some(leg2_price),
-        );
-
-        let (spot_res, future_res) = tokio::join!(spot_leg, future_leg);
-
-        let spot_res = spot_res.map_err(ExecutionError::from);
-        let future_res = future_res.map_err(ExecutionError::from);
-
-        // Handle failures using DRY helper
-        if let Err(e) = spot_res {
-            if future_res.is_ok() {
-                return self
-                    .queue_kill_switch(
-                        e,
-                        &pair.future_symbol,
-                        OrderSide::Sell,
-                        hedge_qty,
-                        "Spot short entry",
-                    )
-                    .await;
-            }
-            self.circuit_breaker.record_failure();
-            return Ok(ExecutionResult::TotalFailure(e));
-        }
-
-        if let Err(e) = future_res {
-            return self
-                .queue_kill_switch(
-                    e,
-                    &pair.spot_symbol,
-                    OrderSide::Buy,
-                    quantity,
-                    "Future short entry",
+                    &format!("Future {}", direction_name),
                 )
                 .await;
         }
@@ -2199,16 +2142,28 @@ impl DualLegStrategy {
 
                 if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
                     // We have an open position - transition to InPosition
-                    // Infer direction from leg1 quantity sign
-                    // Long = positive leg1 (bought spot), Short = negative leg1 (sold spot)
-                    let direction = if leg1_qty >= Decimal::ZERO {
-                        PositionDirection::Long
+                    
+                    // FIXED LOGIC: Infer direction from available legs
+                    // If Leg 1 has size, its sign dictates direction (Long Leg1 = Long Strategy)
+                    // If Leg 1 is flat, Leg 2's sign dictates direction (Short Leg2 = Long Strategy)
+                    let direction = if leg1_qty.abs() > threshold {
+                         if leg1_qty >= Decimal::ZERO {
+                            PositionDirection::Long
+                        } else {
+                            PositionDirection::Short
+                        }
                     } else {
-                        PositionDirection::Short
+                        // Leg 1 is flat, infer from Leg 2
+                        // Long Strategy = Short Leg 2, so if Leg 2 is Short (neg), we are Long
+                        if leg2_qty < Decimal::ZERO {
+                            PositionDirection::Long
+                        } else {
+                            PositionDirection::Short
+                        }
                     };
 
                     info!(
-                        "Detected existing position: leg1={}, leg2={}, direction={}. Transitioning to InPosition.",
+                        "Detected existing position: leg1={}, leg2={}, inferred intent={}. Transitioning to InPosition.",
                         leg1_qty, leg2_qty, direction
                     );
 
@@ -2505,8 +2460,9 @@ impl DualLegStrategy {
                     .unstable_state
                     .get_and_reset_suppressed_count();
                 warn!(
-                    "Dropping tick due to unstable state: {:?} (Suppressed: {})",
-                    self.state, suppressed
+                    state = ?self.state,
+                    suppressed = suppressed,
+                    "Dropping tick due to unstable state"
                 );
             }
             return;
@@ -2543,8 +2499,10 @@ impl DualLegStrategy {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
                 warn!(
-                    "Dropping tick for {}: {} (Suppressed: {})",
-                    leg1.symbol, e, suppressed
+                    symbol = %leg1.symbol,
+                    error = %e,
+                    suppressed = suppressed,
+                    "Dropping tick due to validation error"
                 );
             }
             return;
@@ -2554,8 +2512,10 @@ impl DualLegStrategy {
             if self.throttler.tick_age.should_log() {
                 let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
                 warn!(
-                    "Dropping tick for {}: {} (Suppressed: {})",
-                    leg2.symbol, e, suppressed
+                    symbol = %leg2.symbol,
+                    error = %e,
+                    suppressed = suppressed,
+                    "Dropping tick due to validation error"
                 );
             }
             return;
@@ -2650,7 +2610,7 @@ impl DualLegStrategy {
                     // CB-2 FIX: Use JoinSet for structured concurrency
                     self.active_executions.spawn(async move {
                         let result = match engine
-                            .execute_basis_entry(&pair, leg1_qty, hedge_qty, p1, p2)
+                            .execute_basis_entry(&pair, PositionDirection::Long, leg1_qty, hedge_qty, p1, p2)
                             .await
                         {
                             Ok(res) => res,
@@ -2705,27 +2665,8 @@ impl DualLegStrategy {
 
                     // CB-2 FIX: Use JoinSet for structured concurrency
                     self.active_executions.spawn(async move {
-                        // Short Entry: Sell Leg 1, Buy Leg 2 (Inverse of Basis Entry)
-                        // execute_basis_entry does Buy L1 / Sell L2. We need a new method or use execute_order directly.
-                        // For now, assuming execute_basis_entry can be adapted or we use raw execution.
-                        // Actually, let's look at ExecutionEngine. It likely has execute_basis_entry hardcoded to Buy/Sell.
-                        // We should probably add execute_basis_short_entry to ExecutionEngine or make it generic.
-                        // Given constraints, I'll use execute_basis_exit logic but for entry? No, that's closing.
-                        // Let's assume for this fix we need to implement the short logic manually here or add a method.
-                        // Since I can't easily add a method to ExecutionEngine without seeing it all, I'll use the raw executor if possible,
-                        // but ExecutionEngine wraps it.
-                        //
-                        // WAIT: ExecutionEngine is a struct in this file. I can modify it!
-                        // But for now, let's see if I can reuse execute_basis_entry with swapped sides?
-                        // execute_basis_entry(pair, qty1, qty2, p1, p2) -> Buys Spot, Sells Future.
-                        // Short Entry -> Sell Spot, Buy Future.
-                        //
-                        // Let's implement `execute_basis_short_entry` in ExecutionEngine later.
-                        // For now, I will assume `execute_basis_short_entry` exists or I will add it.
-                        // To avoid compilation error, I must add it to ExecutionEngine.
-
                         let result = match engine
-                            .execute_basis_short_entry(&pair, leg1_qty, hedge_qty, p1, p2)
+                            .execute_basis_entry(&pair, PositionDirection::Short, leg1_qty, hedge_qty, p1, p2)
                             .await
                         {
                             Ok(res) => res,

@@ -225,8 +225,27 @@ impl AlpacaClient {
         // N-1 FIX: Use helper to parse side
         let order_side = Self::parse_order_side(side);
 
+        // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional
+        // Floor the quantity for limit orders to avoid OrderRejected errors
+        // This may leave "dust" (fractional remainder) in the account
+        let adjusted_size = match price {
+            Some(_) => {
+                let floored = size.floor();
+                if floored.is_zero() && !size.is_zero() {
+                    // If flooring results in 0 but we had a fractional amount,
+                    // skip the order entirely to avoid 0-quantity rejection
+                    return Err(ExchangeError::Other(format!(
+                        "Cannot place limit order for fractional quantity {} (less than 1 share)",
+                        size
+                    )));
+                }
+                floored
+            }
+            None => size, // Market orders allow fractional shares
+        };
+
         // CB-2 FIX: Propagate conversion errors instead of silent fallback
-        let qty_num = utils::decimal_to_num(size)
+        let qty_num = utils::decimal_to_num(adjusted_size)
             .map_err(|e| ExchangeError::Other(format!("Failed to convert quantity: {}", e)))?;
 
         // N-2 FIX: Convert limit price if present
@@ -290,13 +309,20 @@ impl AlpacaClient {
                 match client.issue::<alpaca_position::Get>(&sym).await {
                     Ok(position) => {
                         // CB-2 FIX: Propagate conversion error
-                        let qty = utils::num_to_decimal(&position.quantity).map_err(|e| {
+                        let mut qty = utils::num_to_decimal(&position.quantity).map_err(|e| {
                             ExchangeError::Other(format!(
                                 "Failed to convert position quantity: {}",
                                 e
                             ))
                         })?;
-                        debug!(symbol = %symbol, quantity = %qty, "Position found");
+
+                        // ALPACA FIX: Negate quantity for short positions
+                        // Alpaca API returns positive quantity + side="short"
+                        if let alpaca_position::Side::Short = position.side {
+                            qty = -qty;
+                        }
+
+                        debug!(symbol = %symbol, quantity = %qty, side = ?position.side, "Position found");
                         Ok(qty)
                     }
                     Err(e) => {
