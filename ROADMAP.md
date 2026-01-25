@@ -20,6 +20,19 @@ Technical debt and enhancement tracking for algopioneer.
 
 ---
 
+### Alpaca: Market Order Fallback for Small Quantities
+**Status**: Deferred (workaround: use sufficient `order_size`)
+
+**Problem**: Alpaca limit orders require whole shares. When `order_size / price < 1`, limit orders fail.
+
+**Current Workaround**: Set `order_size` >= max stock price in pair (e.g., $500+ for AXP at $360).
+
+**Future Enhancement**: Modify `alpaca_client.rs` to automatically fall back to market orders when floored quantity < 1 share. This would allow smaller notional sizes without failures.
+
+**Location**: [alpaca_client.rs](file:///home/bob/dev/algopioneer/src/exchange/alpaca/alpaca_client.rs#L231-L245)
+
+---
+
 ## Medium Priority
 
 ### N-4: SmallVec for Trade Returns
