@@ -20,6 +20,7 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
   - **Alpaca**: Full end-to-end testing using Alpaca Paper API.
 - **Moving Average Crossover**: Classic trend-following strategy
 - **Pairs Trading**: Statistical arbitrage with Z-score analysis
+- **Dynamic Hedge Ratios**: Kalman Filter for adaptive beta estimation
 - **Portfolio Mode**: Multi-strategy execution with supervisor pattern
 
 ### Research & Discovery
@@ -162,11 +163,29 @@ cargo run --release -- portfolio --config discovered_pairs.json --paper
 
 ### 5. Backtesting
 
-Run a backtest using historical data (currently configured for the Moving Average strategy).
+Run backtests with configurable strategies and data sources.
 
 ```bash
-cargo run --release -- backtest
+# Moving Average strategy with synthetic data
+cargo run --release -- backtest --strategy moving_average --symbols BTC-USD --duration 60 --synthetic
+
+# Dual-leg strategy backtest
+cargo run --release -- backtest --strategy dual_leg --symbols BTC-USD,ETH-USD --duration 60 --synthetic
+
+# Output results to JSON
+cargo run --release -- backtest --strategy moving_average --symbols BTC-USD --synthetic --output-dir ./results
 ```
+
+**Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--strategy` | `moving_average` | Strategy: "moving_average" or "dual_leg" |
+| `--exchange` | `coinbase` | Exchange: "coinbase" or "alpaca" |
+| `--symbols` | Required | Comma-separated symbols (2 for dual_leg) |
+| `--duration` | `60` | Backtest duration in minutes |
+| `--synthetic` | `false` | Use synthetic data for testing |
+| `--output-dir` | None | Directory for JSON output |
+| `--initial-capital` | `10000.0` | Initial capital (USD) |
 
 ## Project Structure
 
@@ -221,6 +240,11 @@ algopioneer/
 │   │   ├── moving_average.rs   # Moving average crossover strategy
 │   │   ├── supervisor.rs       # Strategy supervisor with panic recovery
 │   │   └── tick_router.rs      # Market data routing with backpressure
+│   ├── math/                   # Mathematical utilities
+│   │   ├── mod.rs              # Math module exports
+│   │   └── kalman.rs           # Kalman filter for dynamic hedge ratios
+│   ├── backtest/               # Backtesting engine
+│   │   └── mod.rs              # Deterministic backtest with Decimal arithmetic
 │   ├── resilience/             # Resilience patterns
 │   │   ├── mod.rs              # Resilience exports
 │   │   └── circuit_breaker.rs  # Circuit breaker with RwLock
@@ -242,6 +266,8 @@ algopioneer/
 - **Execution Engine**: Order placement with circuit breaker and retry logic
 - **Recovery System**: Queue-based recovery with exponential backoff
 - **Market Data**: Pluggable providers (Coinbase WebSocket, Synthetic)
+- **Mathematical Utilities**: Kalman filter for dynamic hedge ratio estimation
+- **Backtesting**: Deterministic simulation with fixed-point arithmetic
 - **Observability**: OpenTelemetry traces for production monitoring
 - **Health Checks**: Kubernetes-ready `/health` endpoint
 
