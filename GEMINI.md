@@ -89,6 +89,11 @@ Production-grade modular application with dependency injection, trait-based abst
 *   **Resilience (`src/resilience/`):**
     *   `mod.rs`: Resilience module re-exports
     *   `circuit_breaker.rs`: Circuit breaker pattern with RwLock-based implementation
+*   **Math (`src/math/`):**
+    *   `mod.rs`: Mathematical utilities module re-exports
+    *   `kalman.rs`: Kalman Filter for dynamic hedge ratio estimation in pairs trading
+*   **Backtest (`src/backtest/`):**
+    *   `mod.rs`: Deterministic backtesting engine with fixed-point arithmetic (`Decimal`) for reproducible results
 *   **State (`src/state/`):**
     *   `mod.rs`: Application state types (`PositionDetail`, `TradeState`)
 *   **Observability (`src/observability.rs`):** OpenTelemetry integration for distributed tracing
@@ -118,6 +123,7 @@ Production-grade modular application with dependency injection, trait-based abst
 *   **Distributed Tracing:** OpenTelemetry/Jaeger integration for production observability
 *   **Rate Limiting:** `governor` for API rate limit compliance
 *   **Memory Optimization:** jemalloc allocator for reduced fragmentation
+*   **Dynamic Hedge Ratios:** Kalman Filter for adaptive pairs trading beta estimation
 
 # Building and Running
 
@@ -176,8 +182,11 @@ The application uses subcommands to control its behavior.
 
 *   **Backtest:**
     ```bash
-    cargo run --release -- backtest
+    cargo run --release -- backtest --strategy moving_average --symbols BTC-USD --duration 60 --synthetic
     ```
+    *   Use `--strategy dual_leg` for dual-leg backtesting with two symbols.
+    *   Use `--synthetic` to generate synthetic data for CI testing.
+    *   Use `--output-dir ./results` to specify JSON output directory.
 
 **Test:**
 
