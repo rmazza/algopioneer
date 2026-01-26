@@ -105,7 +105,7 @@ impl AlpacaClient {
         // N-2 FIX: Const assertion ensures compile-time safety
         const RATE_LIMIT_RPS: u32 = 3;
         const _: () = assert!(RATE_LIMIT_RPS > 0, "Rate limit must be positive");
-        
+
         // PRINCIPAL FIX: Paranoia - Handle potential future dynamic case safely
         let rps = NonZeroU32::new(RATE_LIMIT_RPS).unwrap_or(NonZeroU32::new(1).unwrap());
         let quota = Quota::per_second(rps);
@@ -457,24 +457,28 @@ impl AlpacaClient {
 
     /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
     fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
-         match e {
-             RequestError::Endpoint(ref _e) => {
-                 // apca crate endpoint errors are generic, hard to match specifics without string parsing
-                 // checking for rate limits (429) or timeouts
-                 let s = e.to_string();
-                 if s.contains("429") || s.to_lowercase().contains("rate limit") {
-                     ExchangeError::RateLimited(1000)
-                 } else if s.contains("500") || s.contains("502") || s.contains("503") || s.contains("504") {
-                      ExchangeError::ExchangeInternal(s)
-                 } else if s.contains("401") || s.contains("403") {
-                     ExchangeError::Configuration(s)
-                 } else {
-                     ExchangeError::OrderRejected(s)
-                 }
-             }
-             // Fallback for other variants (Http, Json, etc) that we might have guessed wrong
-             _ => ExchangeError::Other(e.to_string()),
-         }
+        match e {
+            RequestError::Endpoint(ref _e) => {
+                // apca crate endpoint errors are generic, hard to match specifics without string parsing
+                // checking for rate limits (429) or timeouts
+                let s = e.to_string();
+                if s.contains("429") || s.to_lowercase().contains("rate limit") {
+                    ExchangeError::RateLimited(1000)
+                } else if s.contains("500")
+                    || s.contains("502")
+                    || s.contains("503")
+                    || s.contains("504")
+                {
+                    ExchangeError::ExchangeInternal(s)
+                } else if s.contains("401") || s.contains("403") {
+                    ExchangeError::Configuration(s)
+                } else {
+                    ExchangeError::OrderRejected(s)
+                }
+            }
+            // Fallback for other variants (Http, Json, etc) that we might have guessed wrong
+            _ => ExchangeError::Other(e.to_string()),
+        }
     }
 }
 

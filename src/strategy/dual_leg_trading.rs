@@ -2263,9 +2263,9 @@ impl DualLegStrategy {
                         // Since `self` is &mut, we can't spawn easily without invalidating references.
                         // FIX: Use timeout to prevent blocking indefinitely, OR accept that 100ms pause is ok?
                         // Let's use a timeout of 2 seconds. If it's slow, we time out and keep old state.
-                        
+
                         let check_future = self.execution_engine.client.check_market_hours();
-                        
+
                         match tokio::time::timeout(Duration::from_secs(2), check_future).await {
                              Ok(Ok(is_open)) => {
                                 if self.is_market_open != is_open {
@@ -2512,18 +2512,21 @@ impl DualLegStrategy {
         // MARKET HOURS CHECK
         // If market is closed, drop ticks to prevent "hallucinating" signals
         if !self.is_market_open {
-             // We can throttle this log if needed, but since we are dropping ticks, 
-             // maybe we want to know? Let's treat it as "Sync Issue" for throttling purposes?
-             // Or just reuse unstable_state throttle or create a new one?
-             // Reusing unstable_state simple for now.
-             if self.throttler.unstable_state.should_log() {
-                 let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
-                 warn!(
-                     suppressed = suppressed,
-                     "Market Closed - Dropping verification tick"
-                 );
-             }
-             return;
+            // We can throttle this log if needed, but since we are dropping ticks,
+            // maybe we want to know? Let's treat it as "Sync Issue" for throttling purposes?
+            // Or just reuse unstable_state throttle or create a new one?
+            // Reusing unstable_state simple for now.
+            if self.throttler.unstable_state.should_log() {
+                let suppressed = self
+                    .throttler
+                    .unstable_state
+                    .get_and_reset_suppressed_count();
+                warn!(
+                    suppressed = suppressed,
+                    "Market Closed - Dropping verification tick"
+                );
+            }
+            return;
         }
 
         // --- P1 FIX: Load Shedding ---
