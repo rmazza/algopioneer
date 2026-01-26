@@ -14,7 +14,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use apca::api::v2::asset;
 use apca::api::v2::order as alpaca_order;
@@ -229,20 +229,26 @@ impl AlpacaClient {
         // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional
         // Floor the quantity for limit orders to avoid OrderRejected errors
         // This may leave "dust" (fractional remainder) in the account
-        let adjusted_size = match price {
-            Some(_) => {
+        // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional.
+        // If we have a fractional quantity < 1 share, we MUST use a Market order.
+        let (adjusted_size, final_price) = match price {
+            Some(p) => {
                 let floored = size.floor();
                 if floored.is_zero() && !size.is_zero() {
-                    // If flooring results in 0 but we had a fractional amount,
-                    // skip the order entirely to avoid 0-quantity rejection
-                    return Err(ExchangeError::Other(format!(
-                        "Cannot place limit order for fractional quantity {} (less than 1 share)",
-                        size
-                    )));
+                    // Fractional quantity < 1 (e.g. 0.602)
+                    // We cannot use Limit order. Fallback to Market order.
+                    warn!(
+                        "Falling back to Market order for fractional quantity {} (less than 1 share). Limit price {:?} ignored.",
+                        size, p
+                    );
+                    (size, None) // Pass full size, remove price -> Market Order
+                } else {
+                    // Quantity >= 1, so we can use Limit order with floored quantity.
+                    // This leaves "dust" but ensures safety.
+                    (floored, Some(p))
                 }
-                floored
             }
-            None => size, // Market orders allow fractional shares
+            None => (size, None), // Already Market order, allow fractional
         };
 
         // CB-2 FIX: Propagate conversion errors instead of silent fallback
@@ -251,7 +257,7 @@ impl AlpacaClient {
 
         // N-2 FIX: Convert limit price if present
         // ALPACA FIX: Round prices to 2 decimal places for US equities (tick size = $0.01)
-        let limit_num = match price {
+        let limit_num = match final_price {
             Some(p) => {
                 let rounded = p.round_dp(2);
                 Some(utils::decimal_to_num(rounded).map_err(|e| {
