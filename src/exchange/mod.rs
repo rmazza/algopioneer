@@ -333,6 +333,20 @@ pub trait Executor: Send + Sync {
         // Fill qty is unknown - callers should check state.is_terminal() rather than qty
         Ok((crate::orders::OrderState::Filled, Decimal::ZERO, None))
     }
+
+    /// Check if the market is currently open for trading.
+    ///
+    /// # Returns
+    /// - `Ok(true)`: Market is open, trading allowed.
+    /// - `Ok(false)`: Market is closed, trading should pause.
+    /// - `Err(e)`: Failed to check status (network error, etc).
+    ///
+    /// # Default Implementation
+    /// Returns `true` (market always open), suitable for crypto exchanges.
+    /// Equity exchanges (Alpaca) MUST override this.
+    async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        Ok(true)
+    }
 }
 
 /// Extended exchange client trait with full capabilities

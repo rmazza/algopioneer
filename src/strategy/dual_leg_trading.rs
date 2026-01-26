@@ -1794,6 +1794,10 @@ pub struct DualLegStrategy {
     strategy_type: String,
     // STATE PERSISTENCE: Paper trading mode flag
     is_paper: bool,
+    // MARKET HOURS: Last time we checked market status
+    last_market_check: i64,
+    // MARKET HOURS: Current market status (true=open, false=closed)
+    is_market_open: bool,
 }
 
 impl DualLegStrategy {
@@ -1850,6 +1854,8 @@ impl DualLegStrategy {
             position_id: None,                              // STATE PERSISTENCE
             strategy_type: "pairs".to_string(),             // STATE PERSISTENCE (default)
             is_paper: false,                                // STATE PERSISTENCE (default)
+            last_market_check: 0,                           // MARKET HOURS
+            is_market_open: true,                           // MARKET HOURS (assume open initially)
         }
     }
 
@@ -2238,11 +2244,46 @@ impl DualLegStrategy {
         let mut latest_leg2: Option<Arc<MarketData>> = None;
         let mut dirty = false;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        // Market check interval: 60 seconds
+        let market_check_interval_ms = 60_000;
 
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     self.check_timeout();
+
+                    // Periodic Market Hours Check
+                    let now = self.clock.now_ts_millis();
+                    if now - self.last_market_check > market_check_interval_ms {
+                        self.last_market_check = now;
+                        // Don't await the check in the main loop! Spawn a check.
+                        // We use a separate task to avoid blocking the heartbeat tick.
+                        // We capture `execution_engine` (Arc) and report back via a channel or just rely on next tick?
+                        // Actually, simpler: we need to update `self.is_market_open`.
+                        // Since `self` is &mut, we can't spawn easily without invalidating references.
+                        // FIX: Use timeout to prevent blocking indefinitely, OR accept that 100ms pause is ok?
+                        // Let's use a timeout of 2 seconds. If it's slow, we time out and keep old state.
+                        
+                        let check_future = self.execution_engine.client.check_market_hours();
+                        
+                        match tokio::time::timeout(Duration::from_secs(2), check_future).await {
+                             Ok(Ok(is_open)) => {
+                                if self.is_market_open != is_open {
+                                    info!(
+                                        "Market Status Changed: Open={} (was {})",
+                                        is_open, self.is_market_open
+                                    );
+                                    self.is_market_open = is_open;
+                                }
+                             }
+                             Ok(Err(e)) => {
+                                 warn!("Failed to check market hours: {}", e);
+                             }
+                             Err(_) => {
+                                 warn!("Market hours check timed out after 2s");
+                             }
+                        }
+                    }
                 }
                 Some(leg1_data) = leg1_rx.recv() => {
                     latest_leg1 = Some(leg1_data);
@@ -2466,6 +2507,23 @@ impl DualLegStrategy {
                 );
             }
             return;
+        }
+
+        // MARKET HOURS CHECK
+        // If market is closed, drop ticks to prevent "hallucinating" signals
+        if !self.is_market_open {
+             // We can throttle this log if needed, but since we are dropping ticks, 
+             // maybe we want to know? Let's treat it as "Sync Issue" for throttling purposes?
+             // Or just reuse unstable_state throttle or create a new one?
+             // Reusing unstable_state simple for now.
+             if self.throttler.unstable_state.should_log() {
+                 let suppressed = self.throttler.unstable_state.get_and_reset_suppressed_count();
+                 warn!(
+                     suppressed = suppressed,
+                     "Market Closed - Dropping verification tick"
+                 );
+             }
+             return;
         }
 
         // --- P1 FIX: Load Shedding ---

@@ -105,7 +105,10 @@ impl AlpacaClient {
         // N-2 FIX: Const assertion ensures compile-time safety
         const RATE_LIMIT_RPS: u32 = 3;
         const _: () = assert!(RATE_LIMIT_RPS > 0, "Rate limit must be positive");
-        let quota = Quota::per_second(NonZeroU32::new(RATE_LIMIT_RPS).expect("asserted above"));
+        
+        // PRINCIPAL FIX: Paranoia - Handle potential future dynamic case safely
+        let rps = NonZeroU32::new(RATE_LIMIT_RPS).unwrap_or(NonZeroU32::new(1).unwrap());
+        let quota = Quota::per_second(rps);
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Ok(Self {
@@ -197,9 +200,7 @@ impl AlpacaClient {
                 .client
                 .issue::<apca::api::v2::clock::Get>(&())
                 .await
-                .map_err(|e| {
-                    ExchangeError::Network(format!("Failed to check market hours: {}", e))
-                })?;
+                .map_err(Self::map_alpaca_error)?;
 
             if !clock.open {
                 return Err(ExchangeError::Other(
@@ -267,9 +268,7 @@ impl AlpacaClient {
         let order = client
             .issue::<alpaca_order::Create>(&request)
             .await
-            .map_err(|e| {
-                ExchangeError::OrderRejected(format!("{} order failed: {}", mode_str, e))
-            })?;
+            .map_err(Self::map_alpaca_error)?;
 
         let order_id = order.id.as_hyphenated().to_string();
 
@@ -381,6 +380,33 @@ impl AlpacaClient {
         .await
     }
 
+    /// Check if the market is currently open.
+    ///
+    /// Fetches `/v2/clock` from Alpaca API to determine market status.
+    /// Used by strategies to pause execution during market close.
+    pub async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        // Paper trading is 24/7 essentially (or at least we treat it as such for testing)
+        // BUT for "Simulating Reality", we should respect market hours if configured.
+        // However, Alpaca Paper API tracks real market hours basically.
+        // Let's rely on the API clock.
+        let clock = self
+            .client
+            .issue::<apca::api::v2::clock::Get>(&())
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        // Also check if we are in a "break" (e.g. early close)?
+        // For now, simple is_open check is sufficient.
+        debug!(
+            is_open = clock.open,
+            next_open = ?clock.next_open,
+            next_close = ?clock.next_close,
+            "Checked Alpaca market clock"
+        );
+
+        Ok(clock.open)
+    }
+
     /// Check if client is in paper/sandbox mode
     #[inline]
     fn is_paper(&self) -> bool {
@@ -411,10 +437,38 @@ impl AlpacaClient {
                 self.clock.now(),
             );
 
-            if let Err(e) = recorder.record(&record).await {
-                error!("Failed to record paper trade to CSV: {}", e);
-            }
+            // PRINCIPAL FIX: Spawn recording to avoid blocking order path
+            // This is fire-and-forget; logging failures shouldn't crash strategy
+            // Clone recorder arc to move into task
+            let recorder = recorder.clone();
+            tokio::spawn(async move {
+                if let Err(e) = recorder.record(&record).await {
+                    error!("Failed to record paper trade to CSV: {}", e);
+                }
+            });
         }
+    }
+
+    /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
+    fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
+         match e {
+             RequestError::Endpoint(ref _e) => {
+                 // apca crate endpoint errors are generic, hard to match specifics without string parsing
+                 // checking for rate limits (429) or timeouts
+                 let s = e.to_string();
+                 if s.contains("429") || s.to_lowercase().contains("rate limit") {
+                     ExchangeError::RateLimited(1000)
+                 } else if s.contains("500") || s.contains("502") || s.contains("503") || s.contains("504") {
+                      ExchangeError::ExchangeInternal(s)
+                 } else if s.contains("401") || s.contains("403") {
+                     ExchangeError::Configuration(s)
+                 } else {
+                     ExchangeError::OrderRejected(s)
+                 }
+             }
+             // Fallback for other variants (Http, Json, etc) that we might have guessed wrong
+             _ => ExchangeError::Other(e.to_string()),
+         }
     }
 }
 
@@ -451,6 +505,10 @@ impl Executor for AlpacaClient {
 
     async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
         AlpacaClient::get_position(self, symbol).await
+    }
+
+    async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        self.check_market_hours().await
     }
 }
 
