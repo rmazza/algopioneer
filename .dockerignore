@@ -47,3 +47,4 @@ test_*.rs
 # Other non-essential files
 deny.toml
 check_error.log
+.cargo/config.toml
