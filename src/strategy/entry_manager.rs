@@ -225,10 +225,7 @@ impl EntryStrategy for PairsManager {
                 // CF3 FIX: Enforce hard limits on price ratios
                 let ratio = v1 / v2;
                 if !(MIN_SAFE_PRICE_RATIO..=MAX_SAFE_PRICE_RATIO).contains(&ratio) {
-                    let count = self
-                        .precision_rejections
-                        .fetch_add(1, Ordering::Relaxed)
-                        + 1;
+                    let count = self.precision_rejections.fetch_add(1, Ordering::Relaxed) + 1;
                     crate::metrics::record_precision_rejection(&format!(
                         "{}/{}",
                         leg1.symbol, leg2.symbol
@@ -242,10 +239,7 @@ impl EntryStrategy for PairsManager {
 
                 // Log warning for ratios approaching the limit
                 if !(MIN_SAFE_PRICE_RATIO * 10.0..=MAX_SAFE_PRICE_RATIO / 10.0).contains(&ratio) {
-                    let count = self
-                        .precision_warnings
-                        .fetch_add(1, Ordering::Relaxed)
-                        + 1;
+                    let count = self.precision_warnings.fetch_add(1, Ordering::Relaxed) + 1;
                     crate::metrics::record_precision_warning(&format!(
                         "{}/{}",
                         leg1.symbol, leg2.symbol
