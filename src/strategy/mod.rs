@@ -1,4 +1,5 @@
 pub mod dual_leg_trading;
+pub mod entry_manager;
 pub mod exit_policy;
 pub mod moving_average;
 
