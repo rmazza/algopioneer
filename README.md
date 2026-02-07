@@ -43,6 +43,7 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 - ✅ **WebSocket Stability**: Proper task cleanup preventing resource leaks
 - ✅ **Trade Recording**: Modular trade logging to CSV or DynamoDB (via feature flag)
 - ✅ **Multi-Exchange Architecture**: Extensible design supporting Coinbase (Crypto), Kraken (Experimental), and Alpaca (US Equities).
+- ✅ **Autopilot Mode**: Self-healing mechanism that automatically discovers new pairs, compares them with active config, and redeploys if improvements are found (`autopilot.sh`).
 
 ## Prerequisites
 
@@ -184,8 +185,22 @@ cargo run --release -- backtest --strategy moving_average --symbols BTC-USD --sy
 | `--symbols` | Required | Comma-separated symbols (2 for dual_leg) |
 | `--duration` | `60` | Backtest duration in minutes |
 | `--synthetic` | `false` | Use synthetic data for testing |
-| `--output-dir` | None | Directory for JSON output |
+| `--output-dir` | None | Directory for JSON output. Use `--output-dir ./results` to specify JSON output directory. |
 | `--initial-capital` | `10000.0` | Initial capital (USD) |
+
+### 6. Autopilot (Self-Healing & Rebalancing)
+
+Automatically discover new pairs, compare them with the current configuration, and redeploy if better pairs are found.
+
+```bash
+./autopilot.sh
+```
+
+**Workflow:**
+1.  Fetches live market data (Alpaca/Coinbase).
+2.  Runs `discover-pairs` in a disposable Docker container.
+3.  Compares new pairs vs. current using `compare_pairs.py`.
+4.  If improvements are found (>5% better metrics), updates config and redeploys via `deploy_alpaca.sh`.
 
 ## Project Structure
 
@@ -256,7 +271,10 @@ algopioneer/
 │   ├── integration_test.rs     # Integration tests with mock executor
 │   └── proptest_financial.rs   # Property-based tests for financial math
 ├── Cargo.toml                  # Dependencies and project metadata
-└── .env                        # API credentials (not committed)
+├── .env                        # API credentials (not committed)
+├── autopilot.sh                # Autopilot rebalancing script
+├── deploy_alpaca.sh            # Alpaca deployment script
+└── compare_pairs.py            # Pair comparison logic for Autopilot
 ```
 
 ### Key Components

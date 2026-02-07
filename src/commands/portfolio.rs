@@ -128,6 +128,9 @@ pub async fn run_portfolio(
                     basis_exit_bps: rust_decimal_macros::dec!(2.0),
                     max_leverage: rust_decimal_macros::dec!(3.0),
                     drift_recalc_interval: 10_000,
+                    // SAFETY GUARD: Position limits to prevent unhedged accumulation
+                    max_position_usd: Some(rust_decimal_macros::dec!(50_000)),
+                    max_imbalance_ratio: rust_decimal_macros::dec!(0.5),
                 };
 
                 // Create base strategy
@@ -209,6 +212,9 @@ pub async fn run_portfolio(
             basis_exit_bps: rust_decimal_macros::dec!(2.0),
             max_leverage: rust_decimal_macros::dec!(3.0),
             drift_recalc_interval: 10_000,
+            // SAFETY GUARD: Position limits to prevent unhedged accumulation
+            max_position_usd: Some(rust_decimal_macros::dec!(50_000)),
+            max_imbalance_ratio: rust_decimal_macros::dec!(0.5),
         };
 
         // Create Strategy

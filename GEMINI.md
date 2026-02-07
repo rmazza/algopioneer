@@ -124,6 +124,7 @@ Production-grade modular application with dependency injection, trait-based abst
 *   **Rate Limiting:** `governor` for API rate limit compliance
 *   **Memory Optimization:** jemalloc allocator for reduced fragmentation
 *   **Dynamic Hedge Ratios:** Kalman Filter for adaptive pairs trading beta estimation
+*   **Autopilot Mode:** Self-healing mechanism that automatically discovers new pairs, compares them with active config, and redeploys if improvements are found (`autopilot.sh`)
 
 # Building and Running
 
@@ -206,11 +207,16 @@ cargo test --test integration_test
 cargo run --example optimize_pairs
 ```
 
+*   **Autopilot (Self-Healing & Rebalancing):**
+    ```bash
+    ./autopilot.sh
+    ```
+
 # Development Conventions
 
 *   **Configuration:** API keys and secrets managed through `.env` file
+0/,   **Error Handling:** Typed errors with `thiserror` and `Result<T, Box<dyn Error + Send + Sync>>`
 *   **Asynchronous Operations:** `tokio` runtime for all async operations
-*   **Error Handling:** Typed errors with `thiserror` and `Result<T, Box<dyn Error + Send + Sync>>`
 *   **Precision:** `rust_decimal::Decimal` for all financial calculations
 *   **Dependency Injection:** Trait-based abstractions (`Executor`, `ExchangeClient`, `MarketDataProvider`, `ExitPolicy`, `WebSocketProvider`)
 *   **Testing:** Mock implementations via `mockall` for offline testing; `proptest` for property-based testing

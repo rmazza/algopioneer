@@ -1798,6 +1798,10 @@ pub struct DualLegStrategy {
     last_market_check: i64,
     // MARKET HOURS: Current market status (true=open, false=closed)
     is_market_open: bool,
+    // SAFETY GUARD: Maximum position value per symbol in USD
+    max_position_usd: Option<Decimal>,
+    // SAFETY GUARD: Maximum allowed imbalance ratio between legs
+    max_imbalance_ratio: Decimal,
 }
 
 impl DualLegStrategy {
@@ -1856,6 +1860,8 @@ impl DualLegStrategy {
             is_paper: false,                                // STATE PERSISTENCE (default)
             last_market_check: 0,                           // MARKET HOURS
             is_market_open: true,                           // MARKET HOURS (assume open initially)
+            max_position_usd: None,                         // SAFETY GUARD (set via builder)
+            max_imbalance_ratio: dec!(0.5),                 // SAFETY GUARD (default 50%)
         }
     }
 
@@ -1886,6 +1892,22 @@ impl DualLegStrategy {
         self.position_id = Some(position_id.clone());
         self.strategy_type = position_id.split(':').next().unwrap_or("pairs").to_string();
         self.is_paper = is_paper;
+        self
+    }
+
+    /// Configure safety guards to prevent unhedged position accumulation.
+    ///
+    /// # Arguments
+    /// * `max_position_usd` - Maximum USD value per symbol before blocking new entries
+    /// * `max_imbalance_ratio` - Maximum allowed imbalance ratio before halting on reconcile
+    #[must_use]
+    pub fn with_safety_guards(
+        mut self,
+        max_position_usd: Option<Decimal>,
+        max_imbalance_ratio: Decimal,
+    ) -> Self {
+        self.max_position_usd = max_position_usd;
+        self.max_imbalance_ratio = max_imbalance_ratio;
         self
     }
 
@@ -2623,6 +2645,26 @@ impl DualLegStrategy {
                     leg2_entry_price, new_leg2_price
                 );
 
+                // SAFETY GUARD: Check for imbalance when prices become available
+                let leg1_value = *leg1_qty * new_leg1_price;
+                let leg2_value = *leg2_qty * new_leg2_price;
+                let total_value = leg1_value + leg2_value;
+
+                if total_value > Decimal::ZERO {
+                    let imbalance = (leg1_value - leg2_value).abs() / total_value;
+                    if imbalance > self.max_imbalance_ratio {
+                        error!(
+                            "CRITICAL: Position imbalance detected after reconcile! \
+                            Leg1 Value: ${:.2}, Leg2 Value: ${:.2}, Imbalance: {:.1}% (max: {:.1}%). \
+                            Halting to prevent further damage. Manual intervention required.",
+                            leg1_value, leg2_value, imbalance * dec!(100), self.max_imbalance_ratio * dec!(100)
+                        );
+                        crate::metrics::record_strategy_halted("dual_leg", &self.pair_name);
+                        self.state = StrategyState::Halted;
+                        return;
+                    }
+                }
+
                 // Note: derefs needed because if let bindings are references
                 self.state = StrategyState::InPosition {
                     direction: *direction,
@@ -2930,6 +2972,14 @@ pub struct DualLegLiveConfig {
     /// Interval (in ticks) for recalculating running sums to prevent f64 drift (default: 10_000)
     /// Guidance: For 1000 ticks/sec, use 10_000 (10s). For 1 tick/min, use 1_000 (~17 hours).
     pub drift_recalc_interval: u64,
+    // SAFETY GUARD: Maximum position value in USD per symbol before halting
+    /// Maximum USD value of position per symbol. If exceeded, new entries are blocked.
+    /// Set to None for no limit (DANGEROUS for production). Default: 50_000
+    pub max_position_usd: Option<Decimal>,
+    // SAFETY GUARD: Maximum allowed imbalance ratio between legs before halting
+    /// If |leg1_value - leg2_value| / (leg1_value + leg2_value) > this, halt on reconcile.
+    /// Default: 0.5 (50% imbalance triggers halt)
+    pub max_imbalance_ratio: Decimal,
 }
 
 /// N-1 FIX: Default implementation with production-ready values
@@ -2951,6 +3001,8 @@ impl Default for DualLegLiveConfig {
             basis_exit_bps: dec!(2.0),
             max_leverage: dec!(3.0),
             drift_recalc_interval: 10_000,
+            max_position_usd: Some(dec!(50_000)),
+            max_imbalance_ratio: dec!(0.5),
         }
     }
 }
@@ -3070,6 +3122,12 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
             };
             strategy = strategy.with_state_store(store.clone(), strategy_type, self.is_paper);
         }
+
+        // SAFETY GUARD: Wire up position limits and imbalance detection
+        strategy = strategy.with_safety_guards(
+            self.config.max_position_usd,
+            self.config.max_imbalance_ratio,
+        );
 
         strategy
     }

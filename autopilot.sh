@@ -8,7 +8,7 @@ NEW_CONFIG="$APP_DIR/discovered_pairs_new.json"
 COMPARE_SCRIPT="$APP_DIR/compare_pairs.py"
 DEPLOY_SCRIPT="$APP_DIR/deploy_alpaca.sh"
 LOG_FILE="$APP_DIR/autopilot.log"
-IMAGE="756471705399.dkr.ecr.us-east-1.amazonaws.com/algopioneer:v1.6.0"
+IMAGE="756471705399.dkr.ecr.us-east-1.amazonaws.com/algopioneer:v1.7.0"
 
 # Helper for logging
 log() {
