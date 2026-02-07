@@ -1,4 +1,4 @@
-use algopioneer::strategy::dual_leg_trading::*;
+use algopioneer::strategy::dual_leg::*;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use mockall::mock;

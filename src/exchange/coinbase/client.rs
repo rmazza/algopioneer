@@ -10,7 +10,7 @@ use crate::coinbase::{AppEnv, CoinbaseClient};
 use crate::exchange::{
     Candle, ExchangeClient, ExchangeConfig, ExchangeError, ExchangeId, Executor, Granularity,
 };
-use crate::strategy::dual_leg_trading::OrderSide;
+use crate::strategy::dual_leg::OrderSide;
 
 /// Coinbase exchange client implementing the ExchangeClient trait
 pub struct CoinbaseExchangeClient {

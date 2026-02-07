@@ -9,6 +9,7 @@
 // New recorder infrastructure
 pub mod csv_recorder;
 pub mod recorder;
+pub mod throttle;
 pub mod tracing_recorder;
 
 #[cfg(feature = "dynamodb")]

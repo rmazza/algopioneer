@@ -8,7 +8,7 @@
 //! ```ignore
 //! use algopioneer::discovery::{discover_and_optimize, DiscoveryConfig, DiscoveryDataSource};
 //! use algopioneer::coinbase::CoinbaseClient;
-//! use algopioneer::strategy::dual_leg_trading::SystemClock;
+//! use algopioneer::strategy::dual_leg::SystemClock;
 //!
 //! let config = DiscoveryConfig::default();
 //! let mut client = CoinbaseClient::new(AppEnv::Live)?;

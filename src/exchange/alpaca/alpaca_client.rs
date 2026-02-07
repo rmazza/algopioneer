@@ -5,7 +5,7 @@
 
 use crate::coinbase::AppEnv;
 use crate::logging::{TradeRecord, TradeRecorder, TradeSide};
-use crate::strategy::dual_leg_trading::{Clock, SystemClock};
+use crate::strategy::dual_leg::{Clock, SystemClock};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};

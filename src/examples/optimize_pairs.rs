@@ -8,7 +8,7 @@
 //!   cargo run --example optimize_pairs -- --mock  # Use mock data
 
 use algopioneer::coinbase::{AppEnv, CoinbaseClient};
-use algopioneer::strategy::dual_leg_trading::{EntryStrategy, MarketData, PairsManager};
+use algopioneer::strategy::dual_leg::{EntryStrategy, MarketData, PairsManager};
 use algopioneer::strategy::Signal;
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};

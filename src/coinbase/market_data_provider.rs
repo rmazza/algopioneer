@@ -1,5 +1,5 @@
 use crate::coinbase::websocket::CoinbaseWebsocket;
-use crate::strategy::dual_leg_trading::MarketData;
+use crate::strategy::dual_leg::MarketData;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::error::Error;

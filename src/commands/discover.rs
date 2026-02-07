@@ -9,7 +9,7 @@ use crate::discovery::config::{
 use crate::discovery::{discover_and_optimize, DiscoveryConfig};
 use crate::exchange::alpaca::AlpacaClient;
 use crate::exchange::coinbase::{AppEnv, CoinbaseClient};
-use crate::strategy::dual_leg_trading::SystemClock;
+use crate::strategy::dual_leg::SystemClock;
 
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;

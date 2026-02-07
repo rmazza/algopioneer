@@ -1,0 +1,16 @@
+[33mcommit d35caf325d56b98441277364dd9ec6a63994aa0c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mdevelop[m[33m, [m[1;33mtag: [m[1;33mv1.7.0[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/develop[m[33m, [m[1;32mmain[m[33m)[m
+Author: Gemini <gemini@google.com>
+Date:   Fri Feb 6 19:04:06 2026 -0700
+
+    chore: bump version to v1.7.0
+
+[33mcommit 03e5ac2f35420383f3d8e4bbfa4f1c90af29bc7c[m
+Author: Gemini <gemini@google.com>
+Date:   Fri Feb 6 13:01:20 2026 -0700
+
+    feat: Implement Autopilot and Monitoring
+    
+    - Added autopilot.sh and compare_pairs.py for autonomous rebalancing
+    - Added terraform/monitoring.tf for CloudWatch alarms and SNS
+    - Updated terraform/main.tf and .dockerignore
+    - Cleaned up old discovered_pairs JSON files

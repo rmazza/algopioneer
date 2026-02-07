@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::coinbase::websocket::CoinbaseWebsocket;
 use crate::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
-use crate::strategy::dual_leg_trading::MarketData;
+use crate::strategy::dual_leg::MarketData;
 
 /// Coinbase WebSocket provider implementing the WebSocketProvider trait
 pub struct CoinbaseWebSocketProvider {

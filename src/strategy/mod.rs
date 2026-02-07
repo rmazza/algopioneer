@@ -1,10 +1,5 @@
-pub mod dual_leg_trading;
-pub mod entry_manager;
-pub mod execution;
-pub mod exit_policy;
+pub mod dual_leg;
 pub mod moving_average;
-pub mod throttle;
-pub mod validators;
 
 pub mod supervisor;
 pub mod tick_router;
@@ -16,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 // Re-export commonly used types
-pub use dual_leg_trading::MarketData;
+pub use dual_leg::MarketData;
 
 /// Represents a trading signal.
 #[derive(Debug, PartialEq, Clone, Copy)]

@@ -16,6 +16,11 @@
 //! The strategy enforces strict risk checks via `RiskMonitor::calc_hedge_ratio` to prevent over-leveraging
 //! and ensure proper hedging.
 
+// Declare submodules
+pub mod entry;
+pub mod execution;
+pub mod exit;
+
 use crate::coinbase::CoinbaseClient;
 use crate::strategy::Signal;
 use async_trait::async_trait;
@@ -112,8 +117,8 @@ const MAX_ALLOWED_LATENCY_MS: i64 = 100;
 const UNKNOWN_ENTRY_PRICE: Decimal = dec!(-1.0);
 
 // --- Logging Utilities ---
-// LogThrottle and DualLegLogThrottler moved to throttle.rs
-pub use crate::strategy::throttle::{DualLegLogThrottler, LogThrottle};
+// LogThrottle and DualLegLogThrottler moved to logging/throttle.rs
+pub use crate::logging::throttle::{DualLegLogThrottler, LogThrottle};
 
 // --- Financial Models ---
 
@@ -180,7 +185,7 @@ impl Clock for SystemClock {
 
 // --- AS2: Market Data Validation ---
 // Validators moved to validators.rs
-pub use crate::strategy::validators::{
+pub use crate::validation::validators::{
     AgeValidator, CompositeValidator, PriceValidator, TickValidator,
 };
 
@@ -228,7 +233,7 @@ impl Spread {
 // --- State Management ---
 
 // Exit policies moved to exit_policy.rs
-pub use crate::strategy::exit_policy::{
+pub use self::exit::{
     CompositeExitPolicy, ExitPolicy, MinimumProfitPolicy, PnlExitPolicy, StopLossPolicy,
 };
 
@@ -489,7 +494,7 @@ pub struct RecoveryTask {
 // --- Interfaces (Dependency Injection) ---
 
 // Entry managers moved to entry_manager.rs
-pub use crate::strategy::entry_manager::{BasisManager, EntryStrategy, PairsManager};
+pub use self::entry::{BasisManager, EntryStrategy, PairsManager};
 
 // Executor trait is now imported from crate::exchange
 
@@ -579,7 +584,7 @@ impl RiskMonitor {
 }
 
 // Execution engine and recovery worker moved to execution.rs
-pub use crate::strategy::execution::{
+pub use self::execution::{
     perform_recovery_with_backoff, ExecutionEngine, RecoveryWorker, TaskPriority,
 };
 

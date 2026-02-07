@@ -18,3 +18,4 @@ pub mod state;
 pub mod strategy;
 pub mod trading;
 pub mod types;
+pub mod validation;

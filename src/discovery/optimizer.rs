@@ -6,8 +6,8 @@
 use super::config::{DiscoveryConfig, GridSearchConfig, PortfolioPairConfig};
 use super::error::DiscoveryError;
 use super::filter::{filter_candidates, CandidatePair};
-use crate::strategy::dual_leg_trading::Clock;
-use crate::strategy::dual_leg_trading::{
+use crate::strategy::dual_leg::Clock;
+use crate::strategy::dual_leg::{
     DualLegConfig, EntryStrategy, MarketData, PairsManager, TransactionCostModel,
 };
 use crate::strategy::Signal;

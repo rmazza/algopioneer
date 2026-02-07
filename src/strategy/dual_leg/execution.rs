@@ -16,13 +16,14 @@ use crate::resilience::CircuitBreaker;
 use crate::types::OrderSide;
 
 // Re-export types from dual_leg_trading that are closely coupled
-pub use super::dual_leg_trading::{
+// Re-export types from parent module that are closely coupled
+pub use super::{
     ExecutionError, ExecutionResult, InstrumentPair, PositionDirection, RecoveryResult,
     RecoveryTask,
 };
 
 // Import LogThrottle for recovery task logging
-use super::dual_leg_trading::LogThrottle;
+use crate::logging::throttle::LogThrottle;
 
 // AS3: Priority system for recovery tasks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

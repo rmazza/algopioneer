@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use crate::exchange::{
     Candle, ExchangeClient, ExchangeConfig, ExchangeError, ExchangeId, Executor, Granularity,
 };
-use crate::strategy::dual_leg_trading::OrderSide;
+use crate::strategy::dual_leg::OrderSide;
 
 /// Kraken exchange client (stub implementation)
 pub struct KrakenExchangeClient {

@@ -253,7 +253,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::exchange::Executor;
-use crate::strategy::dual_leg_trading::OrderSide;
+use crate::strategy::dual_leg::OrderSide;
 use crate::strategy::{LiveStrategy, StrategyInput};
 
 /// Live trading wrapper for MovingAverageCrossover

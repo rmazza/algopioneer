@@ -15,7 +15,7 @@ use crate::strategy::Signal;
 use crate::types::MarketData;
 
 // Re-export TransactionCostModel and Spread as they're used by BasisManager
-pub use super::dual_leg_trading::{Spread, TransactionCostModel};
+pub use super::{Spread, TransactionCostModel};
 
 // CF3: Precision Safety Constants
 // Conservative bounds for f64 price ratio conversions to prevent precision loss

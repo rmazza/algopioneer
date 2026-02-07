@@ -1,6 +1,6 @@
 //! Configuration for pair discovery and optimization
 
-use crate::strategy::dual_leg_trading::DualLegConfig;
+use crate::strategy::dual_leg::DualLegConfig;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};

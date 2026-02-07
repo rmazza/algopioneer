@@ -1,4 +1,4 @@
-use crate::strategy::dual_leg_trading::MarketData;
+use crate::strategy::dual_leg::MarketData;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;

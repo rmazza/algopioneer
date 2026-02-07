@@ -7,7 +7,7 @@ use crate::cli::DualLegCliConfig;
 use crate::coinbase::websocket::CoinbaseWebsocket;
 use crate::exchange::coinbase::{AppEnv, CoinbaseClient};
 use crate::logging::{CsvRecorder, TradeRecorder};
-use crate::strategy::dual_leg_trading::{
+use crate::strategy::dual_leg::{
     BasisManager, DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType,
     PairsManager, RecoveryWorker, RiskMonitor, SystemClock, TransactionCostModel,
 };
@@ -102,7 +102,7 @@ pub async fn run_dual_leg_trading(
             let monitor =
                 RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DeltaNeutral);
             (
-                manager as Box<dyn crate::strategy::dual_leg_trading::EntryStrategy>,
+                manager as Box<dyn crate::strategy::dual_leg::EntryStrategy>,
                 monitor,
             )
         }
@@ -114,7 +114,7 @@ pub async fn run_dual_leg_trading(
             let monitor =
                 RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
             (
-                manager as Box<dyn crate::strategy::dual_leg_trading::EntryStrategy>,
+                manager as Box<dyn crate::strategy::dual_leg::EntryStrategy>,
                 monitor,
             )
         }

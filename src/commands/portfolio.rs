@@ -7,7 +7,7 @@ use crate::discovery::config::PortfolioPairConfig;
 use crate::exchange::coinbase::{AppEnv, CoinbaseClient, CoinbaseWebSocketProvider};
 use crate::exchange::ExchangeId;
 use crate::logging::{CsvRecorder, TradeRecorder};
-use crate::strategy::dual_leg_trading::{
+use crate::strategy::dual_leg::{
     DualLegLiveConfig, DualLegStrategyLive, DualLegStrategyType,
 };
 use crate::strategy::supervisor::StrategySupervisor;
