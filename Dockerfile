@@ -37,7 +37,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application
 COPY . .
-RUN cargo build --release --bin algopioneer
+RUN cargo build --release --bin algopioneer --features dynamodb
 
 # Strip binary
 RUN strip target/release/algopioneer
