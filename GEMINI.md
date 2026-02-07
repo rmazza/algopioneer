@@ -225,3 +225,8 @@ cargo run --example optimize_pairs
 *   **Performance:** RwLock for concurrent reads, DashMap for lock-free maps, jemalloc allocator, pre-allocated data structures, zero-copy with `bytes`
 *   **Logging:** `tracing` crate with structured logging (no `println!`)
 *   **Feature Flags:** Optional `dynamodb` feature for AWS DynamoDB trade recording
+
+
+# Important / Must Follow
+* Do not create God classes/objects
+

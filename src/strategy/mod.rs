@@ -3,6 +3,8 @@ pub mod entry_manager;
 pub mod execution;
 pub mod exit_policy;
 pub mod moving_average;
+pub mod throttle;
+pub mod validators;
 
 pub mod supervisor;
 pub mod tick_router;

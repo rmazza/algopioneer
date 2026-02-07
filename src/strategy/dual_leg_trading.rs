@@ -28,7 +28,7 @@ use std::error::Error;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
 // Re-export shared types for backward compatibility
@@ -112,75 +112,8 @@ const MAX_ALLOWED_LATENCY_MS: i64 = 100;
 const UNKNOWN_ENTRY_PRICE: Decimal = dec!(-1.0);
 
 // --- Logging Utilities ---
-
-/// A lightweight rate limiter for logging to prevent log storms.
-#[derive(Debug)]
-pub struct LogThrottle {
-    last_log_time: Option<Instant>,
-    suppressed_count: u64,
-    interval: Duration,
-}
-
-impl LogThrottle {
-    pub fn new(interval: Duration) -> Self {
-        Self {
-            last_log_time: None,
-            suppressed_count: 0,
-            interval,
-        }
-    }
-
-    /// Checks if a log should be emitted.
-    /// Returns true if the interval has passed since the last log.
-    /// If false, increments the suppressed counter.
-    pub fn should_log(&mut self) -> bool {
-        let now = Instant::now();
-        match self.last_log_time {
-            Some(last) => {
-                if now.duration_since(last) >= self.interval {
-                    self.last_log_time = Some(now);
-                    true
-                } else {
-                    self.suppressed_count += 1;
-                    false
-                }
-            }
-            None => {
-                self.last_log_time = Some(now);
-                true
-            }
-        }
-    }
-
-    /// Returns the number of suppressed logs since the last successful log, and resets the counter.
-    pub fn get_and_reset_suppressed_count(&mut self) -> u64 {
-        let count = self.suppressed_count;
-        self.suppressed_count = 0;
-        count
-    }
-}
-
-/// container for all log throttlers used in the strategy.
-#[derive(Debug)]
-pub struct DualLegLogThrottler {
-    pub unstable_state: LogThrottle,
-    pub tick_age: LogThrottle,
-    pub sync_issue: LogThrottle,
-    /// P1 FIX: Throttler for load shedding warnings (stale tick drops)
-    pub latency_drop: LogThrottle,
-}
-
-impl DualLegLogThrottler {
-    pub fn new(interval_secs: u64) -> Self {
-        let interval = Duration::from_secs(interval_secs);
-        Self {
-            unstable_state: LogThrottle::new(interval),
-            tick_age: LogThrottle::new(interval),
-            sync_issue: LogThrottle::new(interval),
-            latency_drop: LogThrottle::new(interval),
-        }
-    }
-}
+// LogThrottle and DualLegLogThrottler moved to throttle.rs
+pub use crate::strategy::throttle::{DualLegLogThrottler, LogThrottle};
 
 // --- Financial Models ---
 
@@ -246,80 +179,10 @@ impl Clock for SystemClock {
 // MarketData is now imported from crate::types
 
 // --- AS2: Market Data Validation ---
-
-/// Trait for validating market data ticks before processing.
-/// Enables testable and composable validation logic.
-pub trait TickValidator: Send + Sync {
-    /// Validates a market data tick against validation rules.
-    /// Returns Ok(()) if valid, Err(msg) if invalid.
-    fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String>;
-}
-
-/// Validates tick age to ensure data freshness.
-#[derive(Debug, Clone)]
-pub struct AgeValidator {
-    max_age_ms: i64,
-}
-
-impl AgeValidator {
-    pub fn new(max_age_ms: i64) -> Self {
-        Self { max_age_ms }
-    }
-}
-
-impl TickValidator for AgeValidator {
-    fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String> {
-        let age_ms = now_ts - tick.timestamp;
-        if age_ms > self.max_age_ms {
-            Err(format!(
-                "Tick age {}ms exceeds max {}ms",
-                age_ms, self.max_age_ms
-            ))
-        } else if age_ms < 0 {
-            Err(format!(
-                "Tick timestamp {} is in the future (now: {})",
-                tick.timestamp, now_ts
-            ))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// Validates tick price is positive and not NaN/Inf.
-#[derive(Debug, Clone)]
-pub struct PriceValidator;
-
-impl TickValidator for PriceValidator {
-    fn validate(&self, tick: &MarketData, _now_ts: i64) -> Result<(), String> {
-        if tick.price <= Decimal::ZERO {
-            Err(format!("Invalid price: {} must be positive", tick.price))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// Composite validator that chains multiple validators.
-/// Fails on first validation error.
-pub struct CompositeValidator {
-    validators: Vec<Box<dyn TickValidator>>,
-}
-
-impl CompositeValidator {
-    pub fn new(validators: Vec<Box<dyn TickValidator>>) -> Self {
-        Self { validators }
-    }
-}
-
-impl TickValidator for CompositeValidator {
-    fn validate(&self, tick: &MarketData, now_ts: i64) -> Result<(), String> {
-        for validator in &self.validators {
-            validator.validate(tick, now_ts)?;
-        }
-        Ok(())
-    }
-}
+// Validators moved to validators.rs
+pub use crate::strategy::validators::{
+    AgeValidator, CompositeValidator, PriceValidator, TickValidator,
+};
 
 /// Represents an open position.
 #[derive(Debug, Clone, PartialEq)]
