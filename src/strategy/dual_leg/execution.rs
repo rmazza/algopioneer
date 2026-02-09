@@ -94,17 +94,22 @@ impl RecoveryWorker {
                             let semaphore = self.semaphore.clone();
                             let span = tracing::info_span!("recovery_task", symbol = %task.symbol);
 
+                            // MC-2 FIX: Acquire semaphore BEFORE spawning to prevent task explosion.
+                            // Previously, unlimited tasks could be spawned and all wait for permits.
+                            // Now we apply backpressure at the channel level by blocking here.
+                            let permit = match semaphore.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    // Semaphore closed - worker shutting down
+                                    info!("Semaphore closed, dropping recovery task for {}", task.symbol);
+                                    continue;
+                                }
+                            };
+
                             active_recoveries.spawn(
                                 async move {
-                                    // Acquire semaphore permit (RAII: released when dropped)
-                                    let _permit = match semaphore.acquire_owned().await {
-                                        Ok(p) => p,
-                                        Err(_) => {
-                                            // Semaphore closed - worker shutting down
-                                            return;
-                                        }
-                                    };
-
+                                    // Permit is moved into the task and released when dropped
+                                    let _permit = permit;
                                     perform_recovery_with_backoff(client, task, feedback_tx).await;
                                 }
                                 .instrument(span)
