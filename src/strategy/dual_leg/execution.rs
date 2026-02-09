@@ -388,12 +388,27 @@ impl ExecutionEngine {
             PositionDirection::Short => "short entry",
         };
 
-        // Handle failures using DRY helper
-        if let Err(e) = spot_res {
-            if future_res.is_ok() {
+        // CB-2 FIX: Handle double failure explicitly to preserve both error messages.
+        // This ensures complete telemetry when both legs fail simultaneously.
+        match (&spot_res, &future_res) {
+            (Err(spot_e), Err(fut_e)) => {
+                // Both legs failed - no recovery needed, but record both errors
+                error!(
+                    spot_error = %spot_e,
+                    future_error = %fut_e,
+                    "Both legs failed during {} - no positions opened",
+                    direction_name
+                );
+                self.circuit_breaker.record_failure();
+                return Ok(ExecutionResult::TotalFailure(ExecutionError::ExchangeError(
+                    format!("Both legs failed. Spot: {}; Future: {}", spot_e, fut_e),
+                )));
+            }
+            (Err(e), Ok(_)) => {
+                // Spot failed, future succeeded - unwind future
                 return self
                     .queue_kill_switch(
-                        e,
+                        e.clone(),
                         &pair.future_symbol,
                         unwind_future_side,
                         hedge_qty,
@@ -401,20 +416,21 @@ impl ExecutionEngine {
                     )
                     .await;
             }
-            self.circuit_breaker.record_failure();
-            return Ok(ExecutionResult::TotalFailure(e));
-        }
-
-        if let Err(e) = future_res {
-            return self
-                .queue_kill_switch(
-                    e,
-                    &pair.spot_symbol,
-                    unwind_spot_side,
-                    quantity,
-                    &format!("Future {}", direction_name),
-                )
-                .await;
+            (Ok(_), Err(e)) => {
+                // Future failed, spot succeeded - unwind spot
+                return self
+                    .queue_kill_switch(
+                        e.clone(),
+                        &pair.spot_symbol,
+                        unwind_spot_side,
+                        quantity,
+                        &format!("Future {}", direction_name),
+                    )
+                    .await;
+            }
+            (Ok(_), Ok(_)) => {
+                // Both succeeded - happy path handled below
+            }
         }
 
         self.circuit_breaker.record_success();
