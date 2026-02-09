@@ -487,6 +487,10 @@ pub struct RecoveryTask {
     pub symbol: String,
     pub action: OrderSide,
     pub quantity: Decimal,
+    /// Optional aggressive limit price for recovery orders.
+    /// When set, prevents slippage during market crashes by using limit orders
+    /// instead of market orders. Should be set aggressively (e.g., 1-2% worse than market).
+    pub limit_price: Option<Decimal>,
     pub reason: String,
     pub attempts: u32,
 }

@@ -164,8 +164,10 @@ pub async fn perform_recovery_with_backoff(
     for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
         task.attempts = attempt;
 
+        // MC-1 FIX: Use limit_price if available to prevent slippage during market crashes.
+        // If limit_price is None, falls back to market order (legacy behavior).
         match client
-            .execute_order(&task.symbol, task.action, task.quantity, None)
+            .execute_order(&task.symbol, task.action, task.quantity, task.limit_price)
             .await
         {
             Ok(_) => {
@@ -248,6 +250,7 @@ impl ExecutionEngine {
         successful_leg_symbol: &str,
         recovery_action: OrderSide,
         quantity: Decimal,
+        limit_price: Option<Decimal>,
         context: &str,
     ) -> Result<ExecutionResult, ExecutionError> {
         error!(
@@ -265,6 +268,7 @@ impl ExecutionEngine {
             symbol: successful_leg_symbol.to_string(),
             action: recovery_action,
             quantity,
+            limit_price,
             reason: format!("{}: {}", context, failed_result),
             attempts: 0,
         };
@@ -291,6 +295,7 @@ impl ExecutionEngine {
         symbol: &str,
         action: OrderSide,
         quantity: Decimal,
+        limit_price: Option<Decimal>,
         error: ExecutionError,
         leg_name: &str,
     ) -> Result<(), ExecutionError> {
@@ -300,6 +305,7 @@ impl ExecutionEngine {
             symbol: symbol.to_string(),
             action,
             quantity,
+            limit_price,
             reason: format!("Exit {} failed: {}", leg_name, error),
             attempts: 0,
         };
@@ -406,24 +412,38 @@ impl ExecutionEngine {
             }
             (Err(e), Ok(_)) => {
                 // Spot failed, future succeeded - unwind future
+                // Calculate aggressive limit price (1% worse for slippage tolerance)
+                let unwind_limit = if unwind_future_side == OrderSide::Buy {
+                    Some(leg2_price * rust_decimal_macros::dec!(1.01)) // Buy at up to 1% higher
+                } else {
+                    Some(leg2_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
+                };
                 return self
                     .queue_kill_switch(
                         e.clone(),
                         &pair.future_symbol,
                         unwind_future_side,
                         hedge_qty,
+                        unwind_limit,
                         &format!("Spot {}", direction_name),
                     )
                     .await;
             }
             (Ok(_), Err(e)) => {
                 // Future failed, spot succeeded - unwind spot
+                // Calculate aggressive limit price (1% worse for slippage tolerance)
+                let unwind_limit = if unwind_spot_side == OrderSide::Buy {
+                    Some(leg1_price * rust_decimal_macros::dec!(1.01)) // Buy at up to 1% higher
+                } else {
+                    Some(leg1_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
+                };
                 return self
                     .queue_kill_switch(
                         e.clone(),
                         &pair.spot_symbol,
                         unwind_spot_side,
                         quantity,
+                        unwind_limit,
                         &format!("Future {}", direction_name),
                     )
                     .await;
@@ -542,12 +562,24 @@ impl ExecutionEngine {
 
             // If one failed (or the only one attempted failed)
             if let Some(e) = spot_err {
-                self.queue_exit_retry(&pair.spot_symbol, spot_side, quantity, e, "Spot")
+                // Calculate aggressive limit price for spot recovery
+                let spot_limit = if spot_side == OrderSide::Buy {
+                    Some(leg1_price * rust_decimal_macros::dec!(1.01)) // Buy at up to 1% higher
+                } else {
+                    Some(leg1_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
+                };
+                self.queue_exit_retry(&pair.spot_symbol, spot_side, quantity, spot_limit, e, "Spot")
                     .await?;
             }
 
             if let Some(e) = future_err {
-                self.queue_exit_retry(&pair.future_symbol, future_side, hedge_qty, e, "Future")
+                // Calculate aggressive limit price for future recovery
+                let future_limit = if future_side == OrderSide::Buy {
+                    Some(leg2_price * rust_decimal_macros::dec!(1.01)) // Buy at up to 1% higher
+                } else {
+                    Some(leg2_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
+                };
+                self.queue_exit_retry(&pair.future_symbol, future_side, hedge_qty, future_limit, e, "Future")
                     .await?;
             }
 

@@ -606,6 +606,7 @@ async fn test_recovery_worker_retry() {
         symbol: "BTC-USD".to_string(),
         action: OrderSide::Buy,
         quantity: dec!(1.0),
+        limit_price: None,
         reason: "Test".to_string(),
         attempts: 0,
     };
