@@ -37,6 +37,20 @@ pub enum OrderSide {
     Sell,
 }
 
+impl OrderSide {
+    /// Returns the opposite side (Buy -> Sell, Sell -> Buy).
+    ///
+    /// Used for position unwinding in recovery scenarios where we need
+    /// to close a position that was opened on one side.
+    #[inline]
+    pub fn opposite(self) -> Self {
+        match self {
+            OrderSide::Buy => OrderSide::Sell,
+            OrderSide::Sell => OrderSide::Buy,
+        }
+    }
+}
+
 impl std::fmt::Display for OrderSide {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

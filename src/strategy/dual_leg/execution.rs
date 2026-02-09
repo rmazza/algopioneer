@@ -377,9 +377,11 @@ impl ExecutionEngine {
         let spot_res = spot_res.map_err(ExecutionError::from);
         let future_res = future_res.map_err(ExecutionError::from);
 
-        // Kill switch action is opposite of entry action
-        let spot_kill_switch_side = future_side; // If spot fails, unwind future
-        let future_kill_switch_side = spot_side; // If future fails, unwind spot
+        // CRITICAL FIX: Kill switch action must be OPPOSITE of entry action to unwind.
+        // If spot failed and we SOLD future, we must BUY future to close the short.
+        // If future failed and we BOUGHT spot, we must SELL spot to close the long.
+        let unwind_future_side = future_side.opposite(); // If spot fails, unwind future
+        let unwind_spot_side = spot_side.opposite(); // If future fails, unwind spot
 
         let direction_name = match direction {
             PositionDirection::Long => "entry",
@@ -393,7 +395,7 @@ impl ExecutionEngine {
                     .queue_kill_switch(
                         e,
                         &pair.future_symbol,
-                        spot_kill_switch_side,
+                        unwind_future_side,
                         hedge_qty,
                         &format!("Spot {}", direction_name),
                     )
@@ -408,7 +410,7 @@ impl ExecutionEngine {
                 .queue_kill_switch(
                     e,
                     &pair.spot_symbol,
-                    future_kill_switch_side,
+                    unwind_spot_side,
                     quantity,
                     &format!("Future {}", direction_name),
                 )
