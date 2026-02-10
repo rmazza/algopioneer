@@ -411,9 +411,12 @@ impl ExecutionEngine {
                     direction_name
                 );
                 self.circuit_breaker.record_failure();
-                return Ok(ExecutionResult::TotalFailure(ExecutionError::ExchangeError(
-                    format!("Both legs failed. Spot: {}; Future: {}", spot_e, fut_e),
-                )));
+                return Ok(ExecutionResult::TotalFailure(
+                    ExecutionError::ExchangeError(format!(
+                        "Both legs failed. Spot: {}; Future: {}",
+                        spot_e, fut_e
+                    )),
+                ));
             }
             (Err(e), Ok(_)) => {
                 // Spot failed, future succeeded - unwind future
@@ -573,8 +576,15 @@ impl ExecutionEngine {
                 } else {
                     Some(leg1_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
                 };
-                self.queue_exit_retry(&pair.spot_symbol, spot_side, quantity, spot_limit, e, "Spot")
-                    .await?;
+                self.queue_exit_retry(
+                    &pair.spot_symbol,
+                    spot_side,
+                    quantity,
+                    spot_limit,
+                    e,
+                    "Spot",
+                )
+                .await?;
             }
 
             if let Some(e) = future_err {
@@ -584,8 +594,15 @@ impl ExecutionEngine {
                 } else {
                     Some(leg2_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
                 };
-                self.queue_exit_retry(&pair.future_symbol, future_side, hedge_qty, future_limit, e, "Future")
-                    .await?;
+                self.queue_exit_retry(
+                    &pair.future_symbol,
+                    future_side,
+                    hedge_qty,
+                    future_limit,
+                    e,
+                    "Future",
+                )
+                .await?;
             }
 
             self.circuit_breaker.record_failure();
