@@ -1,6 +1,6 @@
 [package]
 name = "algopioneer"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"  # NP1: Fixed from "2024"
 
 [dependencies]
@@ -54,7 +54,7 @@ apca = "0.30.0"
 num-decimal = { version = "0.2.5", default-features = false, features = ["num-v04"] }
 
 [features]
-default = []
+default = ["dynamodb"]
 dynamodb = ["aws-sdk-dynamodb", "aws-config"]
 
 [dev-dependencies]
