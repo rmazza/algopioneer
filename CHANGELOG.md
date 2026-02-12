@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-02-11
+### Changed
+- **Pairs Config**: Reduced active pairs from 8 to 4 (JNJ/ABBV, GIS/KHC, BAC/AXP, MS/GS) to reduce instance load and latency warnings.
+- **DynamoDB**: Confirmed `dynamodb` feature enabled by default for production trade logging.
+
 ## [1.7.1] - 2026-02-09
 ### Changed
 - **DynamoDB**: Enabled `dynamodb` feature by default in `Cargo.toml` to ensure trade logging is active in production builds.
