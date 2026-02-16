@@ -240,6 +240,33 @@ output "ami_id" {
   value       = data.aws_ami.amazon_linux_2023.id
 }
 
+# --- 5. Custom IAM Policies (DynamoDB Access) ---
+resource "aws_iam_role_policy" "dynamodb_access" {
+  name = "${local.name_prefix}-dynamodb-access"
+  role = aws_iam_role.ec2_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:StartTransaction",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.trades.arn
+        ]
+      }
+    ]
+  })
+}
+
+# --- Outputs from Main ---
 output "environment" {
   description = "Current deployment environment"
   value       = var.environment

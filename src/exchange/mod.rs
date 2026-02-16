@@ -347,6 +347,14 @@ pub trait Executor: Send + Sync {
     async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
         Ok(true)
     }
+
+    /// Cancel an order on the exchange.
+    ///
+    /// # Default Implementation
+    /// Returns `Err(NotImplemented)` to avoid breaking existing clients.
+    async fn cancel_order(&self, _order_id: &crate::orders::OrderId) -> Result<(), ExchangeError> {
+        Err(ExchangeError::Other("cancel_order not implemented".to_string()))
+    }
 }
 
 /// Extended exchange client trait with full capabilities

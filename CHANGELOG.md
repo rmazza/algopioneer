@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-02-13
+### Fixed
+- **Alpaca API**: Fixed "Endpoint Error" on order submission by rounding quantities to 9 decimal places (Alpaca's precision limit). This prevents rejections for fractional shares with excessive precision (e.g., `11.514767...`).
+
+## [1.7.3] - 2026-02-12
+### Fixed
+- **Recovery Logic**: Implemented robust verification loop in `RecoveryWorker` to fix "Fire and Forget" issue. Now polls for order completion and cancels stuck orders.
+- **Alpaca API**: Fixed compilation errors with `apca` 0.30.0 (Tuple struct construction for `Get`/`Delete` and correct field names `filled_quantity`/`average_fill_price`).
+- **Executor Trait**: Added `cancel_order` method to `Executor` trait.
+
 ## [1.7.2] - 2026-02-11
 ### Changed
 - **Pairs Config**: Reduced active pairs from 8 to 4 (JNJ/ABBV, GIS/KHC, BAC/AXP, MS/GS) to reduce instance load and latency warnings.

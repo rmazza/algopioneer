@@ -190,6 +190,10 @@ impl AlpacaClient {
         size: Decimal,
         price: Option<Decimal>,
     ) -> Result<String, ExchangeError> {
+        // ALPACA FIX: Round quantity to 9 decimal places to prevent API rejections
+        // Alpaca supports up to 9 decimal places of precision.
+        let size = size.round_dp(9);
+
         self.rate_limiter.until_ready().await;
 
         // MC-1 FIX: Check market hours before order submission
@@ -300,21 +304,30 @@ impl AlpacaClient {
     }
 
     /// Get position for a symbol
+    ///
+    /// Fetches ALL positions and filters locally to avoid 404 errors when position is closed.
+    /// This is robust against "Position Not Found" errors which cause critical failures.
     pub async fn get_position(&self, product_id: &str) -> Result<Decimal, ExchangeError> {
         self.rate_limiter.until_ready().await;
 
         match self.mode {
-            // Paper/Sandbox now behaves exactly like Live for querying positions
-            // because we are using the real Paper/Sandbox API.
             AppEnv::Live | AppEnv::Paper | AppEnv::Sandbox => {
                 let symbol = utils::to_alpaca_symbol(product_id);
                 let client = &self.client;
-                let sym = asset::Symbol::Sym(symbol.clone().into_owned());
 
-                match client.issue::<alpaca_position::Get>(&sym).await {
-                    Ok(position) => {
-                        // CB-2 FIX: Propagate conversion error
-                        let mut qty = utils::num_to_decimal(&position.quantity).map_err(|e| {
+                // MC-3 FIX: Use List (GetAll) to avoid 404 errors on missing positions.
+                // The API returns 404 if we query a specific symbol that has no position,
+                // capturing this error correctly is difficult due to generic error types.
+                // Listing all is safer and negligible performance cost (few positions).
+                let positions = client
+                    .issue::<apca::api::v2::positions::List>(&())
+                    .await
+                    .map_err(|e| ExchangeError::Network(format!("Failed to list positions: {}", e)))?;
+
+                for pos in positions {
+                    if pos.symbol == symbol.as_ref() {
+                        // Position found
+                        let mut qty = utils::num_to_decimal(&pos.quantity).map_err(|e| {
                             ExchangeError::Other(format!(
                                 "Failed to convert position quantity: {}",
                                 e
@@ -322,27 +335,19 @@ impl AlpacaClient {
                         })?;
 
                         // ALPACA FIX: Negate quantity for short positions
-                        // Alpaca API returns positive quantity + side="short"
-                        if let alpaca_position::Side::Short = position.side {
+                        if let alpaca_position::Side::Short = pos.side {
                             qty = -qty;
                         }
 
-                        debug!(symbol = %symbol, quantity = %qty, side = ?position.side, "Position found");
-                        Ok(qty)
-                    }
-                    Err(e) => {
-                        if let RequestError::Endpoint(alpaca_position::GetError::NotFound(_)) = e {
-                            debug!(symbol = %symbol, "No position found");
-                            Ok(Decimal::ZERO)
-                        } else {
-                            Err(ExchangeError::Network(format!(
-                                "Failed to get position: {}",
-                                e
-                            )))
-                        }
+                        debug!(symbol = %symbol, quantity = %qty, side = ?pos.side, "Position found");
+                        return Ok(qty);
                     }
                 }
-            } // Removed dedicated Paper/Sandbox block because it's now merged with Live
+
+                // Not found in list = Zero position
+                debug!(symbol = %symbol, "No position found (verified via List)");
+                Ok(Decimal::ZERO)
+            }
         }
     }
 
@@ -519,6 +524,76 @@ impl Executor for AlpacaClient {
 
     async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
         self.check_market_hours().await
+    }
+
+    /// Poll order status from Alpaca
+    ///
+    /// MC-4 FIX: Maps Alpaca status to crate::orders::OrderState for verification
+    async fn get_order_status(
+        &self,
+        order_id: &crate::orders::OrderId,
+    ) -> Result<(crate::orders::OrderState, Decimal, Option<Decimal>), ExchangeError> {
+        let alpaca_id = order_id.as_str();
+        let client = &self.client;
+
+        // Parse UUID
+        let uuid = alpaca_id
+            .parse::<uuid::Uuid>()
+            .map_err(|e| ExchangeError::Other(format!("Invalid order ID format: {}", e)))?;
+
+        // Fetch order from API
+        // apca 0.30: Get endpoint takes &Id
+        let order = client
+            .issue::<alpaca_order::Get>(&alpaca_order::Id(uuid))
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        // Map Status
+        let state = match order.status {
+            alpaca_order::Status::New
+            | alpaca_order::Status::Accepted
+            | alpaca_order::Status::Calculated
+            | alpaca_order::Status::PendingNew
+            | alpaca_order::Status::PendingReplace => crate::orders::OrderState::Pending,
+            alpaca_order::Status::PartiallyFilled => crate::orders::OrderState::PartiallyFilled,
+            alpaca_order::Status::Filled => crate::orders::OrderState::Filled,
+            alpaca_order::Status::DoneForDay => crate::orders::OrderState::Filled,
+            alpaca_order::Status::Canceled | alpaca_order::Status::PendingCancel => {
+                crate::orders::OrderState::Cancelled
+            }
+            alpaca_order::Status::Expired => crate::orders::OrderState::Expired,
+            alpaca_order::Status::Rejected => crate::orders::OrderState::Rejected,
+            s => {
+                warn!("Unknown Alpaca order status: {:?}", s);
+                crate::orders::OrderState::Pending
+            }
+        };
+
+        // apca 0.30 fields: filled_quantity, average_fill_price
+        let filled_qty = utils::num_to_decimal(&order.filled_quantity).unwrap_or(Decimal::ZERO);
+        let avg_price = order
+            .average_fill_price
+            .map(|p| utils::num_to_decimal(&p).unwrap_or(Decimal::ZERO));
+
+        Ok((state, filled_qty, avg_price))
+    }
+
+    /// Cancel order on Alpaca
+    async fn cancel_order(&self, order_id: &crate::orders::OrderId) -> Result<(), ExchangeError> {
+        let alpaca_id = order_id.as_str();
+        let client = &self.client;
+
+        let uuid = alpaca_id
+            .parse::<uuid::Uuid>()
+            .map_err(|e| ExchangeError::Other(format!("Invalid order ID format: {}", e)))?;
+
+        // apca 0.30 uses tuple struct Delete(Id) - trying literal syntax
+        client
+            .issue::<alpaca_order::Delete>(&alpaca_order::Id(uuid))
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        Ok(())
     }
 }
 
