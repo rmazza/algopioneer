@@ -4,11 +4,12 @@
 //! that distributes market data to multiple strategy channels with
 //! automatic backpressure handling and cleanup of closed channels.
 
+use crate::metrics;
 use crate::types::MarketData;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, instrument};
+use tracing::{debug, info};
 
 /// Thread-safe tick router for multi-strategy distribution.
 ///
@@ -66,48 +67,71 @@ impl TickRouter {
 
     /// Route a tick to all registered strategies.
     ///
-    /// Uses `try_send` to prevent blocking on slow strategies.
-    /// Drops ticks on backpressure and logs at debug level.
-    /// Automatically cleans up closed channels.
+    /// Uses read-lock (`get`) and `try_send` to prevent blocking on slow strategies.
+    /// Drops ticks on backpressure and increments Prometheus counters.
+    /// Closed channel cleanup is deferred to `remove_pair()` to avoid
+    /// write-lock contention on the hot path.
     #[inline]
-    #[instrument(skip(self, tick), fields(symbol = %tick.symbol))]
     pub fn route(&self, tick: Arc<MarketData>) {
-        if let Some(mut senders) = self.routes.get_mut(&tick.symbol) {
-            // Clean up closed channels
-            senders.retain(|(sender, _)| !sender.is_closed());
+        let Some(senders) = self.routes.get(&tick.symbol) else {
+            return;
+        };
 
-            for (sender, pair_id) in senders.iter() {
-                match sender.try_send(tick.clone()) {
-                    Ok(_) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // Channel full - strategy is slow, drop tick for this strategy only
-                        debug!(
-                            pair_id = %pair_id,
-                            "Dropping tick: channel full (strategy backpressure)"
-                        );
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        // Channel closed - will be cleaned up next iteration
-                        debug!(pair_id = %pair_id, "Channel closed, will cleanup");
-                    }
+        for (sender, pair_id) in senders.iter() {
+            match sender.try_send(tick.clone()) {
+                Ok(()) => {
+                    metrics::record_ws_tick(&tick.symbol);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    metrics::record_dropped_tick(&tick.symbol, "backpressure");
+                    debug!(
+                        pair_id = %pair_id,
+                        symbol = %tick.symbol,
+                        "Dropping tick: channel full (strategy backpressure)"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    metrics::record_dropped_tick(&tick.symbol, "closed");
+                    debug!(
+                        pair_id = %pair_id,
+                        symbol = %tick.symbol,
+                        "Channel closed, deferred cleanup on next remove_pair()"
+                    );
                 }
             }
         }
     }
 
     /// Remove all routes for a specific pair (used on strategy restart).
+    ///
+    /// NOTE: Acquires write-locks on each shard sequentially via `iter_mut()`.
+    /// This briefly contends with `route()` per-shard. Acceptable because
+    /// strategy restarts are rare events.
     pub fn remove_pair(&self, pair_id: &str) {
+        let mut empty_symbols = Vec::new();
         self.routes.iter_mut().for_each(|mut entry| {
-            entry.value_mut().retain(|(_, pid)| pid != pair_id);
+            entry
+                .value_mut()
+                .retain(|(sender, pid)| pid != pair_id && !sender.is_closed());
+            if entry.value().is_empty() {
+                empty_symbols.push(entry.key().clone());
+            }
         });
+        // Clean up empty entries to keep symbol_count() accurate
+        for sym in &empty_symbols {
+            self.routes.remove_if(sym, |_, v| v.is_empty());
+        }
+        info!(pair_id = %pair_id, removed_symbols = empty_symbols.len(), "Removed pair routes");
     }
 
     /// Get the number of registered symbols.
+    #[must_use]
     pub fn symbol_count(&self) -> usize {
         self.routes.len()
     }
 
     /// Check if a symbol has any registered routes.
+    #[must_use]
     pub fn has_routes(&self, symbol: &str) -> bool {
         self.routes
             .get(symbol)
@@ -186,5 +210,25 @@ mod tests {
         // Second tick should be dropped (no blocking) since channel is full
         // This should not panic or block
         router.route(make_tick("BTC-USD"));
+    }
+
+    #[tokio::test]
+    async fn test_closed_channel_cleanup() {
+        let router = TickRouter::new();
+        let (tx, rx) = mpsc::channel(10);
+
+        router.register("BTC-USD".into(), tx, "pair-1".into());
+        assert!(router.has_routes("BTC-USD"));
+
+        // Drop the receiver to close the channel
+        drop(rx);
+
+        // Route a tick — the closed sender stays (cleanup deferred)
+        router.route(make_tick("BTC-USD"));
+
+        // remove_pair should clean up the closed channel AND the empty entry
+        router.remove_pair("pair-1");
+        assert!(!router.has_routes("BTC-USD"));
+        assert_eq!(router.symbol_count(), 0);
     }
 }
