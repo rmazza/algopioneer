@@ -278,8 +278,8 @@ impl EntryStrategy for PairsManager {
         self.running_sq_sum += spread * spread;
         self.spread_history.push_back(spread);
 
-        // MC-1 FIX: Periodic recalculation to prevent f64 drift
-        const RECALC_INTERVAL: u64 = 10_000;
+        // MC-4 FIX: Reduced from 10,000 to 5,000 to limit f64 drift accumulation
+        const RECALC_INTERVAL: u64 = 5_000;
         self.tick_count += 1;
         if self.tick_count.is_multiple_of(RECALC_INTERVAL) {
             self.running_sum = self.spread_history.iter().sum();

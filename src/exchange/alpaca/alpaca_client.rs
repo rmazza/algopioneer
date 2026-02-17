@@ -322,7 +322,9 @@ impl AlpacaClient {
                 let positions = client
                     .issue::<apca::api::v2::positions::List>(&())
                     .await
-                    .map_err(|e| ExchangeError::Network(format!("Failed to list positions: {}", e)))?;
+                    .map_err(|e| {
+                        ExchangeError::Network(format!("Failed to list positions: {}", e))
+                    })?;
 
                 for pos in positions {
                     if pos.symbol == symbol.as_ref() {

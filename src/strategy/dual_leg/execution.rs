@@ -12,9 +12,9 @@ use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info, instrument, warn};
 
 use crate::exchange::Executor;
+use crate::orders::OrderState;
 use crate::resilience::CircuitBreaker;
 use crate::types::OrderSide;
-use crate::orders::OrderState;
 use std::time::Instant;
 
 // Re-export types from dual_leg_trading that are closely coupled
@@ -179,20 +179,30 @@ pub async fn perform_recovery_with_backoff(
             Ok(id) => id,
             Err(e) => {
                 if task_throttler.should_log() {
-                     let suppressed = task_throttler.get_and_reset_suppressed_count();
-                     error!(
+                    let suppressed = task_throttler.get_and_reset_suppressed_count();
+                    error!(
                         "Recovery Submission Failed for {} (Attempt {}): {} (Suppressed: {})",
                         task.symbol, attempt, e, suppressed
                     );
                 }
                 // Retry logic below
                 if attempt >= MAX_RECOVERY_ATTEMPTS {
-                    error!("CRITICAL: Recovery abandoned for {} after {} attempts.", task.symbol, MAX_RECOVERY_ATTEMPTS);
-                    let _ = feedback_tx.send(RecoveryResult::Failed(task.symbol.clone())).await;
+                    error!(
+                        "CRITICAL: Recovery abandoned for {} after {} attempts.",
+                        task.symbol, MAX_RECOVERY_ATTEMPTS
+                    );
+                    // MC-5 FIX: Instrument recovery submission failure
+                    crate::metrics::RECOVERY_ATTEMPTS
+                        .with_label_values(&[task.symbol.as_str(), "failure"])
+                        .inc();
+                    let _ = feedback_tx
+                        .send(RecoveryResult::Failed(task.symbol.clone()))
+                        .await;
                     return;
                 }
                 tokio::time::sleep(backoff).await;
-                backoff = std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
+                backoff =
+                    std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
                 continue;
             }
         };
@@ -206,7 +216,10 @@ pub async fn perform_recovery_with_backoff(
 
         loop {
             if start.elapsed() > timeout {
-                warn!("Recovery order {} timed out awaiting fill. Cancelling...", order_id);
+                warn!(
+                    "Recovery order {} timed out awaiting fill. Cancelling...",
+                    order_id
+                );
                 break; // Break to cancel and retry
             }
 
@@ -217,8 +230,8 @@ pub async fn perform_recovery_with_backoff(
                         break;
                     }
                     if state.is_terminal() && state != OrderState::Filled {
-                         warn!("Recovery order {} failed with state {:?}", order_id, state);
-                         break; // Break to retry
+                        warn!("Recovery order {} failed with state {:?}", order_id, state);
+                        break; // Break to retry
                     }
                     // Else: New/Open/PartiallyFilled -> Wait
                 }
@@ -237,6 +250,10 @@ pub async fn perform_recovery_with_backoff(
                 "Recovery Successful & Verified for {} on attempt {}",
                 task.symbol, attempt
             );
+            // MC-5 FIX: Instrument recovery success
+            crate::metrics::RECOVERY_ATTEMPTS
+                .with_label_values(&[task.symbol.as_str(), "success"])
+                .inc();
             let _ = feedback_tx
                 .send(RecoveryResult::Success(task.symbol.clone()))
                 .await;
@@ -256,6 +273,10 @@ pub async fn perform_recovery_with_backoff(
                 "CRITICAL: Recovery abandoned for {} after {} attempts (Verification Failed).",
                 task.symbol, MAX_RECOVERY_ATTEMPTS
             );
+            // MC-5 FIX: Instrument recovery failure
+            crate::metrics::RECOVERY_ATTEMPTS
+                .with_label_values(&[task.symbol.as_str(), "failure"])
+                .inc();
             let _ = feedback_tx
                 .send(RecoveryResult::Failed(task.symbol.clone()))
                 .await;
@@ -465,9 +486,12 @@ impl ExecutionEngine {
                     direction_name
                 );
                 self.circuit_breaker.record_failure();
-                return Ok(ExecutionResult::TotalFailure(ExecutionError::ExchangeError(
-                    format!("Both legs failed. Spot: {}; Future: {}", spot_e, fut_e),
-                )));
+                return Ok(ExecutionResult::TotalFailure(
+                    ExecutionError::ExchangeError(format!(
+                        "Both legs failed. Spot: {}; Future: {}",
+                        spot_e, fut_e
+                    )),
+                ));
             }
             (Err(e), Ok(_)) => {
                 // Spot failed, future succeeded - unwind future
@@ -627,8 +651,15 @@ impl ExecutionEngine {
                 } else {
                     Some(leg1_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
                 };
-                self.queue_exit_retry(&pair.spot_symbol, spot_side, quantity, spot_limit, e, "Spot")
-                    .await?;
+                self.queue_exit_retry(
+                    &pair.spot_symbol,
+                    spot_side,
+                    quantity,
+                    spot_limit,
+                    e,
+                    "Spot",
+                )
+                .await?;
             }
 
             if let Some(e) = future_err {
@@ -638,8 +669,15 @@ impl ExecutionEngine {
                 } else {
                     Some(leg2_price * rust_decimal_macros::dec!(0.99)) // Sell at up to 1% lower
                 };
-                self.queue_exit_retry(&pair.future_symbol, future_side, hedge_qty, future_limit, e, "Future")
-                    .await?;
+                self.queue_exit_retry(
+                    &pair.future_symbol,
+                    future_side,
+                    hedge_qty,
+                    future_limit,
+                    e,
+                    "Future",
+                )
+                .await?;
             }
 
             self.circuit_breaker.record_failure();
