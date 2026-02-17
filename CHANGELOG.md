@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-02-17
+### Added
+- **Safety Guards**: Position imbalance detection with automatic safety guards to prevent runaway positions.
+
+### Changed
+- **Architecture**: Restructured strategy module into submodules — extracted execution engine, recovery worker, entry managers, exit policies, throttle utilities, and validators into dedicated files.
+
+### Fixed
+- **Code Review**: Addressed code review findings for `dual_leg`, `supervisor`, and `tick_router` modules.
+- **Kill Switch**: Fixed kill switch to use opposite side for unwinding positions.
+- **Error Handling**: Preserved both errors on dual-leg double failure instead of swallowing the first.
+- **Recovery**: Use limit orders instead of market orders for recovery to prevent slippage.
+- **Recovery**: Acquire semaphore before spawn to prevent task explosion under load.
+
 ## [1.7.4] - 2026-02-13
 ### Fixed
 - **Alpaca API**: Fixed "Endpoint Error" on order submission by rounding quantities to 9 decimal places (Alpaca's precision limit). This prevents rejections for fractional shares with excessive precision (e.g., `11.514767...`).
