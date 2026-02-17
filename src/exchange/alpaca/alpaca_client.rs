@@ -16,7 +16,6 @@ use std::time::Instant;
 
 use tracing::{debug, error, info, warn};
 
-use apca::api::v2::asset;
 use apca::api::v2::order as alpaca_order;
 use apca::api::v2::position as alpaca_position;
 use apca::data::v2::bars as alpaca_bars;
