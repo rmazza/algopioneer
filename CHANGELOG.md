@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-02-17
+### Added
+- **Safety Guards**: Position imbalance detection with automatic safety guards to prevent runaway positions.
+
+### Changed
+- **Architecture**: Restructured strategy module into submodules — extracted execution engine, recovery worker, entry managers, exit policies, throttle utilities, and validators into dedicated files.
+
+### Fixed
+- **Code Review**: Addressed code review findings for `dual_leg`, `supervisor`, and `tick_router` modules.
+- **Kill Switch**: Fixed kill switch to use opposite side for unwinding positions.
+- **Error Handling**: Preserved both errors on dual-leg double failure instead of swallowing the first.
+- **Recovery**: Use limit orders instead of market orders for recovery to prevent slippage.
+- **Recovery**: Acquire semaphore before spawn to prevent task explosion under load.
+
+## [1.7.4] - 2026-02-13
+### Fixed
+- **Alpaca API**: Fixed "Endpoint Error" on order submission by rounding quantities to 9 decimal places (Alpaca's precision limit). This prevents rejections for fractional shares with excessive precision (e.g., `11.514767...`).
+
+## [1.7.3] - 2026-02-12
+### Fixed
+- **Recovery Logic**: Implemented robust verification loop in `RecoveryWorker` to fix "Fire and Forget" issue. Now polls for order completion and cancels stuck orders.
+- **Alpaca API**: Fixed compilation errors with `apca` 0.30.0 (Tuple struct construction for `Get`/`Delete` and correct field names `filled_quantity`/`average_fill_price`).
+- **Executor Trait**: Added `cancel_order` method to `Executor` trait.
+
+## [1.7.2] - 2026-02-11
+### Changed
+- **Pairs Config**: Reduced active pairs from 8 to 4 (JNJ/ABBV, GIS/KHC, BAC/AXP, MS/GS) to reduce instance load and latency warnings.
+- **DynamoDB**: Confirmed `dynamodb` feature enabled by default for production trade logging.
+
 ## [1.7.1] - 2026-02-09
 ### Changed
 - **DynamoDB**: Enabled `dynamodb` feature by default in `Cargo.toml` to ensure trade logging is active in production builds.

@@ -10,7 +10,7 @@ use crate::exchange::WebSocketProvider;
 use crate::strategy::{LiveStrategy, MarketData, StrategyInput};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -227,12 +227,14 @@ impl StrategySupervisor {
     }
 
     /// Set risk configuration
+    #[must_use]
     pub fn with_risk_config(mut self, config: crate::risk::DailyRiskConfig) -> Self {
         self.risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(config));
         self
     }
 
     /// Set the restart policy
+    #[must_use]
     pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
         self.restart_policy = policy;
         self
@@ -251,14 +253,12 @@ impl StrategySupervisor {
 
     /// Get all unique symbols that need market data subscription
     pub fn all_subscribed_symbols(&self) -> Vec<String> {
-        let mut symbols: Vec<String> = self
-            .strategies
+        self.strategies
             .iter()
             .flat_map(|s| s.subscribed_symbols())
-            .collect();
-        symbols.sort();
-        symbols.dedup();
-        symbols
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Get the PnL tracker for external monitoring
@@ -354,7 +354,7 @@ impl StrategySupervisor {
 
                 // BI-2 FIX: Spawn the strategy in a separate task to catch panics
                 // JoinError::is_panic() detects if the inner task panicked
-                let strategy_id_clone = strategy_id.clone();
+                let inner_id = strategy_id.clone();
                 let inner_handle = tokio::spawn(async move {
                     strategy.run(rx).await;
                     strategy.current_pnl()
@@ -362,7 +362,7 @@ impl StrategySupervisor {
 
                 let (panicked, final_pnl) = match inner_handle.await {
                     Ok(pnl) => {
-                        info!(strategy_id = %strategy_id_clone, "Strategy completed normally");
+                        info!(strategy_id = %inner_id, "Strategy completed normally");
                         (false, pnl)
                     }
                     Err(e) if e.is_panic() => {
@@ -375,14 +375,14 @@ impl StrategySupervisor {
                             "Unknown panic".to_string()
                         };
                         error!(
-                            strategy_id = %strategy_id_clone,
+                            strategy_id = %inner_id,
                             panic_msg = %panic_msg,
                             "CRITICAL: Strategy panicked! Manual intervention may be required."
                         );
                         (true, rust_decimal::Decimal::ZERO)
                     }
                     Err(e) => {
-                        error!(strategy_id = %strategy_id_clone, error = %e, "Strategy task cancelled");
+                        error!(strategy_id = %inner_id, error = %e, "Strategy task cancelled");
                         (false, rust_decimal::Decimal::ZERO)
                     }
                 };
@@ -393,38 +393,36 @@ impl StrategySupervisor {
                 StrategyRunResult {
                     id: strategy_id,
                     panicked,
-                    error: if panicked { Some("Strategy panicked".to_string()) } else { None },
+                    error: if panicked {
+                        Some("Strategy panicked".to_string())
+                    } else {
+                        None
+                    },
                     final_pnl,
                 }
             });
         }
 
-        // Route market data to strategies
+        // Route market data to strategies (with lifecycle tracking)
         let symbol_routes = self.symbol_routes.clone();
-        tokio::spawn(async move {
-            // Keep track of latest tick per symbol for paired routing
-            let mut latest_ticks: HashMap<String, Arc<MarketData>> = HashMap::new();
-
+        let router_handle = tokio::spawn(async move {
             while let Some(data) = ws_rx.recv().await {
-                let symbol = data.symbol.clone();
                 let arc_data = Arc::new(data);
-                latest_ticks.insert(symbol.clone(), arc_data.clone());
 
-                if let Some(routes) = symbol_routes.get(&symbol) {
+                if let Some(routes) = symbol_routes.get(&arc_data.symbol) {
                     for (strategy_id, sender) in routes {
-                        // For now, send as single tick
-                        // Paired strategies will need to buffer internally
-                        let input = StrategyInput::Tick(arc_data.clone());
+                        let input = StrategyInput::Tick(Arc::clone(&arc_data));
                         if sender.try_send(input).is_err() {
                             debug!(
                                 strategy_id = %strategy_id,
-                                symbol = %symbol,
+                                symbol = %arc_data.symbol,
                                 "Strategy channel full, dropping tick"
                             );
                         }
                     }
                 }
             }
+            info!("Market data router shutting down (WebSocket closed)");
         });
 
         // Wait for strategies to complete with restart tracking
@@ -483,8 +481,8 @@ impl StrategySupervisor {
                             );
 
                             if self.restart_policy.halt_on_permanent_failure {
-                                error!("halt_on_permanent_failure is set - supervisor should halt all strategies");
-                                // Future: signal other strategies to gracefully shutdown
+                                error!("halt_on_permanent_failure is set - aborting all remaining strategies");
+                                join_set.abort_all();
                             }
                         }
                     } else {
@@ -502,6 +500,12 @@ impl StrategySupervisor {
                     error!("Strategy task failed: {}", e);
                 }
             }
+        }
+
+        // CB-1 FIX: Join the router task (don't orphan it)
+        match router_handle.await {
+            Ok(()) => info!("Market data router exited cleanly"),
+            Err(e) => error!("CRITICAL: Market data router panicked: {:?}", e),
         }
 
         // MC-3 FIX: Cleanup WebSocket handle on supervisor exit

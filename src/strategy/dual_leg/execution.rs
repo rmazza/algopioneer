@@ -9,11 +9,13 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::exchange::Executor;
+use crate::orders::OrderState;
 use crate::resilience::CircuitBreaker;
 use crate::types::OrderSide;
+use std::time::Instant;
 
 // Re-export types from dual_leg_trading that are closely coupled
 // Re-export types from parent module that are closely coupled
@@ -169,47 +171,120 @@ pub async fn perform_recovery_with_backoff(
     for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
         task.attempts = attempt;
 
-        // MC-1 FIX: Use limit_price if available to prevent slippage during market crashes.
-        // If limit_price is None, falls back to market order (legacy behavior).
-        match client
+        // MC-1 FIX: Use limit_price if available.
+        let order_id = match client
             .execute_order(&task.symbol, task.action, task.quantity, task.limit_price)
             .await
         {
-            Ok(_) => {
-                info!(
-                    "Recovery Successful for {} on attempt {}",
-                    task.symbol, attempt
-                );
-                let _ = feedback_tx
-                    .send(RecoveryResult::Success(task.symbol.clone()))
-                    .await;
-                return;
-            }
+            Ok(id) => id,
             Err(e) => {
                 if task_throttler.should_log() {
                     let suppressed = task_throttler.get_and_reset_suppressed_count();
                     error!(
-                        "Recovery Failed for {} (Attempt {}): {} (Suppressed: {})",
+                        "Recovery Submission Failed for {} (Attempt {}): {} (Suppressed: {})",
                         task.symbol, attempt, e, suppressed
                     );
                 }
-
+                // Retry logic below
                 if attempt >= MAX_RECOVERY_ATTEMPTS {
                     error!(
-                        "CRITICAL: Recovery abandoned for {} after {} attempts. MANUAL INTERVENTION REQUIRED.",
+                        "CRITICAL: Recovery abandoned for {} after {} attempts.",
                         task.symbol, MAX_RECOVERY_ATTEMPTS
                     );
+                    // MC-5 FIX: Instrument recovery submission failure
+                    crate::metrics::RECOVERY_ATTEMPTS
+                        .with_label_values(&[task.symbol.as_str(), "failure"])
+                        .inc();
                     let _ = feedback_tx
                         .send(RecoveryResult::Failed(task.symbol.clone()))
                         .await;
                     return;
                 }
-
                 tokio::time::sleep(backoff).await;
                 backoff =
                     std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
+                continue;
             }
+        };
+
+        // Verification Loop
+        // We must ensure the order actually fills before declaring success.
+        // If it gets stuck/rejected, we must cancel (if open) and retry.
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
+        let mut verified = false;
+
+        loop {
+            if start.elapsed() > timeout {
+                warn!(
+                    "Recovery order {} timed out awaiting fill. Cancelling...",
+                    order_id
+                );
+                break; // Break to cancel and retry
+            }
+
+            match client.get_order_status(&order_id).await {
+                Ok((state, _, _)) => {
+                    if state == OrderState::Filled {
+                        verified = true;
+                        break;
+                    }
+                    if state.is_terminal() && state != OrderState::Filled {
+                        warn!("Recovery order {} failed with state {:?}", order_id, state);
+                        break; // Break to retry
+                    }
+                    // Else: New/Open/PartiallyFilled -> Wait
+                }
+                Err(e) => {
+                    // Log but don't panic. Network glitch?
+                    if task_throttler.should_log() {
+                        warn!("Failed to poll status for {}: {}", order_id, e);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
+
+        if verified {
+            info!(
+                "Recovery Successful & Verified for {} on attempt {}",
+                task.symbol, attempt
+            );
+            // MC-5 FIX: Instrument recovery success
+            crate::metrics::RECOVERY_ATTEMPTS
+                .with_label_values(&[task.symbol.as_str(), "success"])
+                .inc();
+            let _ = feedback_tx
+                .send(RecoveryResult::Success(task.symbol.clone()))
+                .await;
+            return;
+        }
+
+        // Failure/Timeout Case:
+        // Ensure order is canceled before retrying to avoid "stacking" orders.
+        if let Err(e) = client.cancel_order(&order_id).await {
+            // If cancel fails (e.g. 404), likely already done or rejected.
+            warn!("Failed to cancel recovery order {}: {}", order_id, e);
+        }
+
+        // Retry check (duplicated from above for clarity)
+        if attempt >= MAX_RECOVERY_ATTEMPTS {
+            error!(
+                "CRITICAL: Recovery abandoned for {} after {} attempts (Verification Failed).",
+                task.symbol, MAX_RECOVERY_ATTEMPTS
+            );
+            // MC-5 FIX: Instrument recovery failure
+            crate::metrics::RECOVERY_ATTEMPTS
+                .with_label_values(&[task.symbol.as_str(), "failure"])
+                .inc();
+            let _ = feedback_tx
+                .send(RecoveryResult::Failed(task.symbol.clone()))
+                .await;
+            return;
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = std::cmp::min(backoff * 2, Duration::from_secs(RECOVERY_BACKOFF_CAP_SECS));
     }
 }
 

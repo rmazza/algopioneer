@@ -565,11 +565,7 @@ impl RiskMonitor {
             HedgeMode::DeltaNeutral => match self.instrument_type {
                 InstrumentType::Linear => Ok(leg1_qty),
                 InstrumentType::Inverse => {
-                    if leg2_price.is_zero() {
-                        return Err(DualLegError::MathError(
-                            "Leg 2 price cannot be zero for inverse calculation".to_string(),
-                        ));
-                    }
+                    // N-3 FIX: Zero check already handled above (leg2_price <= ZERO returns early at L557)
                     Ok(leg1_qty * leg2_price)
                 }
             },
@@ -721,7 +717,8 @@ impl DualLegStrategy {
         );
         self.state_store = Some(store);
         self.position_id = Some(position_id.clone());
-        self.strategy_type = position_id.split(':').next().unwrap_or("pairs").to_string();
+        // N-4 FIX: split(':').next() on a non-empty string can never return None
+        self.strategy_type = position_id.split(':').next().unwrap().to_string();
         self.is_paper = is_paper;
         self
     }
@@ -768,8 +765,12 @@ impl DualLegStrategy {
                 }
             }
 
-            // STATE PERSISTENCE: Persist state to durable storage (async, best-effort)
-            self.persist_state_async();
+            // STATE PERSISTENCE: CB-2 FIX: Track persistence task in JoinSet
+            if let Some(handle) = self.persist_state_async() {
+                self.active_executions.spawn(async move {
+                    let _ = handle.await;
+                });
+            }
         }
     }
 
@@ -863,18 +864,21 @@ impl DualLegStrategy {
         })
     }
 
-    /// STATE PERSISTENCE: Persist current state asynchronously (fire-and-forget).
-    /// Errors are logged but don't block the strategy.
-    fn persist_state_async(&self) {
+    /// STATE PERSISTENCE: Persist current state asynchronously.
+    /// CB-2 FIX: Returns JoinHandle so callers can track the task via JoinSet,
+    /// preventing orphaned tasks on shutdown.
+    fn persist_state_async(&self) -> Option<tokio::task::JoinHandle<()>> {
         if let (Some(store), Some(record)) =
             (self.state_store.clone(), self.to_position_state_record())
         {
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 if let Err(e) = store.save_state(&record).await {
                     // Log error but don't fail - state persistence is best-effort
                     warn!(error = %e, "Failed to persist strategy state");
                 }
-            });
+            }))
+        } else {
+            None
         }
     }
 
@@ -913,7 +917,11 @@ impl DualLegStrategy {
                 let direction = match record.direction.as_deref() {
                     Some("long") => PositionDirection::Long,
                     Some("short") => PositionDirection::Short,
-                    _ => PositionDirection::Long, // Default
+                    other => {
+                        // N-7 FIX: Warn on corrupted direction instead of silent default
+                        warn!(direction = ?other, "Corrupted direction in persisted state, defaulting to Long");
+                        PositionDirection::Long
+                    }
                 };
 
                 // Restore state based on saved state string
@@ -981,88 +989,137 @@ impl DualLegStrategy {
     /// (`UNKNOWN_ENTRY_PRICE`) instead of zero. On the first tick, `process_tick`
     /// detects this marker and resets entry prices to current market prices,
     /// effectively starting PnL tracking from zero for the recovered session.
+    /// CB-3 FIX: Reconcile strategy state with exchange positions.
+    ///
+    /// Uses a 4-case matrix (stored state × exchange state) to correctly handle:
+    /// - Case 1: Flat + no positions → confirmed flat
+    /// - Case 2: InPosition + positions → validate quantities, PRESERVE entry prices
+    /// - Case 3: Flat + positions → orphan detection with marker prices
+    /// - Case 4: InPosition + no positions → externally closed, reset to Flat
     async fn reconcile_state(&mut self) {
         info!("Reconciling state with exchange positions...");
 
-        // Query positions for both legs
-        let leg1_pos = self
-            .execution_engine
-            .get_position(&self.pair.spot_symbol)
-            .await;
-        let leg2_pos = self
-            .execution_engine
-            .get_position(&self.pair.future_symbol)
-            .await;
+        let (leg1_pos, leg2_pos) = match (
+            self.execution_engine
+                .get_position(&self.pair.spot_symbol)
+                .await,
+            self.execution_engine
+                .get_position(&self.pair.future_symbol)
+                .await,
+        ) {
+            (Ok(l1), Ok(l2)) => (l1, l2),
+            (Err(e), _) | (_, Err(e)) => {
+                error!(
+                    error = %e,
+                    "CRITICAL: Failed to query exchange positions. Halting to prevent blind trading."
+                );
+                self.state = StrategyState::Halted;
+                return;
+            }
+        };
 
-        match (leg1_pos, leg2_pos) {
-            (Ok(leg1_qty), Ok(leg2_qty)) => {
-                // Threshold for considering a position "open" (to handle dust)
-                let threshold = dec!(0.00001);
+        let threshold = dec!(0.00001);
+        let has_position = leg1_pos.abs() > threshold || leg2_pos.abs() > threshold;
 
-                if leg1_qty.abs() > threshold || leg2_qty.abs() > threshold {
-                    // We have an open position - transition to InPosition
+        match (&self.state, has_position) {
+            // Case 1: Flat + no exchange positions → confirmed flat
+            (StrategyState::Flat, false) => {
+                info!("No positions detected. Confirmed Flat.");
+            }
 
-                    // FIXED LOGIC: Infer direction from available legs
-                    // If Leg 1 has size, its sign dictates direction (Long Leg1 = Long Strategy)
-                    // If Leg 1 is flat, Leg 2's sign dictates direction (Short Leg2 = Long Strategy)
-                    let direction = if leg1_qty.abs() > threshold {
-                        if leg1_qty >= Decimal::ZERO {
-                            PositionDirection::Long
-                        } else {
-                            PositionDirection::Short
-                        }
-                    } else {
-                        // Leg 1 is flat, infer from Leg 2
-                        // Long Strategy = Short Leg 2, so if Leg 2 is Short (neg), we are Long
-                        if leg2_qty < Decimal::ZERO {
-                            PositionDirection::Long
-                        } else {
-                            PositionDirection::Short
-                        }
-                    };
+            // Case 2: Restored InPosition + exchange has positions → validate quantities,
+            //         PRESERVE entry prices from storage
+            (
+                StrategyState::InPosition {
+                    leg1_qty,
+                    leg2_qty,
+                    direction,
+                    leg1_entry_price,
+                    leg2_entry_price,
+                },
+                true,
+            ) => {
+                let qty_drift_l1 = (leg1_pos.abs() - *leg1_qty).abs();
+                let qty_drift_l2 = (leg2_pos.abs() - *leg2_qty).abs();
 
-                    info!(
-                        "Detected existing position: leg1={}, leg2={}, inferred intent={}. Transitioning to InPosition.",
-                        leg1_qty, leg2_qty, direction
-                    );
-
-                    // TASK 4 FIX: Use marker value for unknown entry prices
-                    // The process_tick method will detect this and reset to current market prices
-                    self.state = StrategyState::InPosition {
-                        direction,
-                        leg1_qty: leg1_qty.abs(), // Store absolute quantities
-                        leg2_qty: leg2_qty.abs(),
-                        leg1_entry_price: UNKNOWN_ENTRY_PRICE, // Marker for "needs reset"
-                        leg2_entry_price: UNKNOWN_ENTRY_PRICE,
-                    };
-                    self.last_state_change_ts = self.clock.now_ts_millis();
-
+                if qty_drift_l1 > threshold || qty_drift_l2 > threshold {
                     warn!(
-                        "GHOST POSITION RECOVERY: Entry prices unknown after restart. \
-                        PnL will be reset to zero on first market tick. \
-                        Manual cost basis check required for accurate accounting."
+                        stored_l1 = %leg1_qty, exchange_l1 = %leg1_pos.abs(),
+                        stored_l2 = %leg2_qty, exchange_l2 = %leg2_pos.abs(),
+                        "Position quantities drifted from stored state. \
+                         Updating quantities, preserving entry prices."
                     );
+                    // Preserve entry prices from storage, update quantities from exchange
+                    self.state = StrategyState::InPosition {
+                        direction: *direction,
+                        leg1_qty: leg1_pos.abs(),
+                        leg2_qty: leg2_pos.abs(),
+                        leg1_entry_price: *leg1_entry_price,
+                        leg2_entry_price: *leg2_entry_price,
+                    };
                 } else {
-                    info!("No existing positions detected. Starting in Flat state.");
-                    // Already in Flat, no action needed
+                    info!(
+                        leg1 = %leg1_qty, leg2 = %leg2_qty,
+                        "Exchange positions match stored state. Entry prices preserved."
+                    );
                 }
             }
-            (Err(e1), _) => {
-                error!(
-                    "CRITICAL: Failed to query position for {}: {}. \
-                    Transitioning to Halted to prevent trading with unknown state.",
-                    self.pair.spot_symbol, e1
+
+            // Case 3: Flat + exchange has positions → orphan recovery with marker prices
+            (StrategyState::Flat, true) => {
+                let direction = Self::infer_direction_from_positions(leg1_pos, leg2_pos, threshold);
+                warn!(
+                    leg1 = %leg1_pos, leg2 = %leg2_pos, direction = %direction,
+                    "Orphan position detected. Using marker entry prices."
                 );
-                self.state = StrategyState::Halted;
-            }
-            (_, Err(e2)) => {
-                error!(
-                    "CRITICAL: Failed to query position for {}: {}. \
-                    Transitioning to Halted to prevent trading with unknown state.",
-                    self.pair.future_symbol, e2
+                self.state = StrategyState::InPosition {
+                    direction,
+                    leg1_qty: leg1_pos.abs(),
+                    leg2_qty: leg2_pos.abs(),
+                    leg1_entry_price: UNKNOWN_ENTRY_PRICE,
+                    leg2_entry_price: UNKNOWN_ENTRY_PRICE,
+                };
+                self.last_state_change_ts = self.clock.now_ts_millis();
+
+                warn!(
+                    "GHOST POSITION RECOVERY: Entry prices unknown after restart. \
+                    PnL will be reset to zero on first market tick. \
+                    Manual cost basis check required for accurate accounting."
                 );
-                self.state = StrategyState::Halted;
             }
+
+            // Case 4: InPosition + exchange is flat → externally closed
+            (StrategyState::InPosition { .. }, false) => {
+                warn!(
+                    "Stored state shows position but exchange is flat. \
+                     Position was likely closed externally. Resetting to Flat."
+                );
+                self.transition_state(StrategyState::Flat);
+            }
+
+            // All other states (Entering, Exiting, Reconciling, Halted): no action
+            _ => {
+                debug!(state = ?self.state, "Reconcile: no action for current state");
+            }
+        }
+    }
+
+    /// Infer position direction from exchange quantities.
+    fn infer_direction_from_positions(
+        leg1_qty: Decimal,
+        leg2_qty: Decimal,
+        threshold: Decimal,
+    ) -> PositionDirection {
+        if leg1_qty.abs() > threshold {
+            if leg1_qty >= Decimal::ZERO {
+                PositionDirection::Long
+            } else {
+                PositionDirection::Short
+            }
+        } else if leg2_qty < Decimal::ZERO {
+            PositionDirection::Long
+        } else {
+            PositionDirection::Short
         }
     }
 
@@ -1080,18 +1137,12 @@ impl DualLegStrategy {
 
         // STATE PERSISTENCE: Try to load prior state from storage first.
         // This restores entry prices from the last session if available.
-        let state_restored = self.load_persisted_state().await;
+        let _state_restored = self.load_persisted_state().await;
 
-        // STATE AMNESIA FIX: Reconcile position state with exchange.
-        // If we restored state from storage, reconcile will validate quantities match.
-        // If not, reconcile will detect positions but use UNKNOWN_ENTRY_PRICE.
-        if !state_restored {
-            self.reconcile_state().await;
-        } else {
-            // Still verify exchange positions match our restored state
-            info!("State restored from storage - verifying with exchange...");
-            self.reconcile_state().await;
-        }
+        // CB-3 FIX: Always reconcile with exchange.
+        // If state was restored, reconcile validates quantities and preserves entry prices.
+        // If not, reconcile detects orphan positions and uses UNKNOWN_ENTRY_PRICE markers.
+        self.reconcile_state().await;
 
         let mut latest_leg1: Option<Arc<MarketData>> = None;
         let mut latest_leg2: Option<Arc<MarketData>> = None;
@@ -1341,6 +1392,96 @@ impl DualLegStrategy {
         error!("MANUAL INTERVENTION REQUIRED: Strategy is in Reconciling state. Please check exchange positions and restart if necessary.");
     }
 
+    /// MC-1 FIX: Consolidated entry signal handler for both Long and Short directions.
+    /// MC-2 FIX: Checks max_position_usd before allowing entry.
+    async fn handle_entry_signal(
+        &mut self,
+        direction: PositionDirection,
+        leg1: &MarketData,
+        leg2: &MarketData,
+    ) {
+        if self.state != StrategyState::Flat {
+            return;
+        }
+
+        // Interpret order_size as USD Allocation. Quantity = Allocation / Price
+        if leg1.price.is_zero() {
+            warn!("Invalid price 0.0 for {}", leg1.symbol);
+            return;
+        }
+
+        // MC-2 FIX: Check max_position_usd before entry
+        if let Some(max_usd) = self.max_position_usd {
+            if self.config.order_size > max_usd {
+                warn!(
+                    order_size = %self.config.order_size,
+                    max_position_usd = %max_usd,
+                    "Entry blocked: order_size exceeds max_position_usd"
+                );
+                return;
+            }
+        }
+
+        let leg1_qty = self.config.order_size / leg1.price;
+        if let Ok(hedge_qty) = self
+            .risk_monitor
+            .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
+        {
+            let label = match direction {
+                PositionDirection::Long => "Long",
+                PositionDirection::Short => "Short",
+            };
+            info!(
+                "{} Entry Signal! Transitioning to Entering state and spawning execution...",
+                label
+            );
+
+            self.transition_state(StrategyState::Entering {
+                direction,
+                leg1_qty,
+                leg2_qty: hedge_qty,
+                leg1_entry_price: leg1.price,
+                leg2_entry_price: leg2.price,
+            });
+
+            let engine = self.execution_engine.clone();
+            let pair = self.pair.clone();
+            let tx = self.report_tx.clone();
+            let p1 = leg1.price;
+            let p2 = leg2.price;
+            let action = match direction {
+                PositionDirection::Long => Signal::Buy,
+                PositionDirection::Short => Signal::Sell,
+            };
+
+            // CB-2 FIX: Use JoinSet for structured concurrency
+            self.active_executions.spawn(async move {
+                let result = match engine
+                    .execute_basis_entry(&pair, direction, leg1_qty, hedge_qty, p1, p2)
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(e) => ExecutionResult::TotalFailure(e),
+                };
+                let report = ExecutionReport {
+                    result,
+                    action,
+                    pnl_delta: None,
+                };
+
+                match tx.send(report).await {
+                    Ok(_) => debug!("{} entry execution report sent successfully", label),
+                    Err(e) => {
+                        error!(
+                            "CRITICAL: Execution report channel closed: {}. Strategy state desync!",
+                            e
+                        );
+                    }
+                }
+            });
+        }
+    }
+
     /// Processes a single tick of matched Leg 1 and Leg 2 data.
     #[instrument(skip(self, leg1, leg2), fields(leg1_price = %leg1.price, leg2_price = %leg2.price))]
     async fn process_tick(&mut self, leg1: &MarketData, leg2: &MarketData) {
@@ -1510,116 +1651,14 @@ impl DualLegStrategy {
         let signal = self.entry_manager.analyze(leg1, leg2).await;
 
         match signal {
+            // MC-1 FIX: Consolidated Buy/Sell into a single handler
             Signal::Buy => {
-                if self.state != StrategyState::Flat {
-                    return;
-                }
-
-                // FIX: Interpret order_size as USD Allocation.
-                // Quantity = Allocation / Price
-                if leg1.price.is_zero() {
-                    warn!("Invalid price 0.0 for {}", leg1.symbol);
-                    return;
-                }
-                let leg1_qty = self.config.order_size / leg1.price;
-                if let Ok(hedge_qty) = self
-                    .risk_monitor
-                    .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
-                {
-                    info!("Long Entry Signal! Transitioning to Entering state and spawning execution...");
-                    self.transition_state(StrategyState::Entering {
-                        direction: PositionDirection::Long, // AS-1: Track Long entry
-                        leg1_qty,
-                        leg2_qty: hedge_qty,
-                        leg1_entry_price: leg1.price,
-                        leg2_entry_price: leg2.price,
-                    });
-
-                    let engine = self.execution_engine.clone();
-                    let pair = self.pair.clone();
-                    let tx = self.report_tx.clone();
-                    let p1 = leg1.price;
-                    let p2 = leg2.price;
-
-                    // CB-2 FIX: Use JoinSet for structured concurrency
-                    self.active_executions.spawn(async move {
-                        let result = match engine
-                            .execute_basis_entry(&pair, PositionDirection::Long, leg1_qty, hedge_qty, p1, p2)
-                            .await
-                        {
-                            Ok(res) => res,
-                            Err(e) => ExecutionResult::TotalFailure(e),
-                        };
-                        let report = ExecutionReport {
-                            result,
-                            action: Signal::Buy,
-                            pnl_delta: None,
-                        };
-
-                        match tx.send(report).await {
-                            Ok(_) => debug!("Entry execution report sent successfully"),
-                            Err(e) => {
-                                error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
-                            }
-                        }
-                    });
-                }
+                self.handle_entry_signal(PositionDirection::Long, leg1, leg2)
+                    .await
             }
             Signal::Sell => {
-                // CF1 FIX: Handle Short Entry (Sell Leg 1, Buy Leg 2)
-                if self.state != StrategyState::Flat {
-                    return;
-                }
-
-                // FIX: Interpret order_size as USD Allocation.
-                // Quantity = Allocation / Price
-                if leg1.price.is_zero() {
-                    warn!("Invalid price 0.0 for {}", leg1.symbol);
-                    return;
-                }
-                let leg1_qty = self.config.order_size / leg1.price;
-                if let Ok(hedge_qty) = self
-                    .risk_monitor
-                    .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
-                {
-                    info!("Short Entry Signal! Transitioning to Entering state and spawning execution...");
-                    self.transition_state(StrategyState::Entering {
-                        direction: PositionDirection::Short, // AS-1: Track Short entry
-                        leg1_qty,
-                        leg2_qty: hedge_qty,
-                        leg1_entry_price: leg1.price,
-                        leg2_entry_price: leg2.price,
-                    });
-
-                    let engine = self.execution_engine.clone();
-                    let pair = self.pair.clone();
-                    let tx = self.report_tx.clone();
-                    let p1 = leg1.price;
-                    let p2 = leg2.price;
-
-                    // CB-2 FIX: Use JoinSet for structured concurrency
-                    self.active_executions.spawn(async move {
-                        let result = match engine
-                            .execute_basis_entry(&pair, PositionDirection::Short, leg1_qty, hedge_qty, p1, p2)
-                            .await
-                        {
-                            Ok(res) => res,
-                            Err(e) => ExecutionResult::TotalFailure(e),
-                        };
-                        let report = ExecutionReport {
-                            result,
-                            action: Signal::Sell,
-                            pnl_delta: None,
-                        };
-
-                        match tx.send(report).await {
-                            Ok(_) => debug!("Short Entry execution report sent successfully"),
-                            Err(e) => {
-                                error!("CRITICAL: Execution report channel closed: {}. Strategy state desync!", e);
-                            }
-                        }
-                    });
-                }
+                self.handle_entry_signal(PositionDirection::Short, leg1, leg2)
+                    .await
             }
             Signal::Exit => {
                 // CF2 FIX: Handle Exit Signal (Mean Reversion)
@@ -1658,7 +1697,9 @@ impl DualLegStrategy {
 
                     if !self
                         .exit_policy
-                        .should_exit(Decimal::ZERO, Decimal::ZERO, net_pnl)
+                        // MC-3 FIX: Pass actual entry/current prices so percentage-based
+                        // exit policies (MinimumProfitPolicy, StopLossPolicy) can function
+                        .should_exit(leg1_entry_price, leg1.price, net_pnl)
                         .await
                     {
                         if self.throttler.unstable_state.should_log() {
@@ -1747,7 +1788,10 @@ impl Executor for CoinbaseClient {
             .await
             .map_err(crate::exchange::ExchangeError::from_boxed)?;
 
-        // MC-2 FIX: Generate order ID for tracking
+        // TODO(CB-1): CoinbaseClient::place_order() returns () and discards the exchange
+        // order ID. This fabricated UUID means get_order_status/cancel_order in recovery
+        // will use the trait defaults (always-filled, not-implemented) instead of real
+        // exchange state. Fix requires changing place_order to return the real order ID.
         let order_id = crate::orders::OrderId::new(format!("cb-{}", uuid::Uuid::new_v4()));
         Ok(order_id)
     }
