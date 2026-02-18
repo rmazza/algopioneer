@@ -1,6 +1,6 @@
 # DynamoDB Table for Trade Recording
 resource "aws_dynamodb_table" "trades" {
-  name         = "algopioneer_trades"
+  name         = "algopioneer-trades"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "pk"
   range_key    = "sk"
