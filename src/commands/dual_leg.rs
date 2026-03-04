@@ -4,8 +4,10 @@
 //! trading strategies with dual-leg execution.
 
 use crate::cli::DualLegCliConfig;
-use crate::coinbase::websocket::CoinbaseWebsocket;
+use crate::exchange::alpaca::{AlpacaClient, AlpacaWebSocketProvider};
 use crate::exchange::coinbase::{AppEnv, CoinbaseClient};
+use crate::exchange::Executor;
+use crate::exchange::WebSocketProvider;
 use crate::logging::{CsvRecorder, TradeRecorder};
 use crate::strategy::dual_leg::{
     BasisManager, DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType,
@@ -67,8 +69,6 @@ pub async fn run_dual_leg_trading(
         None
     };
 
-    let client = Arc::new(CoinbaseClient::new(env, recorder)?);
-
     // MC-4: Initialize Daily Risk Engine and wrap client
     let risk_config = if paper {
         crate::risk::DailyRiskConfig::paper_trading()
@@ -77,7 +77,17 @@ pub async fn run_dual_leg_trading(
         crate::risk::DailyRiskConfig::default()
     };
     let risk_engine = Arc::new(crate::risk::DailyRiskEngine::new(risk_config));
-    let client = Arc::new(crate::risk::RiskManagedExecutor::new(client, risk_engine));
+
+    let client: Arc<dyn Executor + Send + Sync> = match exchange_id {
+        crate::exchange::ExchangeId::Alpaca => {
+            let inner = Arc::new(AlpacaClient::new(env, recorder)?);
+            Arc::new(crate::risk::RiskManagedExecutor::new(inner, risk_engine))
+        }
+        _ => {
+            let inner = Arc::new(CoinbaseClient::new(env, recorder)?);
+            Arc::new(crate::risk::RiskManagedExecutor::new(inner, risk_engine))
+        }
+    };
 
     // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure
     // This prevents unbounded queuing and ensures recovery tasks are never dropped
@@ -184,13 +194,18 @@ pub async fn run_dual_leg_trading(
     let (leg2_tx, leg2_rx) = tokio::sync::mpsc::channel(100);
 
     // WebSocket Integration
-    let ws_client = CoinbaseWebsocket::new()?;
+    let ws_client: Box<dyn WebSocketProvider> = match exchange_id {
+        crate::exchange::ExchangeId::Alpaca => Box::new(AlpacaWebSocketProvider::from_env()?),
+        _ => Box::new(crate::exchange::coinbase::CoinbaseWebSocketProvider::from_env()?),
+    };
     let products = vec![leg1_id.to_string(), leg2_id.to_string()];
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
 
     // Spawn WebSocket Client
     tokio::spawn(async move {
-        if let Err(e) = ws_client.connect_and_subscribe(products, ws_tx).await {
+        // Since WebSocketProvider trait uses spawn_and_subscribe (which returns a handle),
+        // we'll just drop the handle to keep it running
+        if let Err(e) = ws_client.spawn_and_subscribe(products, ws_tx).await {
             tracing::error!("WebSocket connection failed: {}", e);
         }
     });

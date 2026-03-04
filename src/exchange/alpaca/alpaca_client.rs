@@ -234,24 +234,42 @@ impl AlpacaClient {
         // This may leave "dust" (fractional remainder) in the account
         // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional.
         // If we have a fractional quantity < 1 share, we MUST use a Market order.
-        let (adjusted_size, final_price) = match price {
-            Some(p) => {
-                let floored = size.floor();
-                if floored.is_zero() && !size.is_zero() {
-                    // Fractional quantity < 1 (e.g. 0.602)
-                    // We cannot use Limit order. Fallback to Market order.
-                    warn!(
-                        "Falling back to Market order for fractional quantity {} (less than 1 share). Limit price {:?} ignored.",
-                        size, p
-                    );
-                    (size, None) // Pass full size, remove price -> Market Order
-                } else {
-                    // Quantity >= 1, so we can use Limit order with floored quantity.
-                    // This leaves "dust" but ensures safety.
-                    (floored, Some(p))
+        let (adjusted_size, final_price) = if self.is_paper() {
+            // PAPER TRADING HOTFIX:
+            // Dual-leg State Machine assumes order completion asynchronously due to PendingNew.
+            // On paper, Market orders fill instantly, preventing runaway drift.
+            
+            // NOTE: Alpaca rejects fractional quantities for some tickers and configurations.
+            // Flooring here ensures we don't send fractions like 4.048419092 which causes rejections.
+            // We apply the same flooring logic as Limit orders.
+            let floored = size.floor();
+            
+            warn!(
+                "PAPER TRADING HOTFIX: Forcing Market order for floored quantity {} (was {}) to prevent async tracking flaws. Limit price {:?} ignored.",
+                floored, size, price
+            );
+            
+            // If floored is zero but original size was not, we could skip or just send floored
+            // and let the API reject size=0, or let strategy handle size=0 earlier. 
+            // In earlier code, returning (size, None) caused rejection anyway.
+            (floored, None)
+        } else {
+            // Live Trading logic unmodified
+            match price {
+                Some(p) => {
+                    let floored = size.floor();
+                    if floored.is_zero() && !size.is_zero() {
+                        warn!(
+                            "Falling back to Market order for fractional quantity {} (less than 1 share). Limit price {:?} ignored.",
+                            size, p
+                        );
+                        (size, None)
+                    } else {
+                        (floored, Some(p))
+                    }
                 }
+                None => (size, None),
             }
-            None => (size, None), // Already Market order, allow fractional
         };
 
         // CB-2 FIX: Propagate conversion errors instead of silent fallback
@@ -464,10 +482,10 @@ impl AlpacaClient {
     /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
     fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
         match e {
-            RequestError::Endpoint(ref _e) => {
+            RequestError::Endpoint(ref inner_e) => {
                 // apca crate endpoint errors are generic, hard to match specifics without string parsing
                 // checking for rate limits (429) or timeouts
-                let s = e.to_string();
+                let s = inner_e.to_string();
                 if s.contains("429") || s.to_lowercase().contains("rate limit") {
                     ExchangeError::RateLimited(1000)
                 } else if s.contains("500")

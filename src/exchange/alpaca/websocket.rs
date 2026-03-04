@@ -361,9 +361,19 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                                     crate::metrics::record_ws_tick_latency(&symbol, "alpaca", latency_ms);
                                                 }
 
-                                                if let Err(_e) = sender.send(data).await {
-                                                    info!("Channel closed, stopping WebSocket task gracefully");
-                                                    return;
+                                                match sender.try_send(data) {
+                                                    Ok(()) => {}
+                                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                                        debug!(
+                                                            symbol = %symbol,
+                                                            "WebSocket dropping tick: downstream channel full"
+                                                        );
+                                                        continue;
+                                                    }
+                                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                        info!("Channel closed, stopping WebSocket task gracefully");
+                                                        return;
+                                                    }
                                                 }
                                                 crate::metrics::record_ws_tick(&symbol);
                                             }

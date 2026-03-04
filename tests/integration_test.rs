@@ -129,7 +129,7 @@ async fn test_phoenix_recovery() {
     let config = DualLegConfig {
         spot_symbol: "BTC-USD".to_string(),
         future_symbol: "BTC-USDT".to_string(),
-        order_size: dec!(0.1),
+        order_size: dec!(50000.0), // 1 BTC entry
         max_tick_age_ms: 2000,
         execution_timeout_ms: 30000,
         min_profit_threshold: dec!(1.0),
@@ -277,7 +277,7 @@ async fn test_pairs_trading_cycle() {
     let config = DualLegConfig {
         spot_symbol: "A".to_string(),
         future_symbol: "B".to_string(),
-        order_size: dec!(1.0),
+        order_size: dec!(100.0), // 1 Share entry
         max_tick_age_ms: 2000,
         execution_timeout_ms: 30000,
         min_profit_threshold: dec!(0.1),
@@ -413,7 +413,7 @@ async fn test_pairs_trading_cycle() {
 
 #[tokio::test]
 async fn test_basis_trading_cycle() {
-    // let _ = tracing_subscriber::fmt::try_init();
+    let _ = tracing_subscriber::fmt::try_init();
     println!("Starting test_basis_trading_cycle");
     tokio::time::pause();
     let start_ts = 1_600_000_000_000;
@@ -468,7 +468,7 @@ async fn test_basis_trading_cycle() {
     let config = DualLegConfig {
         spot_symbol: "BTC-USD".to_string(),
         future_symbol: "BTC-USDT".to_string(),
-        order_size: dec!(0.1),
+        order_size: dec!(100.0), // 1 Share entry
         max_tick_age_ms: 2000,
         execution_timeout_ms: 30000,
         min_profit_threshold: dec!(0.0),
@@ -529,12 +529,13 @@ async fn test_basis_trading_cycle() {
 
     // 2. Trigger Exit. Spread < 2 bps.
     // Spot 100, Future 100.01. Spread = 1 bps.
+    clock.advance_millis(100);
     leg1_tx
         .send(Arc::new(MarketData {
             symbol: "BTC-USD".into(),
             price: dec!(100),
             instrument_id: None,
-            timestamp: start_ts,
+            timestamp: start_ts + 100,
         }))
         .await
         .unwrap();
@@ -543,7 +544,7 @@ async fn test_basis_trading_cycle() {
             symbol: "BTC-USDT".into(),
             price: dec!(100.01),
             instrument_id: None,
-            timestamp: start_ts,
+            timestamp: start_ts + 100,
         }))
         .await
         .unwrap();

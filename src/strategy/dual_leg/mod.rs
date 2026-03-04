@@ -108,7 +108,7 @@ impl From<crate::exchange::ExchangeError> for ExecutionError {
 // During high-volatility events or WebSocket floods, processing stale ticks
 // leads to execution on prices that no longer exist, causing massive slippage.
 // This check is on the hot path and uses simple integer arithmetic.
-const MAX_ALLOWED_LATENCY_MS: i64 = 100;
+const MAX_ALLOWED_LATENCY_MS: i64 = 500;
 
 // TASK 4: Ghost Position Recovery Marker
 // Used to indicate that an entry price is unknown after state recovery.
@@ -621,6 +621,9 @@ pub struct DualLegStrategy {
     strategy_type: String,
     // STATE PERSISTENCE: Paper trading mode flag
     is_paper: bool,
+    // PORTFOLIO FIX: Whether state was restored from persistence.
+    // Used by reconcile_state to avoid adopting orphan positions from other strategies.
+    state_restored: bool,
     // MARKET HOURS: Last time we checked market status
     last_market_check: i64,
     // MARKET HOURS: Current market status (true=open, false=closed)
@@ -685,6 +688,7 @@ impl DualLegStrategy {
             position_id: None,                              // STATE PERSISTENCE
             strategy_type: "pairs".to_string(),             // STATE PERSISTENCE (default)
             is_paper: false,                                // STATE PERSISTENCE (default)
+            state_restored: false,                           // PORTFOLIO FIX (default)
             last_market_check: 0,                           // MARKET HOURS
             is_market_open: true,                           // MARKET HOURS (assume open initially)
             max_position_usd: None,                         // SAFETY GUARD (set via builder)
@@ -964,7 +968,9 @@ impl DualLegStrategy {
                     }
                     _ => {
                         // Keep Flat state for "flat", "reconciling", "halted", or unknown
-                        debug!("Persisted state was Flat or terminal, starting fresh");
+                        debug!("Persisted state was Flat or terminal, keeping Flat");
+                        // Still mark as restored so reconcile knows this was deliberate
+                        return true;
                     }
                 }
                 false
@@ -1067,6 +1073,18 @@ impl DualLegStrategy {
 
             // Case 3: Flat + exchange has positions → orphan recovery with marker prices
             (StrategyState::Flat, true) => {
+                // PORTFOLIO FIX: Only adopt orphan positions if this strategy has NO
+                // persisted state (i.e. truly a fresh start). If we loaded persisted state
+                // and it was "flat", trust the persisted state over exchange positions,
+                // since positions may belong to another strategy sharing the same symbol.
+                if self.state_restored {
+                    warn!(
+                        leg1 = %leg1_pos, leg2 = %leg2_pos,
+                        "Exchange positions found but persisted state was Flat. \
+                         Assuming positions belong to another strategy. Staying Flat."
+                    );
+                    return;
+                }
                 let direction = Self::infer_direction_from_positions(leg1_pos, leg2_pos, threshold);
                 warn!(
                     leg1 = %leg1_pos, leg2 = %leg2_pos, direction = %direction,
@@ -1137,7 +1155,7 @@ impl DualLegStrategy {
 
         // STATE PERSISTENCE: Try to load prior state from storage first.
         // This restores entry prices from the last session if available.
-        let _state_restored = self.load_persisted_state().await;
+        self.state_restored = self.load_persisted_state().await;
 
         // CB-3 FIX: Always reconcile with exchange.
         // If state was restored, reconcile validates quantities and preserves entry prices.
@@ -1422,11 +1440,23 @@ impl DualLegStrategy {
             }
         }
 
-        let leg1_qty = self.config.order_size / leg1.price;
-        if let Ok(hedge_qty) = self
+        // ALPACA FIX: Floor to whole shares since Alpaca rejects fractional limit orders.
+        // This ensures the strategy state matches the actual filled quantity.
+        let leg1_qty = (self.config.order_size / leg1.price).floor();
+        if leg1_qty.is_zero() {
+            warn!("Calculated leg1 quantity rounds to zero, skipping entry");
+            return;
+        }
+        if let Ok(raw_hedge_qty) = self
             .risk_monitor
             .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
         {
+            // ALPACA FIX: Floor hedge quantity to whole shares to match exchange fill.
+            let hedge_qty = raw_hedge_qty.floor();
+            if hedge_qty.is_zero() {
+                warn!("Calculated hedge quantity rounds to zero, skipping entry");
+                return;
+            }
             let label = match direction {
                 PositionDirection::Long => "Long",
                 PositionDirection::Short => "Short",

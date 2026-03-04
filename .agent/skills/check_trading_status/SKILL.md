@@ -1,44 +1,77 @@
 ---
 name: Check Trading Status
-description: Comprehensive health check for Alpaca, Coinbase, Post-Deployment, and Pairs Trading.
+description: Comprehensive health check for the Alpaca Paper Trading strategy.
 ---
 
 # Check Trading Status
 
-This skill acts as the central dashboard for the trading system's health. It unifies status checks for all exchanges and lifecycle stages.
+This skill acts as the central dashboard for the trading system's health, focusing specifically on the Alpaca trading strategy.
 
 ## Usage
 
 **"Check Alpaca status"** -> Runs Alpaca Paper Trading Check-In.
-**"Verify deployment"** -> Runs Post-Deploy Verification.
-**"Check pairs health"** -> Runs Pairs Health Check & Rebalancing.
 
 ## Sub-Routines
 
 ### 1. Alpaca Paper Trading Check-In
 *   **Goal**: Ensure Alpaca paper trading is active and healthy.
+*   **Context**: The application uses the Alpaca v2 API. Authentication credentials require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` which must be sourced from the `.env` file in the project directory. The container runs on an AWS EC2 instance.
 *   **Steps**:
-    1.  **Container**: `ssh ... 'docker ps | grep algopioneer-alpaca'`
-    2.  **API**: Query Alpaca Account API for equity & buying power.
-    3.  **Positions**: List open positions.
-    4.  **Orders**: Check last 20 orders for activity.
-    5.  **Market**: Verify if market is open.
+    1.  **Container Status**: Verify the Docker container is running on the EC2 instance by fetching the IP from Terraform and executing `docker ps`:
+        ```bash
+        export EC2_IP=$(cd terraform && terraform output -raw public_ip)
+        ssh -i ~/.ssh/trading-key.pem ec2-user@$EC2_IP 'docker ps | grep algopioneer-alpaca'
+        ```
+    2.  **Container Logs**: Check the recent logs of the container on the EC2 instance to ensure no errors or halt states:
+        ```bash
+        export EC2_IP=$(cd terraform && terraform output -raw public_ip)
+        ssh -i ~/.ssh/trading-key.pem ec2-user@$EC2_IP 'docker logs --tail 50 algopioneer-alpaca'
+        ```
+    3.  **API Account**: Query Alpaca Account API for equity & buying power locally (ensure you are using credentials from `.env`):
+        ```bash
+        source .env && curl -s -H "APCA-API-KEY-ID: $APCA_API_KEY_ID" -H "APCA-API-SECRET-KEY: $APCA_API_SECRET_KEY" https://paper-api.alpaca.markets/v2/account | jq '{status, equity, buying_power}'
+        ```
+    4.  **Positions**: List open positions and show the unrealized PnL:
+        ```bash
+        source .env && curl -s -H "APCA-API-KEY-ID: $APCA_API_KEY_ID" -H "APCA-API-SECRET-KEY: $APCA_API_SECRET_KEY" https://paper-api.alpaca.markets/v2/positions | jq 'map({symbol, qty, market_value, unrealized_pl})'
+        ```
+    5.  **Orders**: Check last 20 orders for activity tracking execution:
+        ```bash
+        source .env && curl -s -H "APCA-API-KEY-ID: $APCA_API_KEY_ID" -H "APCA-API-SECRET-KEY: $APCA_API_SECRET_KEY" "https://paper-api.alpaca.markets/v2/orders?status=all&limit=20" | jq 'map({symbol, side, qty, status, filled_at})'
+        ```
+    6.  **Market**: Verify if the US equity market is currently open:
+        ```bash
+        source .env && curl -s -H "APCA-API-KEY-ID: $APCA_API_KEY_ID" -H "APCA-API-SECRET-KEY: $APCA_API_SECRET_KEY" https://paper-api.alpaca.markets/v2/clock | jq '{is_open, next_open, next_close}'
+        ```
 
-### 2. Coinbase Paper Trading Check-In
-*   **Goal**: Monitor Coinbase simulation status.
-*   **Steps**:
-    1.  **Logs**: Check CloudWatch or local logs for activity.
-    2.  **Container**: Verify container uptime.
+## Output Template
 
-### 3. Post-Deploy Verification
-*   **Goal**: Detect "Ghost Trades" and verify new deployments.
-*   **Steps**:
-    1.  **Ghost Trade Check**: Compare internal logs vs. Exchange API.
-    2.  **Log Inspection**: `docker logs --tail 100 ...` to check for startup errors.
+When reporting the status back to the user, use the following format:
 
-### 4. Pairs Health Check
-*   **Goal**: Monthly analysis of pairs trading performance.
-*   **Steps**:
-    1.  **Analyze**: Review PnL per pair.
-    2.  **Rebalance**: Identification of cointegration breakdowns.
-    3.  **Action**: Recommend keeping, removing, or adding pairs.
+```markdown
+# Alpaca Trading Status Check
+**Timestamp**: <current timestamp>
+**Market Status**: <Open / Closed (Next Open: ...)>
+
+## System Health
+- **Container**: `<running / stopped / not found>` (EC2 IP: `<IP>`)
+- **Recent Logs**:
+  ```
+  <snippet of relevant logs or "No errors found">
+  ```
+
+## Account Status
+- **Equity**: $<value>
+- **Buying Power**: $<value>
+- **Account Status**: <ACTIVE / ...>
+
+## Positions
+| Symbol | Qty | Market Value | Unrealized PnL |
+|---|---|---|---|
+| <SYM> | <qty> | $<value> | $<value> |
+
+## Recent Activity (Last 5 Orders)
+| Symbol | Side | Qty | Status | Time |
+|---|---|---|---|---|
+| <SYM> | <BUY/SELL> | <qty> | <FILLED/etc> | <time> |
+```
