@@ -4,6 +4,17 @@ Technical debt and enhancement tracking for algopioneer.
 
 ## High Priority
 
+### MC-4: State Reconciliation for Overlapping Pairs
+**Status**: The system queries the aggregate Alpaca account position to reconcile state. If multiple strategies trade the same symbol (e.g., WFC-JPM and WMT-WFC both trading WFC), they will both claim the total aggregate position for themselves.
+
+**Impact**: This leads to cross-pollution of shared symbols, causing the strategy to think it is massively unhedged. This results in the strategy entering a `Halted` state.
+
+**Required Action**:
+- Track `Client Order IDs` internally to map execution fills strictly to specific strategy instances.
+- Alternatively, support sub-accounts or position tagging to isolate positions by pair.
+
+---
+
 ### MC-3: Portfolio-Level Risk Limits
 **Status**: Strategy-level limits exist (1 position per pair/symbol), but no portfolio-level controls.
 

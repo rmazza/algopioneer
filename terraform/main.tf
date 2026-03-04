@@ -251,7 +251,9 @@ resource "aws_iam_role_policy" "dynamodb_access" {
       {
         Effect = "Allow"
         Action = [
+          "dynamodb:DescribeTable",
           "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
           "dynamodb:StartTransaction",
           "dynamodb:BatchWriteItem",
           "dynamodb:GetItem",

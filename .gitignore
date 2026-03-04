@@ -1,4 +1,4 @@
-/target/
+uiuuuu/target/
 
 # dotenv files with secrets
 .env
@@ -56,3 +56,6 @@ TODO.md
 
 # Archived pair configs (keep local only)
 config_archive/
+
+# Local cargo config (contains absolute paths)
+.cargo/config.toml

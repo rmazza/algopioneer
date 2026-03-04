@@ -212,6 +212,25 @@ cargo run --example optimize_pairs
     ./autopilot.sh
     ```
 
+# Skills & Capabilities
+
+The agent is equipped with **9 high-value skills** to assist with development and operations.
+
+### Development
+*   **[Code Review & Fix](.agent/skills/code_review/SKILL.md)**: Conducts rigorous reviews (Principal Quant persona) and fixes issues.
+*   **[Manage Development](.agent/skills/manage_development/SKILL.md)**: Unified workflow for coding, testing, scaffolding, and documenting.
+*   **[Backtest Wizard](.agent/skills/run_backtest_suite/SKILL.md)**: Interactive wizard for running backtests.
+
+### Operations
+*   **[Check Trading Status](.agent/skills/check_trading_status/SKILL.md)**: Health dashboard for Alpaca, Coinbase, Post-Deploy, and Pairs.
+*   **[Deploy Application](.agent/skills/deploy_application/SKILL.md)**: Manages Docker builds and Terraform infrastructure.
+
+### Resources
+*   **[Consult Expert](.agent/skills/consult_expert/SKILL.md)**: Adopt specialized personas (Rust, Security, Quant).
+*   **[Consult Context](.agent/skills/consult_context/SKILL.md)**: Access architectural and domain knowledge.
+*   **[Use Template](.agent/skills/use_template/SKILL.md)**: Scaffold files from standard templates.
+*   **[Perform Checklist](.agent/skills/perform_checklist/SKILL.md)**: Interactive process checklists.
+
 # Development Conventions
 
 *   **Configuration:** API keys and secrets managed through `.env` file
