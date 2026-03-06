@@ -17,6 +17,7 @@ use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use apca::api::v2::order as alpaca_order;
+use apca::api::v2::orders as alpaca_orders;
 use apca::api::v2::position as alpaca_position;
 use apca::data::v2::bars as alpaca_bars;
 use apca::{ApiInfo, Client, RequestError};
@@ -292,6 +293,15 @@ impl AlpacaClient {
         let request = Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
 
         let client = &self.client;
+
+        // ALPACA FIX: Wash Trade Prevention (MC-1)
+        // If placing an order fails with 403 (wash trade), it's usually because of 
+        // existing orders on the opposite side. We proactively cancel ALL open 
+        // orders for this symbol before placing a new one.
+        if let Err(e) = self.cancel_all_orders(product_id).await {
+            warn!(symbol = %symbol, error = %e, "Failed to cancel existing orders before placement (ignoring)");
+        }
+
         let order = client
             .issue::<alpaca_order::Create>(&request)
             .await
@@ -479,7 +489,59 @@ impl AlpacaClient {
         }
     }
 
+    /// Cancel ALL open orders for a symbol.
+    ///
+    /// Used by Alpaca to resolve "potential wash trade" errors by clearing
+    /// any opposing orders before placing new ones.
+    pub async fn cancel_all_orders(&self, product_id: &str) -> Result<(), ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        let symbol = utils::to_alpaca_symbol(product_id);
+        let client = &self.client;
+
+        info!(symbol = %symbol, "Cancelling all open orders for symbol");
+
+        // 1. Fetch all open orders for this symbol
+        let request = alpaca_orders::ListReq {
+            symbols: vec![symbol.as_ref().to_string()],
+            status: alpaca_orders::Status::Open,
+            ..Default::default()
+        };
+
+        let orders = client
+            .issue::<alpaca_orders::List>(&request)
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        if orders.is_empty() {
+            debug!(symbol = %symbol, "No open orders found to cancel");
+            return Ok(());
+        }
+
+        info!(
+            symbol = %symbol,
+            count = orders.len(),
+            "Found open orders to cancel"
+        );
+
+        // 2. Cancel each order individually
+        for order in orders {
+            let id = alpaca_order::Id(*order.id);
+            if let Err(e) = client.issue::<alpaca_order::Delete>(&id).await {
+                // Log and continue - some may have filled/cancelled in the meantime
+                warn!(
+                    order_id = %order.id.as_hyphenated(),
+                    error = %e,
+                    "Failed to cancel order during bulk cancellation"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
+
     fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
         match e {
             RequestError::Endpoint(ref inner_e) => {
@@ -613,6 +675,10 @@ impl Executor for AlpacaClient {
             .map_err(Self::map_alpaca_error)?;
 
         Ok(())
+    }
+
+    async fn cancel_all_orders(&self, symbol: &str) -> Result<(), ExchangeError> {
+        self.cancel_all_orders(symbol).await
     }
 }
 

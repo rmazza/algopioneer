@@ -248,6 +248,14 @@ pub struct DualLegConfig {
     pub stop_loss_threshold: Decimal,
     pub fee_tier: TransactionCostModel,
     pub throttle_interval_secs: u64,
+    /// Minimum time (ms) to wait after an exit before allowing re-entry.
+    /// Prevents Alpaca wash trade detection (HTTP 403) from rapid exit→re-entry cycles.
+    #[serde(default = "default_entry_cooldown_ms")]
+    pub entry_cooldown_ms: i64,
+}
+
+fn default_entry_cooldown_ms() -> i64 {
+    30_000 // 30 seconds default
 }
 
 /// AS1: Builder for DualLegConfig with sensible defaults and validation.
@@ -263,6 +271,7 @@ pub struct DualLegConfigBuilder {
     stop_loss_threshold: Decimal,
     fee_tier: TransactionCostModel,
     throttle_interval_secs: u64,
+    entry_cooldown_ms: i64,
 }
 
 impl Default for DualLegConfigBuilder {
@@ -277,6 +286,7 @@ impl Default for DualLegConfigBuilder {
             stop_loss_threshold: dec!(-0.05),
             fee_tier: TransactionCostModel::default(),
             throttle_interval_secs: 5,
+            entry_cooldown_ms: 30_000, // 30 seconds default
         }
     }
 }
@@ -340,6 +350,14 @@ impl DualLegConfigBuilder {
         self
     }
 
+    /// Set the entry cooldown period in milliseconds.
+    /// After an exit, the strategy will wait this long before allowing re-entry.
+    /// Prevents Alpaca wash trade detection (HTTP 403).
+    pub fn entry_cooldown_ms(mut self, ms: i64) -> Self {
+        self.entry_cooldown_ms = ms;
+        self
+    }
+
     /// Build and validate the configuration.
     /// Returns Err if required fields are missing or validation fails.
     pub fn build(self) -> Result<DualLegConfig, String> {
@@ -394,6 +412,7 @@ impl DualLegConfigBuilder {
             stop_loss_threshold: self.stop_loss_threshold,
             fee_tier: self.fee_tier,
             throttle_interval_secs: self.throttle_interval_secs,
+            entry_cooldown_ms: self.entry_cooldown_ms,
         })
     }
 }
@@ -1419,6 +1438,23 @@ impl DualLegStrategy {
         leg2: &MarketData,
     ) {
         if self.state != StrategyState::Flat {
+            return;
+        }
+
+        // WASH TRADE PREVENTION: Enforce cooldown after exit before allowing re-entry.
+        // Alpaca flags rapid sell→buy on the same symbol as a potential wash trade (HTTP 403).
+        let now = self.clock.now_ts_millis();
+        let elapsed = now - self.last_state_change_ts;
+        if elapsed < self.config.entry_cooldown_ms {
+            if self.throttler.tick_age.should_log() {
+                let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
+                warn!(
+                    elapsed_ms = elapsed,
+                    cooldown_ms = self.config.entry_cooldown_ms,
+                    suppressed = suppressed,
+                    "Entry blocked: cooldown period active after last state change"
+                );
+            }
             return;
         }
 

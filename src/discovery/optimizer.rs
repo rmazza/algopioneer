@@ -112,6 +112,7 @@ impl OptimizedPair {
                 stop_loss_threshold: dec!(-0.02),
                 fee_tier: TransactionCostModel::default(),
                 throttle_interval_secs: 5,
+                entry_cooldown_ms: 30_000,
             },
             window_size: self.window,
             // CB-2 FIX: Convert f64 to Decimal for financial precision

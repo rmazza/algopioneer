@@ -357,6 +357,15 @@ pub trait Executor: Send + Sync {
             "cancel_order not implemented".to_string(),
         ))
     }
+
+    /// Cancel ALL open orders for a symbol.
+    ///
+    /// # Default Implementation
+    /// Returns `Ok(())` (no-op) to avoid breaking existing clients.
+    /// Used by Alpaca to resolve "potential wash trade" errors.
+    async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), ExchangeError> {
+        Ok(())
+    }
 }
 
 /// Extended exchange client trait with full capabilities

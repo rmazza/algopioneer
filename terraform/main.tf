@@ -29,6 +29,12 @@ variable "my_ip" {
   # No default — force explicit input for security
 }
 
+variable "my_ipv6" {
+  type        = string
+  description = "Your IPv6 CIDR for SSH access (e.g., 2001:db8::/32)"
+  default     = "::/128"
+}
+
 variable "key_name" {
   type        = string
   description = "Name of the EC2 key pair for SSH access"
@@ -128,11 +134,12 @@ resource "aws_security_group" "bot_sg" {
 
   # INBOUND: SSH (22) - Restricted to specified IP
   ingress {
-    description = "SSH access from admin IP"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
+    description      = "SSH access from admin IP"
+    from_port        = 22
+    to_port          = 22
+    protocol         = "tcp"
+    cidr_blocks      = [var.my_ip]
+    ipv6_cidr_blocks = [var.my_ipv6]
   }
 
   # OUTBOUND: Allow all (required for Coinbase/Kraken API and ECR)

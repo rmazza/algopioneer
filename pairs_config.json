@@ -12,7 +12,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "DOGE-USD",
@@ -27,7 +28,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "DOGE-USD",
@@ -42,7 +44,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "LTC-USD",
@@ -57,7 +60,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "DOGE-USD",
@@ -72,7 +76,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "DOGE-USD",
@@ -87,7 +92,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "DOT-USD",
@@ -102,7 +108,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "FIL-USD",
@@ -117,7 +124,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "DOGE-USD",
@@ -132,7 +140,8 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   },
   {
     "spot_symbol": "SOL-USD",
@@ -147,6 +156,7 @@
       "taker_fee_bps": "20.0",
       "slippage_bps": "5.0"
     },
-    "throttle_interval_secs": 5
+    "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000
   }
 ]
