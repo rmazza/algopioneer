@@ -136,6 +136,7 @@ async fn test_phoenix_recovery() {
         stop_loss_threshold: dec!(-10.0),
         fee_tier: TransactionCostModel::new(dec!(5.0), dec!(10.0), dec!(1.0)),
         throttle_interval_secs: 5,
+        entry_cooldown_ms: 0,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -284,6 +285,7 @@ async fn test_pairs_trading_cycle() {
         stop_loss_threshold: dec!(-5.0),
         fee_tier: TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0)),
         throttle_interval_secs: 5,
+        entry_cooldown_ms: 0,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -352,7 +354,7 @@ async fn test_pairs_trading_cycle() {
         .unwrap();
 
     // Allow processing
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
 
     // Expect Entering -> InPosition
     let state = state_rx.recv().await.expect("No state (Entering)");
@@ -362,7 +364,7 @@ async fn test_pairs_trading_cycle() {
     clock.advance_millis(100);
     tokio::time::advance(Duration::from_millis(100)).await;
     // Also yield so execution engine can process
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (InPosition)");
     assert!(matches!(state, StrategyState::InPosition { .. }));
@@ -392,7 +394,7 @@ async fn test_pairs_trading_cycle() {
         .unwrap();
 
     // Allow processing
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
 
     // Expect Exiting -> Flat
     // Allow state transition
@@ -405,7 +407,7 @@ async fn test_pairs_trading_cycle() {
     clock.advance_millis(100);
     tokio::time::advance(Duration::from_millis(100)).await;
     // Also sleep a bit to let the runtime poll
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (Flat)");
     assert_eq!(state, StrategyState::Flat);
@@ -475,6 +477,7 @@ async fn test_basis_trading_cycle() {
         stop_loss_threshold: dec!(-10.0),
         fee_tier: cost_model,
         throttle_interval_secs: 5,
+        entry_cooldown_ms: 0,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -517,12 +520,12 @@ async fn test_basis_trading_cycle() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (Entering)");
     assert!(matches!(state, StrategyState::Entering { .. }));
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
 
     let state = state_rx.recv().await.expect("No state (InPosition)");
     assert!(matches!(state, StrategyState::InPosition { .. }));
@@ -549,12 +552,12 @@ async fn test_basis_trading_cycle() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
 
     let state = state_rx.recv().await.expect("No state (Exiting)");
     assert!(matches!(state, StrategyState::Exiting { .. }));
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
 
     let state = state_rx.recv().await.expect("No state (Flat)");
     assert_eq!(state, StrategyState::Flat);
@@ -622,7 +625,7 @@ async fn test_recovery_worker_retry() {
 
     // Advance 2s (backoff)
     tokio::time::advance(Duration::from_secs(2)).await;
-    tokio::time::sleep(Duration::from_millis(100)).await; // Allow processing
+    tokio::time::advance(Duration::from_millis(100)).await; // Allow processing
 
     // Expect Success result
     let res = feedback_rx.recv().await.expect("No feedback");

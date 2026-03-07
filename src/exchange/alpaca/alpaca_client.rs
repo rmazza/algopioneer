@@ -60,29 +60,28 @@ impl AlpacaClient {
             )
         })?;
 
-        Self::with_credentials_and_clock(api_key, api_secret, env, recorder, Arc::new(SystemClock))
-            .map_err(|e| ExchangeError::Configuration(e.to_string())) // Simplify error mapping for now, ideally with_credentials_and_clock should return ExchangeError
+        Self::with_credentials_and_clock(&api_key, &api_secret, env, recorder, Arc::new(SystemClock))
     }
 
     pub fn with_credentials(
-        api_key: String,
-        api_secret: String,
+        api_key: &str,
+        api_secret: &str,
         env: AppEnv,
         recorder: Option<Arc<dyn TradeRecorder>>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, ExchangeError> {
         Self::with_credentials_and_clock(api_key, api_secret, env, recorder, Arc::new(SystemClock))
     }
 
-    /// Create a new AlpacaClient with explicit credentials and clock (CB-3 FIX)
+    /// Create a new AlpacaClient with explicit credentials and clock
     ///
     /// This constructor allows injecting a custom clock for deterministic testing.
     pub fn with_credentials_and_clock(
-        api_key: String,
-        api_secret: String,
+        api_key: &str,
+        api_secret: &str,
         env: AppEnv,
         recorder: Option<Arc<dyn TradeRecorder>>,
         clock: Arc<dyn Clock>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, ExchangeError> {
         let is_paper = matches!(env, AppEnv::Paper | AppEnv::Sandbox);
 
         let base_url = if is_paper {
@@ -97,17 +96,15 @@ impl AlpacaClient {
         );
 
         // NOTE: We construct ApiInfo directly to avoid mutating global environment variables
-        let api_info = ApiInfo::from_parts(base_url, &api_key, &api_secret)
-            .map_err(|e| format!("Failed to create Alpaca API info: {}", e))?;
+        let api_info = ApiInfo::from_parts(base_url, api_key, api_secret)
+            .map_err(|e| ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e)))?;
 
         let client = Client::new(api_info);
 
-        // N-2 FIX: Const assertion ensures compile-time safety
         const RATE_LIMIT_RPS: u32 = 3;
-        const _: () = assert!(RATE_LIMIT_RPS > 0, "Rate limit must be positive");
-
-        // PRINCIPAL FIX: Paranoia - Handle potential future dynamic case safely
-        let rps = NonZeroU32::new(RATE_LIMIT_RPS).unwrap_or(NonZeroU32::new(1).unwrap());
+        let rps = NonZeroU32::new(RATE_LIMIT_RPS).ok_or_else(|| {
+            ExchangeError::Configuration("Rate limit must be positive".to_string())
+        })?;
         let quota = Quota::per_second(rps);
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
@@ -120,9 +117,7 @@ impl AlpacaClient {
         })
     }
 
-    /// Create from ExchangeConfig (for factory/DI pattern - MC-3 FIX)
-    ///
-    /// Used by `create_exchange_client` factory function.
+    /// Create from ExchangeConfig (for factory/DI pattern)
     pub fn from_config(config: ExchangeConfig) -> Result<Self, ExchangeError> {
         let env = if config.sandbox {
             AppEnv::Paper
@@ -130,25 +125,21 @@ impl AlpacaClient {
             AppEnv::Live
         };
 
-        Self::with_credentials(config.api_key, config.api_secret, env, None)
-            .map_err(|e| ExchangeError::Configuration(e.to_string()))
+        Self::with_credentials(&config.api_key, &config.api_secret, env, None)
     }
 
     /// Test connection to Alpaca API
-    ///
-    /// MC-3 FIX: Uses the ExchangeClient trait implementation to avoid duplication
-    pub async fn test_connection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        <Self as crate::exchange::ExchangeClient>::test_connection(self)
-            .await
-            .map_err(|e| e.to_string().into())
+    pub async fn test_connection(&mut self) -> Result<(), ExchangeError> {
+        <Self as crate::exchange::ExchangeClient>::test_connection(self).await
     }
 
-    /// N-1 FIX: Parse order side string to Alpaca enum (eliminates duplication)
+    /// Parse order side string to Alpaca enum
     #[inline]
     fn parse_order_side(side: &str) -> alpaca_order::Side {
-        match side.to_lowercase().as_str() {
-            "buy" => alpaca_order::Side::Buy,
-            _ => alpaca_order::Side::Sell,
+        if side.eq_ignore_ascii_case("buy") {
+            alpaca_order::Side::Buy
+        } else {
+            alpaca_order::Side::Sell
         }
     }
 
@@ -544,17 +535,12 @@ impl AlpacaClient {
 
     fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
         match e {
-            RequestError::Endpoint(ref inner_e) => {
-                // apca crate endpoint errors are generic, hard to match specifics without string parsing
-                // checking for rate limits (429) or timeouts
-                let s = inner_e.to_string();
-                if s.contains("429") || s.to_lowercase().contains("rate limit") {
+            RequestError::Endpoint(inner) => {
+                let s = inner.to_string();
+                let s_lower = s.to_lowercase();
+                if s.contains("429") || s_lower.contains("rate limit") {
                     ExchangeError::RateLimited(1000)
-                } else if s.contains("500")
-                    || s.contains("502")
-                    || s.contains("503")
-                    || s.contains("504")
-                {
+                } else if ["500", "502", "503", "504"].iter().any(|&code| s.contains(code)) {
                     ExchangeError::ExchangeInternal(s)
                 } else if s.contains("401") || s.contains("403") {
                     ExchangeError::Configuration(s)
@@ -562,7 +548,6 @@ impl AlpacaClient {
                     ExchangeError::OrderRejected(s)
                 }
             }
-            // Fallback for other variants (Http, Json, etc) that we might have guessed wrong
             _ => ExchangeError::Other(e.to_string()),
         }
     }
@@ -575,7 +560,8 @@ impl TryFrom<(ExchangeConfig, AppEnv, Option<Arc<dyn TradeRecorder>>)> for Alpac
     fn try_from(
         (config, env, recorder): (ExchangeConfig, AppEnv, Option<Arc<dyn TradeRecorder>>),
     ) -> Result<Self, Self::Error> {
-        Self::with_credentials(config.api_key, config.api_secret, env, recorder)
+        Self::with_credentials(&config.api_key, &config.api_secret, env, recorder)
+            .map_err(|e| e.into())
     }
 }
 
