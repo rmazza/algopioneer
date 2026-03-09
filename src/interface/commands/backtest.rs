@@ -3,9 +3,10 @@
 //! Implements the `backtest` subcommand for running backtests
 //! on historical data with configurable strategies and data sources.
 
-use crate::application::backtest::{self, BacktestConfig};
+use crate::application::backtest::{self, BacktestConfig, BacktestResult};
 use crate::interface::cli::{BacktestCliConfig, BacktestStrategyType};
 use crate::application::strategy::moving_average::MovingAverageCrossover;
+use crate::application::strategy::dual_leg::PairsManager;
 
 use polars::prelude::*;
 use rust_decimal_macros::dec;
@@ -14,7 +15,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Errors that can occur during backtesting.
 #[derive(Debug, Error)]
@@ -57,18 +58,14 @@ struct BacktestOutput {
     losing_trades: u32,
     win_rate_pct: String,
     max_drawdown_pct: String,
+    sharpe_ratio: String,
+    sortino_ratio: String,
+    profit_factor: String,
+    expectancy: String,
 }
 
 /// Run a backtest with the provided CLI configuration.
-///
-/// Supports:
-/// - Multiple strategies (moving-average, dual-leg)
-/// - Multiple data sources (CSV files, synthetic)
-/// - JSON output for CI integration
-///
-/// # Errors
-/// Returns error if data loading or backtest fails.
-pub fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError> {
+pub async fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError> {
     info!("--- Running Backtest ---");
     info!(
         strategy = %format!("{:?}", config.strategy),
@@ -79,56 +76,79 @@ pub fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError> {
         "Backtest configuration"
     );
 
-    // Parse duration to candle count
     let candle_count = config.duration_to_candles()?;
-
-    // Get primary symbol for data loading
-    let primary_symbol = config.primary_symbol()?;
-
-    // Load data
-    let df = if config.synthetic {
-        generate_synthetic_data(primary_symbol, candle_count)?
-    } else {
-        load_csv_data(primary_symbol, candle_count)?
-    };
-
-    info!(rows = df.height(), "Data loaded");
-
-    // Run appropriate strategy
+    
+    // Result of the backtest
     let result = match config.strategy {
         BacktestStrategyType::MovingAverage => {
+            let primary_symbol = config.primary_symbol()?;
+            let df = if config.synthetic {
+                generate_synthetic_data(primary_symbol, candle_count)?
+            } else {
+                load_csv_data(primary_symbol, candle_count)?
+            };
+            info!(rows = df.height(), "Data loaded for {}", primary_symbol);
+
             let strategy = MovingAverageCrossover::new(5, 20);
             let bt_config = BacktestConfig::with_capital(config.initial_capital);
             backtest::run(&strategy, &df, &bt_config)?
         }
         BacktestStrategyType::DualLeg => {
-            warn!("Dual-leg backtesting is not fully implemented yet. Returning empty result for CI compatibility.");
-            crate::application::backtest::BacktestResult {
-                initial_capital: config.initial_capital,
-                final_capital: config.initial_capital,
-                net_profit: rust_decimal::Decimal::ZERO,
-                total_trades: 0,
-                winning_trades: 0,
-                losing_trades: 0,
-                max_drawdown: rust_decimal::Decimal::ZERO,
+            if config.symbols.len() < 2 {
+                return Err(BacktestError::Data("Dual-leg strategy requires exactly 2 symbols".to_string()));
             }
+            let s1 = &config.symbols[0];
+            let s2 = &config.symbols[1];
+
+            let df1 = if config.synthetic {
+                generate_synthetic_data(s1, candle_count)?
+            } else {
+                load_csv_data(s1, candle_count)?
+            };
+            let df2 = if config.synthetic {
+                generate_synthetic_data(s2, candle_count)?
+            } else {
+                load_csv_data(s2, candle_count)?
+            };
+
+            info!(rows1 = df1.height(), rows2 = df2.height(), "Data loaded for {} and {}", s1, s2);
+
+            // Create a PairsManager for signal generation
+            // Using default parameters for the backtest
+            let mut strategy = PairsManager::new(20, 2.0, 0.5);
+            let bt_config = BacktestConfig::with_capital(config.initial_capital);
+            backtest::run_dual(&mut strategy, &df1, &df2, &bt_config).await?
         }
     };
 
     // Print results
+    print_backtest_results(&result);
+
+    // Write output files
+    write_backtest_outputs(&result, &config)?;
+
+    Ok(())
+}
+
+fn print_backtest_results(result: &BacktestResult) {
     info!("--- Backtest Results ---");
     info!("Initial Capital: ${}", result.initial_capital);
     info!("Final Capital:   ${}", result.final_capital);
     info!("Net Profit:      ${}", result.net_profit);
     info!("Return:          {}%", result.return_percentage());
+    info!("Sharpe Ratio:    {}", result.sharpe_ratio);
+    info!("Sortino Ratio:   {}", result.sortino_ratio);
+    info!("Profit Factor:   {}", result.profit_factor);
+    info!("Expectancy:      {}", result.expectancy);
     info!("Total Trades:    {}", result.total_trades);
-    info!("Winning Trades:  {}", result.winning_trades);
-    info!("Losing Trades:   {}", result.losing_trades);
     info!("Win Rate:        {}%", result.win_rate() * dec!(100));
     info!("Max Drawdown:    {}%", result.max_drawdown * dec!(100));
     info!("------------------------");
+}
 
-    // Write output JSON
+fn write_backtest_outputs(result: &BacktestResult, config: &BacktestCliConfig) -> Result<(), BacktestError> {
+    fs::create_dir_all(&config.output_dir)?;
+
     let output = BacktestOutput {
         strategy: format!("{:?}", config.strategy),
         exchange: config.exchange.clone(),
@@ -143,22 +163,41 @@ pub fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError> {
         losing_trades: result.losing_trades,
         win_rate_pct: (result.win_rate() * dec!(100)).to_string(),
         max_drawdown_pct: (result.max_drawdown * dec!(100)).to_string(),
+        sharpe_ratio: result.sharpe_ratio.to_string(),
+        sortino_ratio: result.sortino_ratio.to_string(),
+        profit_factor: result.profit_factor.to_string(),
+        expectancy: result.expectancy.to_string(),
     };
 
-    // Create output directory and write results
-    fs::create_dir_all(&config.output_dir)?;
-    let output_path = Path::new(&config.output_dir).join("results.json");
-    let mut file = File::create(&output_path)?;
-    let json = serde_json::to_string_pretty(&output)?;
-    file.write_all(json.as_bytes())?;
-    info!(path = %output_path.display(), "Results written");
+    let summary_path = Path::new(&config.output_dir).join("results.json");
+    let mut summary_file = File::create(&summary_path)?;
+    summary_file.write_all(serde_json::to_string_pretty(&output)?.as_bytes())?;
+    info!(path = %summary_path.display(), "Summary written");
+
+    let trades_path = Path::new(&config.output_dir).join("trades.csv");
+    let mut trades_file = File::create(&trades_path)?;
+    writeln!(trades_file, "entry_idx,exit_idx,entry_price,exit_price,size,pnl,pnl_pct")?;
+    for t in &result.trades {
+        writeln!(
+            trades_file,
+            "{},{},{},{},{},{},{}",
+            t.entry_idx, t.exit_idx, t.entry_price, t.exit_price, t.size, t.pnl, t.pnl_pct
+        )?;
+    }
+    info!(path = %trades_path.display(), "Trades log written");
+
+    let equity_path = Path::new(&config.output_dir).join("equity.csv");
+    let mut equity_file = File::create(&equity_path)?;
+    writeln!(equity_file, "step,equity")?;
+    for (i, e) in result.equity_curve.iter().enumerate() {
+        writeln!(equity_file, "{},{}", i, e)?;
+    }
+    info!(path = %equity_path.display(), "Equity curve written");
 
     Ok(())
 }
 
-/// Load historical data from a CSV file.
 fn load_csv_data(symbol: &str, max_rows: usize) -> Result<DataFrame, BacktestError> {
-    // Try multiple paths: data/{symbol}.csv, sample_data.csv
     let paths = [
         format!("data/{}.csv", symbol),
         format!("data/{}.csv", symbol.to_lowercase()),
@@ -171,7 +210,6 @@ fn load_csv_data(symbol: &str, max_rows: usize) -> Result<DataFrame, BacktestErr
             let file = File::open(path)?;
             let df = CsvReader::new(file).finish()?;
 
-            // Limit rows if necessary
             let df = if df.height() > max_rows {
                 df.slice(0, max_rows)
             } else {
@@ -189,7 +227,6 @@ fn load_csv_data(symbol: &str, max_rows: usize) -> Result<DataFrame, BacktestErr
     )))
 }
 
-/// Generate synthetic price data for testing.
 fn generate_synthetic_data(symbol: &str, candle_count: usize) -> Result<DataFrame, BacktestError> {
     info!(
         symbol = %symbol,
@@ -197,33 +234,28 @@ fn generate_synthetic_data(symbol: &str, candle_count: usize) -> Result<DataFram
         "Generating synthetic data"
     );
 
-    // NOTE: f64 is acceptable for synthetic data generation (test-only code).
-    // This data never touches real trading logic. Precision loss is irrelevant.
     let mut prices = Vec::with_capacity(candle_count);
     let mut price = 100.0_f64;
 
-    // Use a simple pseudo-random sequence for reproducibility
-    // (seeded by symbol hash for different patterns per symbol)
     let seed: u64 = symbol.bytes().map(|b| b as u64).sum();
     let mut state = seed;
 
     for _ in 0..candle_count {
-        // Simple LCG random number generator
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         let rand = ((state >> 33) as f64) / (u32::MAX as f64) - 0.5;
 
-        // Add some trend and mean reversion
-        let drift = 0.0001; // Slight upward drift
-        let volatility = 0.02; // 2% daily volatility
+        let drift = 0.0001;
+        let volatility = 0.02;
         let change = drift + volatility * rand;
 
         price *= 1.0 + change;
-        price = price.max(1.0); // Floor at $1
+        price = price.max(1.0);
         prices.push(price);
     }
 
     let df = df! {
-        "close" => prices
+        "close" => prices,
+        "timestamp" => (0..candle_count).map(|i| i as i64).collect::<Vec<_>>()
     }?;
 
     Ok(df)
@@ -239,6 +271,7 @@ mod tests {
             generate_synthetic_data("BTC-USD", 100).expect("failed to generate synthetic data");
         assert_eq!(df.height(), 100);
         assert!(df.column("close").is_ok());
+        assert!(df.column("timestamp").is_ok());
     }
 
     #[test]
@@ -260,7 +293,6 @@ mod tests {
         };
         assert_eq!(config_year.duration_to_candles().unwrap(), 365 * 24);
 
-        // Test invalid format returns error
         let config_invalid = BacktestCliConfig {
             duration: "invalid".to_string(),
             ..config.clone()

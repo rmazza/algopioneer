@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 synthetic,
             };
 
-            commands::run_backtest(config)?;
+            commands::run_backtest(config).await?;
         }
         Commands::DualLeg {
             strategy,

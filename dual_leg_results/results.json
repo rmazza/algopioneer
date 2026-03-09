@@ -1,0 +1,22 @@
+{
+  "strategy": "DualLeg",
+  "exchange": "alpaca",
+  "symbols": [
+    "AAPL",
+    "MSFT"
+  ],
+  "duration": "1y",
+  "initial_capital": "1000",
+  "final_capital": "280.39854719735951059253239002",
+  "net_profit": "-719.60145280264048940746760998",
+  "return_pct": "-71.96014528026404894074676100",
+  "total_trades": 149,
+  "winning_trades": 11,
+  "losing_trades": 138,
+  "win_rate_pct": "7.3825503355704697986577181200",
+  "max_drawdown_pct": "71.96014528026404894074676100",
+  "sharpe_ratio": "-1.4065",
+  "sortino_ratio": "-1.4159",
+  "profit_factor": "0.6740836694754415388922623133",
+  "expectancy": "-0.1530179103670009616854101056"
+}
