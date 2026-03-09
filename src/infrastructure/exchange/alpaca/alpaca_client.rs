@@ -1,0 +1,882 @@
+//! Alpaca Client Wrapper
+//!
+//! A higher-level client that wraps `AlpacaExchangeClient` and provides
+//! an interface compatible with `CoinbaseClient` for use with strategies.
+
+use crate::infrastructure::coinbase::AppEnv;
+use crate::infrastructure::logging::{TradeRecord, TradeRecorder, TradeSide};
+use crate::application::strategy::dual_leg::{Clock, SystemClock};
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
+use rust_decimal::Decimal;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Instant;
+
+use tracing::{debug, error, info, warn};
+
+use apca::api::v2::order as alpaca_order;
+use apca::api::v2::orders as alpaca_orders;
+use apca::api::v2::position as alpaca_position;
+use apca::data::v2::bars as alpaca_bars;
+use apca::{ApiInfo, Client, RequestError};
+
+use crate::infrastructure::exchange::alpaca::utils;
+use crate::infrastructure::exchange::{Candle, ExchangeConfig, ExchangeError, Executor, Granularity};
+use crate::domain::types::OrderSide;
+
+/// Alpaca client with same interface as CoinbaseClient
+///
+/// Provides order execution, position tracking, and candle fetching
+/// with paper trading support and rate limiting.
+pub struct AlpacaClient {
+    client: Arc<Client>,
+    mode: AppEnv,
+    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
+    recorder: Option<Arc<dyn TradeRecorder>>,
+    /// CB-3 FIX: Injected clock for deterministic timestamps
+    clock: Arc<dyn Clock>,
+}
+
+impl AlpacaClient {
+    /// Create a new AlpacaClient from environment variables
+    ///
+    /// # Environment Variables
+    /// - `ALPACA_API_KEY`: Your Alpaca API key
+    /// - `ALPACA_API_SECRET`: Your Alpaca API secret
+    pub fn new(
+        env: AppEnv,
+        recorder: Option<Arc<dyn TradeRecorder>>,
+    ) -> Result<Self, ExchangeError> {
+        let api_key = std::env::var("ALPACA_API_KEY").map_err(|_| {
+            ExchangeError::Configuration(
+                "ALPACA_API_KEY must be set in .env file or environment".to_string(),
+            )
+        })?;
+        let api_secret = std::env::var("ALPACA_API_SECRET").map_err(|_| {
+            ExchangeError::Configuration(
+                "ALPACA_API_SECRET must be set in .env file or environment".to_string(),
+            )
+        })?;
+
+        Self::with_credentials_and_clock(&api_key, &api_secret, env, recorder, Arc::new(SystemClock))
+    }
+
+    pub fn with_credentials(
+        api_key: &str,
+        api_secret: &str,
+        env: AppEnv,
+        recorder: Option<Arc<dyn TradeRecorder>>,
+    ) -> Result<Self, ExchangeError> {
+        Self::with_credentials_and_clock(api_key, api_secret, env, recorder, Arc::new(SystemClock))
+    }
+
+    /// Create a new AlpacaClient with explicit credentials and clock
+    ///
+    /// This constructor allows injecting a custom clock for deterministic testing.
+    pub fn with_credentials_and_clock(
+        api_key: &str,
+        api_secret: &str,
+        env: AppEnv,
+        recorder: Option<Arc<dyn TradeRecorder>>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, ExchangeError> {
+        let is_paper = matches!(env, AppEnv::Paper | AppEnv::Sandbox);
+
+        let base_url = if is_paper {
+            "https://paper-api.alpaca.markets"
+        } else {
+            "https://api.alpaca.markets"
+        };
+
+        info!(
+            paper = is_paper,
+            "Initializing Alpaca client (paper={})", is_paper
+        );
+
+        // NOTE: We construct ApiInfo directly to avoid mutating global environment variables
+        let api_info = ApiInfo::from_parts(base_url, api_key, api_secret)
+            .map_err(|e| ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e)))?;
+
+        let client = Client::new(api_info);
+
+        const RATE_LIMIT_RPS: u32 = 3;
+        let rps = NonZeroU32::new(RATE_LIMIT_RPS).ok_or_else(|| {
+            ExchangeError::Configuration("Rate limit must be positive".to_string())
+        })?;
+        let quota = Quota::per_second(rps);
+        let rate_limiter = Arc::new(RateLimiter::direct(quota));
+
+        Ok(Self {
+            client: Arc::new(client),
+            mode: env,
+            rate_limiter,
+            recorder,
+            clock,
+        })
+    }
+
+    /// Create from ExchangeConfig (for factory/DI pattern)
+    pub fn from_config(config: ExchangeConfig) -> Result<Self, ExchangeError> {
+        let env = if config.sandbox {
+            AppEnv::Paper
+        } else {
+            AppEnv::Live
+        };
+
+        Self::with_credentials(&config.api_key, &config.api_secret, env, None)
+    }
+
+    /// Test connection to Alpaca API
+    pub async fn test_connection(&mut self) -> Result<(), ExchangeError> {
+        <Self as crate::application::ports::exchange::ExchangeClient>::test_connection(self).await
+    }
+
+    /// Parse order side string to Alpaca enum
+    #[inline]
+    fn parse_order_side(side: &str) -> alpaca_order::Side {
+        if side.eq_ignore_ascii_case("buy") {
+            alpaca_order::Side::Buy
+        } else {
+            alpaca_order::Side::Sell
+        }
+    }
+
+    /// N-2 FIX: Build order request (extracted to eliminate duplication)
+    ///
+    /// Creates an Alpaca order request for both market and limit orders.
+    /// This helper is used by both Live and Paper trading modes.
+    fn build_order_request(
+        symbol: &str,
+        side: alpaca_order::Side,
+        qty: num_decimal::Num,
+        limit_price: Option<num_decimal::Num>,
+    ) -> alpaca_order::CreateReq {
+        match limit_price {
+            Some(price) => alpaca_order::CreateReqInit {
+                type_: alpaca_order::Type::Limit,
+                limit_price: Some(price),
+                time_in_force: alpaca_order::TimeInForce::Day,
+                ..Default::default()
+            }
+            .init(symbol, side, alpaca_order::Amount::quantity(qty)),
+            None => alpaca_order::CreateReqInit {
+                type_: alpaca_order::Type::Market,
+                time_in_force: alpaca_order::TimeInForce::Day,
+                ..Default::default()
+            }
+            .init(symbol, side, alpaca_order::Amount::quantity(qty)),
+        }
+    }
+
+    /// Place an order on Alpaca
+    ///
+    /// MC-3 FIX: Returns order ID for tracking, cancellation, and reconciliation.
+    /// Principal's Challenge: Deduplicated logic for Live/Paper modes.
+    pub async fn place_order(
+        &self,
+        product_id: &str,
+        side: &str,
+        size: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<String, ExchangeError> {
+        // ALPACA FIX: Round quantity to 9 decimal places to prevent API rejections
+        // Alpaca supports up to 9 decimal places of precision.
+        let size = size.round_dp(9);
+
+        self.rate_limiter.until_ready().await;
+
+        // MC-1 FIX: Check market hours before order submission
+        // US equities only trade 9:30 AM - 4:00 PM ET (Mon-Fri)
+        // Paper trading is exempt since Alpaca Paper API accepts orders 24/7
+        if !self.is_paper() {
+            let clock = self
+                .client
+                .issue::<apca::api::v2::clock::Get>(&())
+                .await
+                .map_err(Self::map_alpaca_error)?;
+
+            if !clock.open {
+                return Err(ExchangeError::Other(
+                    "Market is closed. US equities trade 9:30 AM - 4:00 PM ET (Mon-Fri)"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let start = Instant::now();
+        let symbol = utils::to_alpaca_symbol(product_id);
+        let mode_str = if self.is_paper() { "PAPER" } else { "LIVE" };
+
+        info!(
+            symbol = %symbol,
+            mode = mode_str,
+            side = side,
+            size = %size,
+            price = ?price,
+            "Placing Alpaca order"
+        );
+
+        // N-1 FIX: Use helper to parse side
+        let order_side = Self::parse_order_side(side);
+
+        // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional
+        // Floor the quantity for limit orders to avoid OrderRejected errors
+        // This may leave "dust" (fractional remainder) in the account
+        // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional.
+        // If we have a fractional quantity < 1 share, we MUST use a Market order.
+        let (adjusted_size, final_price) = if self.is_paper() {
+            // PAPER TRADING HOTFIX:
+            // Dual-leg State Machine assumes order completion asynchronously due to PendingNew.
+            // On paper, Market orders fill instantly, preventing runaway drift.
+            
+            // NOTE: Alpaca rejects fractional quantities for some tickers and configurations.
+            // Flooring here ensures we don't send fractions like 4.048419092 which causes rejections.
+            // We apply the same flooring logic as Limit orders.
+            let floored = size.floor();
+            
+            warn!(
+                "PAPER TRADING HOTFIX: Forcing Market order for floored quantity {} (was {}) to prevent async tracking flaws. Limit price {:?} ignored.",
+                floored, size, price
+            );
+            
+            // If floored is zero but original size was not, we could skip or just send floored
+            // and let the API reject size=0, or let strategy handle size=0 earlier. 
+            // In earlier code, returning (size, None) caused rejection anyway.
+            (floored, None)
+        } else {
+            // Live Trading logic unmodified
+            match price {
+                Some(p) => {
+                    let floored = size.floor();
+                    if floored.is_zero() && !size.is_zero() {
+                        warn!(
+                            "Falling back to Market order for fractional quantity {} (less than 1 share). Limit price {:?} ignored.",
+                            size, p
+                        );
+                        (size, None)
+                    } else {
+                        (floored, Some(p))
+                    }
+                }
+                None => (size, None),
+            }
+        };
+
+        // CB-2 FIX: Propagate conversion errors instead of silent fallback
+        let qty_num = utils::decimal_to_num(adjusted_size)
+            .map_err(|e| ExchangeError::Other(format!("Failed to convert quantity: {}", e)))?;
+
+        // N-2 FIX: Convert limit price if present
+        // ALPACA FIX: Round prices to 2 decimal places for US equities (tick size = $0.01)
+        let limit_num = match final_price {
+            Some(p) => {
+                let rounded = p.round_dp(2);
+                Some(utils::decimal_to_num(rounded).map_err(|e| {
+                    ExchangeError::Other(format!("Failed to convert limit price: {}", e))
+                })?)
+            }
+            None => None,
+        };
+
+        // N-2 FIX: Use helper to build request
+        let request = Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
+
+        let client = &self.client;
+
+        // ALPACA FIX: Wash Trade Prevention (MC-1)
+        // If placing an order fails with 403 (wash trade), it's usually because of 
+        // existing orders on the opposite side. We proactively cancel ALL open 
+        // orders for this symbol before placing a new one.
+        if let Err(e) = self.cancel_all_orders(product_id).await {
+            warn!(symbol = %symbol, error = %e, "Failed to cancel existing orders before placement (ignoring)");
+        }
+
+        let order = client
+            .issue::<alpaca_order::Create>(&request)
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        let order_id = order.id.as_hyphenated().to_string();
+
+        info!(
+            order_id = %order_id,
+            symbol = %symbol,
+            status = ?order.status,
+            "Alpaca {} order created",
+            mode_str
+        );
+
+        // Paper-only: CSV recording for local debugging
+        if self.is_paper() {
+            self.record_paper_trade(product_id, side, size, price).await;
+        }
+
+        // MC-4 FIX: Record order latency
+        crate::infrastructure::telemetry::metrics::record_order_latency(&symbol, start.elapsed().as_secs_f64());
+        crate::infrastructure::telemetry::metrics::record_order(&symbol, side, true);
+
+        // MC-3 FIX: Return order ID for tracking
+        Ok(order_id)
+    }
+
+    /// Get position for a symbol
+    ///
+    /// Fetches ALL positions and filters locally to avoid 404 errors when position is closed.
+    /// This is robust against "Position Not Found" errors which cause critical failures.
+    pub async fn get_position(&self, product_id: &str) -> Result<Decimal, ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        match self.mode {
+            AppEnv::Live | AppEnv::Paper | AppEnv::Sandbox => {
+                let symbol = utils::to_alpaca_symbol(product_id);
+                let client = &self.client;
+
+                // MC-3 FIX: Use List (GetAll) to avoid 404 errors on missing positions.
+                // The API returns 404 if we query a specific symbol that has no position,
+                // capturing this error correctly is difficult due to generic error types.
+                // Listing all is safer and negligible performance cost (few positions).
+                let positions = client
+                    .issue::<apca::api::v2::positions::List>(&())
+                    .await
+                    .map_err(|e| {
+                        ExchangeError::Network(format!("Failed to list positions: {}", e))
+                    })?;
+
+                for pos in positions {
+                    if pos.symbol == symbol.as_ref() {
+                        // Position found
+                        let mut qty = utils::num_to_decimal(&pos.quantity).map_err(|e| {
+                            ExchangeError::Other(format!(
+                                "Failed to convert position quantity: {}",
+                                e
+                            ))
+                        })?;
+
+                        // ALPACA FIX: Negate quantity for short positions
+                        if let alpaca_position::Side::Short = pos.side {
+                            qty = -qty;
+                        }
+
+                        debug!(symbol = %symbol, quantity = %qty, side = ?pos.side, "Position found");
+                        return Ok(qty);
+                    }
+                }
+
+                // Not found in list = Zero position
+                debug!(symbol = %symbol, "No position found (verified via List)");
+                Ok(Decimal::ZERO)
+            }
+        }
+    }
+
+    /// Get candles for a symbol
+    ///
+    /// MC-1 FIX: Delegates to ExchangeClient trait to avoid code duplication
+    pub async fn get_product_candles(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        <Self as crate::application::ports::exchange::ExchangeClient>::get_candles(
+            self,
+            product_id,
+            start,
+            end,
+            granularity,
+        )
+        .await
+    }
+
+    /// Get candles with pagination
+    ///
+    /// MC-1 FIX: Delegates to ExchangeClient trait to avoid code duplication
+    pub async fn get_product_candles_paginated(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        <Self as crate::application::ports::exchange::ExchangeClient>::get_candles_paginated(
+            self,
+            product_id,
+            start,
+            end,
+            granularity,
+        )
+        .await
+    }
+
+    /// Check if the market is currently open.
+    ///
+    /// Fetches `/v2/clock` from Alpaca API to determine market status.
+    /// Used by strategies to pause execution during market close.
+    pub async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        // Paper trading is 24/7 essentially (or at least we treat it as such for testing)
+        // BUT for "Simulating Reality", we should respect market hours if configured.
+        // However, Alpaca Paper API tracks real market hours basically.
+        // Let's rely on the API clock.
+        let clock = self
+            .client
+            .issue::<apca::api::v2::clock::Get>(&())
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        // Also check if we are in a "break" (e.g. early close)?
+        // For now, simple is_open check is sufficient.
+        debug!(
+            is_open = clock.open,
+            next_open = ?clock.next_open,
+            next_close = ?clock.next_close,
+            "Checked Alpaca market clock"
+        );
+
+        Ok(clock.open)
+    }
+
+    /// Check if client is in paper/sandbox mode
+    #[inline]
+    fn is_paper(&self) -> bool {
+        matches!(self.mode, AppEnv::Paper | AppEnv::Sandbox)
+    }
+
+    /// Record trade to CSV if recorder is configured (Paper only)
+    async fn record_paper_trade(
+        &self,
+        product_id: &str,
+        side: &str,
+        size: Decimal,
+        price: Option<Decimal>,
+    ) {
+        if let Some(ref recorder) = self.recorder {
+            let trade_side = match side.to_lowercase().as_str() {
+                "buy" => TradeSide::Buy,
+                _ => TradeSide::Sell,
+            };
+
+            // Use injected clock for deterministic timestamps
+            let record = TradeRecord::with_timestamp(
+                product_id.to_string(),
+                trade_side,
+                size,
+                price,
+                true,
+                self.clock.now(),
+            );
+
+            // PRINCIPAL FIX: Spawn recording to avoid blocking order path
+            // This is fire-and-forget; logging failures shouldn't crash strategy
+            // Clone recorder arc to move into task
+            let recorder = recorder.clone();
+            tokio::spawn(async move {
+                if let Err(e) = recorder.record(&record).await {
+                    error!("Failed to record paper trade to CSV: {}", e);
+                }
+            });
+        }
+    }
+
+    /// Cancel ALL open orders for a symbol.
+    ///
+    /// Used by Alpaca to resolve "potential wash trade" errors by clearing
+    /// any opposing orders before placing new ones.
+    pub async fn cancel_all_orders(&self, product_id: &str) -> Result<(), ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        let symbol = utils::to_alpaca_symbol(product_id);
+        let client = &self.client;
+
+        info!(symbol = %symbol, "Cancelling all open orders for symbol");
+
+        // 1. Fetch all open orders for this symbol
+        let request = alpaca_orders::ListReq {
+            symbols: vec![symbol.as_ref().to_string()],
+            status: alpaca_orders::Status::Open,
+            ..Default::default()
+        };
+
+        let orders = client
+            .issue::<alpaca_orders::List>(&request)
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        if orders.is_empty() {
+            debug!(symbol = %symbol, "No open orders found to cancel");
+            return Ok(());
+        }
+
+        info!(
+            symbol = %symbol,
+            count = orders.len(),
+            "Found open orders to cancel"
+        );
+
+        // 2. Cancel each order individually
+        for order in orders {
+            let id = alpaca_order::Id(*order.id);
+            if let Err(e) = client.issue::<alpaca_order::Delete>(&id).await {
+                // Log and continue - some may have filled/cancelled in the meantime
+                warn!(
+                    order_id = %order.id.as_hyphenated(),
+                    error = %e,
+                    "Failed to cancel order during bulk cancellation"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
+
+    fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
+        match e {
+            RequestError::Endpoint(inner) => {
+                let s = inner.to_string();
+                let s_lower = s.to_lowercase();
+                if s.contains("429") || s_lower.contains("rate limit") {
+                    ExchangeError::RateLimited(1000)
+                } else if ["500", "502", "503", "504"].iter().any(|&code| s.contains(code)) {
+                    ExchangeError::ExchangeInternal(s)
+                } else if s.contains("401") || s.contains("403") {
+                    ExchangeError::Configuration(s)
+                } else {
+                    ExchangeError::OrderRejected(s)
+                }
+            }
+            _ => ExchangeError::Other(e.to_string()),
+        }
+    }
+}
+
+// Implement From<ExchangeConfig> for convenience
+impl TryFrom<(ExchangeConfig, AppEnv, Option<Arc<dyn TradeRecorder>>)> for AlpacaClient {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(
+        (config, env, recorder): (ExchangeConfig, AppEnv, Option<Arc<dyn TradeRecorder>>),
+    ) -> Result<Self, Self::Error> {
+        Self::with_credentials(&config.api_key, &config.api_secret, env, recorder)
+            .map_err(|e| e.into())
+    }
+}
+
+// Implement Executor trait for strategy compatibility
+#[async_trait]
+impl Executor for AlpacaClient {
+    async fn execute_order(
+        &self,
+        symbol: &str,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<crate::domain::orders::OrderId, ExchangeError> {
+        let side_str = match side {
+            OrderSide::Buy => "buy",
+            OrderSide::Sell => "sell",
+        };
+
+        // MC-2 FIX: Return the actual order ID from place_order
+        let order_id_str = self.place_order(symbol, side_str, quantity, price).await?;
+        Ok(crate::domain::orders::OrderId::new(order_id_str))
+    }
+
+    async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+        AlpacaClient::get_position(self, symbol).await
+    }
+
+    async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        self.check_market_hours().await
+    }
+
+    /// Poll order status from Alpaca
+    ///
+    /// MC-4 FIX: Maps Alpaca status to crate::domain::orders::OrderState for verification
+    async fn get_order_status(
+        &self,
+        order_id: &crate::domain::orders::OrderId,
+    ) -> Result<(crate::domain::orders::OrderState, Decimal, Option<Decimal>), ExchangeError> {
+        let alpaca_id = order_id.as_str();
+        let client = &self.client;
+
+        // Parse UUID
+        let uuid = alpaca_id
+            .parse::<uuid::Uuid>()
+            .map_err(|e| ExchangeError::Other(format!("Invalid order ID format: {}", e)))?;
+
+        // Fetch order from API
+        // apca 0.30: Get endpoint takes &Id
+        let order = client
+            .issue::<alpaca_order::Get>(&alpaca_order::Id(uuid))
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        // Map Status
+        let state = match order.status {
+            alpaca_order::Status::New
+            | alpaca_order::Status::Accepted
+            | alpaca_order::Status::Calculated
+            | alpaca_order::Status::PendingNew
+            | alpaca_order::Status::PendingReplace => crate::domain::orders::OrderState::Pending,
+            alpaca_order::Status::PartiallyFilled => crate::domain::orders::OrderState::PartiallyFilled,
+            alpaca_order::Status::Filled => crate::domain::orders::OrderState::Filled,
+            alpaca_order::Status::DoneForDay => crate::domain::orders::OrderState::Filled,
+            alpaca_order::Status::Canceled | alpaca_order::Status::PendingCancel => {
+                crate::domain::orders::OrderState::Cancelled
+            }
+            alpaca_order::Status::Expired => crate::domain::orders::OrderState::Expired,
+            alpaca_order::Status::Rejected => crate::domain::orders::OrderState::Rejected,
+            s => {
+                warn!("Unknown Alpaca order status: {:?}", s);
+                crate::domain::orders::OrderState::Pending
+            }
+        };
+
+        // apca 0.30 fields: filled_quantity, average_fill_price
+        let filled_qty = utils::num_to_decimal(&order.filled_quantity).unwrap_or(Decimal::ZERO);
+        let avg_price = order
+            .average_fill_price
+            .map(|p| utils::num_to_decimal(&p).unwrap_or(Decimal::ZERO));
+
+        Ok((state, filled_qty, avg_price))
+    }
+
+    /// Cancel order on Alpaca
+    async fn cancel_order(&self, order_id: &crate::domain::orders::OrderId) -> Result<(), ExchangeError> {
+        let alpaca_id = order_id.as_str();
+        let client = &self.client;
+
+        let uuid = alpaca_id
+            .parse::<uuid::Uuid>()
+            .map_err(|e| ExchangeError::Other(format!("Invalid order ID format: {}", e)))?;
+
+        // apca 0.30 uses tuple struct Delete(Id) - trying literal syntax
+        client
+            .issue::<alpaca_order::Delete>(&alpaca_order::Id(uuid))
+            .await
+            .map_err(Self::map_alpaca_error)?;
+
+        Ok(())
+    }
+
+    async fn cancel_all_orders(&self, symbol: &str) -> Result<(), ExchangeError> {
+        self.cancel_all_orders(symbol).await
+    }
+}
+
+// MC-3 FIX: Implement ExchangeClient trait for unified client (DRY principle)
+// This consolidates functionality from the deleted AlpacaExchangeClient.
+#[async_trait]
+impl crate::application::ports::exchange::ExchangeClient for AlpacaClient {
+    async fn test_connection(&mut self) -> Result<(), ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        let client = &self.client;
+        let account = client
+            .issue::<apca::api::v2::account::Get>(&())
+            .await
+            .map_err(|e| ExchangeError::Network(format!("Failed to connect to Alpaca: {}", e)))?;
+
+        info!(
+            account_id = %account.id.as_hyphenated(),
+            status = ?account.status,
+            buying_power = %account.buying_power,
+            "Connected to Alpaca"
+        );
+
+        Ok(())
+    }
+
+    async fn get_candles(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        self.get_candles_paginated(product_id, start, end, granularity)
+            .await
+    }
+
+    async fn get_candles_paginated(
+        &mut self,
+        product_id: &str,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+        granularity: Granularity,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        self.rate_limiter.until_ready().await;
+
+        let symbol = utils::to_alpaca_symbol(product_id);
+        let timeframe = utils::granularity_to_timeframe(granularity);
+
+        info!(
+            symbol = %symbol,
+            start = %start,
+            end = %end,
+            timeframe = ?timeframe,
+            "Fetching Alpaca bars"
+        );
+
+        let client = &self.client;
+
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(10000),
+            ..Default::default()
+        }
+        .init(symbol.as_ref(), *start, *end, timeframe);
+
+        let bars_result = client
+            .issue::<alpaca_bars::List>(&request)
+            .await
+            .map_err(|e| ExchangeError::Other(format!("Failed to fetch bars: {}", e)))?;
+
+        // Collect candles with proper error handling for conversions
+        let candles: Result<Vec<Candle>, ExchangeError> = bars_result
+            .bars
+            .iter()
+            .map(|bar| {
+                Ok(Candle {
+                    timestamp: bar.time,
+                    open: utils::num_to_decimal(&bar.open)?,
+                    high: utils::num_to_decimal(&bar.high)?,
+                    low: utils::num_to_decimal(&bar.low)?,
+                    close: utils::num_to_decimal(&bar.close)?,
+                    volume: Decimal::from(bar.volume),
+                })
+            })
+            .collect();
+
+        let candles = candles?;
+
+        info!(
+            symbol = %symbol,
+            bars_count = candles.len(),
+            "Fetched Alpaca bars"
+        );
+
+        Ok(candles)
+    }
+
+    fn normalize_symbol(&self, symbol: &str) -> String {
+        utils::to_alpaca_symbol(symbol).into_owned()
+    }
+
+    fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+        crate::domain::exchange::ExchangeId::Alpaca
+    }
+}
+
+// Implement DiscoveryDataSource for pair discovery pipeline
+use crate::application::discovery::DiscoveryDataSource;
+
+#[async_trait]
+impl DiscoveryDataSource for AlpacaClient {
+    async fn fetch_candles_hourly(
+        &mut self,
+        symbol: &str,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(i64, Decimal)>, Box<dyn std::error::Error + Send + Sync>> {
+        self.rate_limiter.until_ready().await;
+
+        let alpaca_symbol = utils::to_alpaca_symbol(symbol);
+        let timeframe = alpaca_bars::TimeFrame::OneHour;
+
+        info!(
+            symbol = %alpaca_symbol,
+            start = %start,
+            end = %end,
+            timeframe = "1h",
+            "Fetching Alpaca candles for discovery"
+        );
+
+        let client = &self.client;
+
+        // Use IEX feed for free tier access (SIP requires paid subscription)
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(10000),
+            feed: Some(apca::data::v2::Feed::IEX),
+            ..Default::default()
+        }
+        .init(alpaca_symbol.as_ref(), start, end, timeframe);
+
+        let bars_result = client
+            .issue::<alpaca_bars::List>(&request)
+            .await
+            .map_err(|e| format!("Failed to fetch bars: {}", e))?;
+
+        // Convert to (timestamp_seconds, close_price) tuples
+        let result: Result<Vec<(i64, Decimal)>, _> = bars_result
+            .bars
+            .iter()
+            .map(|bar| {
+                let close = utils::num_to_decimal(&bar.close)?;
+                Ok((bar.time.timestamp(), close))
+            })
+            .collect();
+
+        result.map_err(|e: ExchangeError| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    async fn fetch_candles_daily(
+        &mut self,
+        symbol: &str,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(i64, Decimal)>, Box<dyn std::error::Error + Send + Sync>> {
+        self.rate_limiter.until_ready().await;
+
+        let alpaca_symbol = utils::to_alpaca_symbol(symbol);
+        let timeframe = alpaca_bars::TimeFrame::OneDay;
+
+        info!(
+            symbol = %alpaca_symbol,
+            start = %start,
+            end = %end,
+            timeframe = "1d",
+            "Fetching Alpaca daily candles for discovery"
+        );
+
+        let client = &self.client;
+
+        // Use IEX feed for free tier access
+        let request = alpaca_bars::ListReqInit {
+            limit: Some(10000),
+            feed: Some(apca::data::v2::Feed::IEX),
+            ..Default::default()
+        }
+        .init(alpaca_symbol.as_ref(), start, end, timeframe);
+
+        let bars_result = client
+            .issue::<alpaca_bars::List>(&request)
+            .await
+            .map_err(|e| format!("Failed to fetch daily bars: {}", e))?;
+
+        let result: Result<Vec<(i64, Decimal)>, _> = bars_result
+            .bars
+            .iter()
+            .map(|bar| {
+                let close = utils::num_to_decimal(&bar.close)?;
+                Ok((bar.time.timestamp(), close))
+            })
+            .collect();
+
+        result.map_err(|e: ExchangeError| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    /// Alpaca free tier has limited hourly data; prefer daily bars for discovery
+    fn prefers_daily_bars(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    // decimal_to_num and num_to_decimal tests moved to utils.rs
+}

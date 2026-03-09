@@ -1,4 +1,4 @@
-use algopioneer::discovery::sector::{get_sector, is_same_sector};
+use algopioneer::application::discovery::sector::{get_sector, is_same_sector};
 
 fn main() {
     let pairs = vec![
