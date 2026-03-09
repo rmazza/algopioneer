@@ -334,12 +334,12 @@ fn calculate_risk_adjusted_ratios(returns: &[Decimal], rf: Decimal) -> (Decimal,
     let variance = returns_f64.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let std_dev = variance.sqrt();
     
-    let rf_f64 = rf.to_f64().unwrap_or(0.0) / 252.0; 
+    let rf_daily = rf.to_f64().unwrap_or(0.0) / 252.0; 
     
-    let sharpe = if std_dev > 0.0 {
+    let sharpe = if std_dev > f64::EPSILON {
         let annual_return = mean * 252.0;
         let annual_vol = std_dev * 252.0f64.sqrt();
-        (annual_return - rf_f64 * 252.0) / annual_vol
+        (annual_return - rf_daily * 252.0) / annual_vol
     } else {
         0.0
     };
@@ -348,8 +348,8 @@ fn calculate_risk_adjusted_ratios(returns: &[Decimal], rf: Decimal) -> (Decimal,
     let sortino = if !downside_returns.is_empty() {
         let downside_variance = downside_returns.iter().map(|r| r.powi(2)).sum::<f64>() / n;
         let downside_std = downside_variance.sqrt();
-        if downside_std > 0.0 {
-            (mean * 252.0 - rf_f64 * 252.0) / (downside_std * 252.0f64.sqrt())
+        if downside_std > f64::EPSILON {
+            (mean * 252.0 - rf_daily * 252.0) / (downside_std * 252.0f64.sqrt())
         } else {
             0.0
         }
@@ -358,8 +358,8 @@ fn calculate_risk_adjusted_ratios(returns: &[Decimal], rf: Decimal) -> (Decimal,
     };
 
     (
-        Decimal::from_str(&format!("{:.4}", sharpe)).unwrap_or(Decimal::ZERO),
-        Decimal::from_str(&format!("{:.4}", sortino)).unwrap_or(Decimal::ZERO),
+        Decimal::from_f64_retain(sharpe).unwrap_or(Decimal::ZERO).round_dp(4),
+        Decimal::from_f64_retain(sortino).unwrap_or(Decimal::ZERO).round_dp(4),
     )
 }
 
@@ -601,15 +601,16 @@ fn synchronize_dual_data(leg_a: &DataFrame, leg_b: &DataFrame) -> Result<DualLeg
     let close_a = joined.column("close")?.f64()?;
     let close_b = joined.column("close_right")?.f64()?; 
 
-    let mut out_ts = Vec::new();
-    let mut out_a = Vec::new();
-    let mut out_b = Vec::new();
+    let height = joined.height();
+    let mut out_ts = Vec::with_capacity(height);
+    let mut out_a = Vec::with_capacity(height);
+    let mut out_b = Vec::with_capacity(height);
 
-    for i in 0..joined.height() {
+    for i in 0..height {
         if let (Some(t), Some(a), Some(b)) = (ts.get(i), close_a.get(i), close_b.get(i)) {
             out_ts.push(t);
-            out_a.push(Decimal::from_str(&format!("{:.8}", a)).unwrap_or(Decimal::ZERO));
-            out_b.push(Decimal::from_str(&format!("{:.8}", b)).unwrap_or(Decimal::ZERO));
+            out_a.push(Decimal::from_f64_retain(a).unwrap_or(Decimal::ZERO));
+            out_b.push(Decimal::from_f64_retain(b).unwrap_or(Decimal::ZERO));
         }
     }
 
