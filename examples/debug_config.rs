@@ -1,4 +1,4 @@
-use algopioneer::discovery::config::PortfolioPairConfig;
+use algopioneer::application::discovery::config::PortfolioPairConfig;
 use std::fs::File;
 use std::io::BufReader;
 

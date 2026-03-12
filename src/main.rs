@@ -14,9 +14,9 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use algopioneer::cli::{BacktestCliConfig, BacktestStrategyType, Cli, Commands, DualLegCliConfig};
-use algopioneer::commands;
-use algopioneer::exchange::coinbase::AppEnv;
+use algopioneer::interface::cli::{BacktestCliConfig, BacktestStrategyType, Cli, Commands, DualLegCliConfig};
+use algopioneer::interface::commands;
+use algopioneer::infrastructure::exchange::coinbase::AppEnv;
 use clap::Parser;
 use dotenvy::dotenv;
 use tracing::error;
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 synthetic,
             };
 
-            commands::run_backtest(config)?;
+            commands::run_backtest(config).await?;
         }
         Commands::DualLeg {
             strategy,
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             throttle_interval_secs,
         } => {
             // Parse exchange ID
-            let exchange_id: algopioneer::exchange::ExchangeId =
+            let exchange_id: algopioneer::domain::exchange::ExchangeId =
                 exchange.parse().map_err(|e: String| {
                     error!("{}", e);
                     std::io::Error::other(e)

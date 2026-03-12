@@ -23,8 +23,19 @@ echo "Stopping old container..."
 docker stop algopioneer-alpaca || true
 docker rm algopioneer-alpaca || true
 
-# 4. Run Container
-echo "Starting new container..."
+# 4. Check Market Clock (Market Guard)
+echo "Checking market status..."
+MARKET_STATUS=$(curl -s -H "APCA-API-KEY-ID: $ALPACA_API_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_API_SECRET" https://paper-api.alpaca.markets/v2/clock)
+IS_OPEN=$(echo "$MARKET_STATUS" | jq -r '.is_open')
+
+if [ "$IS_OPEN" != "true" ]; then
+  echo "MARKET IS CLOSED. (Next Open: $(echo "$MARKET_STATUS" | jq -r '.next_open'))"
+  echo "Configuration updated and old container cleaned up, but NOT starting new container."
+  exit 0
+fi
+
+# 5. Run Container
+echo "Market is OPEN. Starting new container..."
 docker run -d \
   --name algopioneer-alpaca \
   --restart unless-stopped \

@@ -217,19 +217,19 @@ cargo run --example optimize_pairs
 The agent is equipped with **9 high-value skills** to assist with development and operations.
 
 ### Development
-*   **[Code Review & Fix](.agent/skills/code_review/SKILL.md)**: Conducts rigorous reviews (Principal Quant persona) and fixes issues.
-*   **[Manage Development](.agent/skills/manage_development/SKILL.md)**: Unified workflow for coding, testing, scaffolding, and documenting.
-*   **[Backtest Wizard](.agent/skills/run_backtest_suite/SKILL.md)**: Interactive wizard for running backtests.
+*   **[Code Review & Fix](.gemini/skills/code_review/SKILL.md)**: Conducts rigorous reviews (Principal Quant persona) and fixes issues.
+*   **[Manage Development](.gemini/skills/manage_development/SKILL.md)**: Unified workflow for coding, testing, scaffolding, and documenting.
+*   **[Backtest Wizard](.gemini/skills/run_backtest_suite/SKILL.md)**: Interactive wizard for running backtests.
 
 ### Operations
-*   **[Check Trading Status](.agent/skills/check_trading_status/SKILL.md)**: Health dashboard for Alpaca, Coinbase, Post-Deploy, and Pairs.
-*   **[Deploy Application](.agent/skills/deploy_application/SKILL.md)**: Manages Docker builds and Terraform infrastructure.
+*   **[Check Trading Status](.gemini/skills/check_trading_status/SKILL.md)**: Health dashboard for Alpaca, Coinbase, Post-Deploy, and Pairs.
+*   **[Deploy Application](.gemini/skills/deploy_application/SKILL.md)**: Manages Docker builds and Terraform infrastructure.
 
 ### Resources
-*   **[Consult Expert](.agent/skills/consult_expert/SKILL.md)**: Adopt specialized personas (Rust, Security, Quant).
-*   **[Consult Context](.agent/skills/consult_context/SKILL.md)**: Access architectural and domain knowledge.
-*   **[Use Template](.agent/skills/use_template/SKILL.md)**: Scaffold files from standard templates.
-*   **[Perform Checklist](.agent/skills/perform_checklist/SKILL.md)**: Interactive process checklists.
+*   **[Consult Expert](.gemini/skills/consult_expert/SKILL.md)**: Adopt specialized personas (Rust, Security, Quant).
+*   **[Consult Context](.gemini/skills/consult_context/SKILL.md)**: Access architectural and domain knowledge.
+*   **[Use Template](.gemini/skills/use_template/SKILL.md)**: Scaffold files from standard templates.
+*   **[Perform Checklist](.gemini/skills/perform_checklist/SKILL.md)**: Interactive process checklists.
 
 # Development Conventions
 
@@ -248,4 +248,13 @@ The agent is equipped with **9 high-value skills** to assist with development an
 
 # Important / Must Follow
 * Do not create God classes/objects
+
+# Production Notes (Operations)
+
+- **Market-Aligned Scheduling:** The system is configured on the EC2 instance to restart daily to prevent WebSocket latency and clock drift issues common on paper trading.
+  - **Start:** 09:15 AM EST (via `cron` running `deploy_alpaca.sh`).
+  - **Stop:** 04:15 PM EST (via `cron` running `docker stop`).
+- **Discovery Policy:** Nightly pair discovery (`autopilot.sh`) runs automatically. If it finds better pairs, `deploy_alpaca.sh` updates the configuration.
+- **Latency Monitoring:** If "Tick age > 2s" persists, check EC2 system time against Alpaca API time or recycle the container.
+
 

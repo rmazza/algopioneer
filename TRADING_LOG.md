@@ -4,6 +4,29 @@ This log tracks pair rotations, performance snapshots, and key decisions.
 
 ---
 
+## 2026-03-05 | Operational Stabilization: Daily Restart Cycle
+
+**System Status Update:**
+Detected significant execution latency (up to 46s tick age) on Alpaca Paper Trading.
+- **Root Cause 1:** 12-second clock drift on EC2 (server was ahead of Alpaca API).
+- **Root Cause 2:** WebSocket backpressure on Alpaca Paper feed over long-running sessions.
+
+**Actions Taken:**
+- **Manual Restart:** Recycled the `algopioneer-alpaca` container; confirmed latency dropped to <500ms.
+- **EC2 Infrastructure:** Installed `cronie` on Amazon Linux 2023 instance.
+- **Automation:** Configured daily `cron` jobs (Mon-Fri) to align with US Equity market:
+  - `09:15 EST`: `deploy_alpaca.sh` (Fresh start with latest discovery config).
+  - `16:15 EST`: `docker stop` (Graceful shutdown after close).
+
+**Account Snapshot:**
+| Metric | Value |
+|--------|-------|
+| Equity | $104,377.02 |
+| Account Status | ACTIVE |
+| Position State | FLAT |
+
+---
+
 ## 2026-01-10 | Pairs Health Check & Rotation
 
 **Account Snapshot:**

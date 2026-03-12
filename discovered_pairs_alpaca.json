@@ -13,6 +13,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 30,
     "entry_z_score": "1.8000000000000000444089209845",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -31,6 +33,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 25,
     "entry_z_score": "1.3999999999999999111821580293",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -49,6 +53,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 30,
     "entry_z_score": "2",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -67,6 +73,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 30,
     "entry_z_score": "2",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -85,6 +93,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 30,
     "entry_z_score": "1.6000000000000000888178419695",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -103,6 +113,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 25,
     "entry_z_score": "2",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -121,6 +133,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 5,
     "entry_z_score": "1.8000000000000000444089209845",
     "exit_z_score": "0.2000000000000000111022302462"
@@ -139,6 +153,8 @@
       "slippage_bps": "5.0"
     },
     "throttle_interval_secs": 5,
+    "entry_cooldown_ms": 30000,
+    "entry_cooldown_ms": 30000,
     "window_size": 5,
     "entry_z_score": "1.8000000000000000444089209845",
     "exit_z_score": "0.2000000000000000111022302462"
