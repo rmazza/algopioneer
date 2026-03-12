@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-03-11
+### Added
+- **Clean Architecture**: Reorganized the entire project into `domain`, `application`, `infrastructure`, and `interface` layers for better separation of concerns and maintainability.
+- **Backtesting**: Implemented a dual-leg backtesting engine with support for spread trading simulation and advanced risk metrics (Sharpe, Sortino, Profit Factor).
+- **Domain Models**: Introduced dedicated domain entities for orders, exchanges, and events.
+
+### Changed
+- **Project Structure**: Relocated core logic to `src/domain` and `src/application`, moving external integrations to `src/infrastructure`.
+- **CLI**: Standardized command handlers and configuration in `src/interface`.
+
+### Fixed
+- **Alpaca Client**: Improved order handling and stability, including proactive order cancellation to prevent wash trade errors (merged from v1.8.2 candidate).
+- **Test Stability**: Fixed several integration test race conditions and improved overall reliability.
+
 ## [1.8.1] - 2026-03-04
 ### Fixed
 - **Alpaca API**: Resolved stale ticks load-shedding by replacing blocking WebSocket senders with non-blocking logic and increasing latency threshold.
