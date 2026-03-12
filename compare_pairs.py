@@ -15,6 +15,13 @@ def get_pair_signature(pairs):
     """Returns a set of (spot, future) tuples to identify the pair universe."""
     return set((p['spot_symbol'], p['future_symbol']) for p in pairs)
 
+def get_average_sharpe(pairs):
+    """Extracts and averages Sharpe ratios if available in the config."""
+    sharpes = [float(p.get('sharpe_ratio', 0)) for p in pairs if 'sharpe_ratio' in p]
+    if not sharpes:
+        return 0.0
+    return sum(sharpes) / len(sharpes)
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: compare_pairs.py <current_json> <new_json>")
@@ -37,8 +44,7 @@ def main():
     current_sig = get_pair_signature(current_pairs)
     new_sig = get_pair_signature(new_pairs)
 
-    # Logic: If the set of pairs has changed, update.
-    # We could look at parameters too, but symbol changes are the most important.
+    # 1. Check for Symbol Changes (Mandatory Update)
     if current_sig != new_sig:
         print(f"Pairs changed! Old: {len(current_sig)}, New: {len(new_sig)}")
         added = new_sig - current_sig
@@ -49,10 +55,19 @@ def main():
             print(f"  - Removed: {removed}")
         sys.exit(1)
     
-    # If sets are same, check for parameter drift? 
-    # For now, stability is preferred. If symbols are same, stick with current state 
-    # to avoid restarting the bot unnecessarily.
-    print("Pair set is identical. No changes needed.")
+    # 2. Check for Statistical Improvement (Threshold Update)
+    # If symbols are identical, we only update if the new parameters offer 
+    # a significant improvement (e.g. 10% better Sharpe).
+    IMPROVEMENT_THRESHOLD = 1.10 
+    
+    current_sharpe = get_average_sharpe(current_pairs)
+    new_sharpe = get_average_sharpe(new_pairs)
+    
+    if current_sharpe > 0 and (new_sharpe / current_sharpe) >= IMPROVEMENT_THRESHOLD:
+        print(f"Significant improvement detected! Sharpe: {current_sharpe:.2f} -> {new_sharpe:.2f}")
+        sys.exit(1)
+
+    print(f"No significant changes or improvement ({current_sharpe:.2f} vs {new_sharpe:.2f}). Stability preferred.")
     sys.exit(0)
 
 if __name__ == "__main__":
