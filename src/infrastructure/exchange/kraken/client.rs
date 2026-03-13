@@ -75,6 +75,10 @@ impl Executor for KrakenExchangeClient {
             "Kraken position query not yet implemented".to_string(),
         ))
     }
+
+    fn exchange_id(&self) -> ExchangeId {
+        ExchangeId::Kraken
+    }
 }
 
 #[async_trait]

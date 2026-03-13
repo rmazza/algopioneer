@@ -381,6 +381,10 @@ mod tests {
             let positions = self.positions.read().await;
             Ok(positions.get(symbol).copied().unwrap_or(Decimal::ZERO))
         }
+
+        fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+            crate::domain::exchange::ExchangeId::Coinbase
+        }
     }
 
     #[tokio::test]

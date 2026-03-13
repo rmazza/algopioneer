@@ -88,6 +88,10 @@ mod tests {
         async fn get_position(&self, _symbol: &str) -> Result<Decimal, ExchangeError> {
             Ok(Decimal::ZERO)
         }
+
+        fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+            crate::domain::exchange::ExchangeId::Coinbase
+        }
     }
 
     #[tokio::test]

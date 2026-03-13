@@ -1867,6 +1867,10 @@ impl Executor for CoinbaseClient {
             .await
             .map_err(crate::domain::exchange::ExchangeError::from_boxed)
     }
+
+    fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+        crate::domain::exchange::ExchangeId::Coinbase
+    }
 }
 
 impl Drop for DualLegStrategy {
@@ -2336,6 +2340,10 @@ mod tests {
             _symbol: &str,
         ) -> Result<Decimal, crate::domain::exchange::ExchangeError> {
             Ok(Decimal::ZERO)
+        }
+
+        fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+            crate::domain::exchange::ExchangeId::Coinbase
         }
     }
 

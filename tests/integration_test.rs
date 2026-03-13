@@ -59,6 +59,10 @@ impl Executor for MockExecutorImpl {
         Ok((OrderState::Filled, Decimal::ZERO, None))
     }
 
+    fn exchange_id(&self) -> ExchangeId {
+        ExchangeId::Coinbase
+    }
+    }
     async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
         Ok(true)
     }
