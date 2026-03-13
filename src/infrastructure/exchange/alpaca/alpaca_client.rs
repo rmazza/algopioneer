@@ -666,6 +666,10 @@ impl Executor for AlpacaClient {
     async fn cancel_all_orders(&self, symbol: &str) -> Result<(), ExchangeError> {
         self.cancel_all_orders(symbol).await
     }
+
+    fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+        crate::domain::exchange::ExchangeId::Alpaca
+    }
 }
 
 // MC-3 FIX: Implement ExchangeClient trait for unified client (DRY principle)

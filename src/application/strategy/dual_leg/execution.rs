@@ -39,7 +39,7 @@ pub enum TaskPriority {
 const MAX_CONCURRENT_RECOVERIES: usize = 5;
 
 // Maximum recovery attempts before abandoning
-const MAX_RECOVERY_ATTEMPTS: u32 = 5;
+const MAX_RECOVERY_ATTEMPTS: u32 = 10;
 
 // Recovery backoff cap in seconds
 const RECOVERY_BACKOFF_CAP_SECS: u64 = 60;
@@ -599,11 +599,20 @@ impl ExecutionEngine {
             return Ok(ExecutionResult::Success);
         }
 
-        // Execute concurrently if both exist, or just await the one that exists
+        // Execute with wash trade prevention for Alpaca
         let (spot_res, future_res) = match (spot_leg, future_leg) {
             (Some(s), Some(f)) => {
-                let (s_res, f_res) = tokio::join!(s, f);
-                (Some(s_res), Some(f_res))
+                // MC-1 FIX: If exchange is Alpaca, add delay between legs to prevent wash trade detection
+                if self.client.exchange_id() == crate::domain::exchange::ExchangeId::Alpaca {
+                    let s_res = s.await;
+                    // Small delay to let Alpaca process the first leg and clear its internal "potential wash trade" state
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let f_res = f.await;
+                    (Some(s_res), Some(f_res))
+                } else {
+                    let (s_res, f_res) = tokio::join!(s, f);
+                    (Some(s_res), Some(f_res))
+                }
             }
             (Some(s), None) => (Some(s.await), None),
             (None, Some(f)) => (None, Some(f.await)),

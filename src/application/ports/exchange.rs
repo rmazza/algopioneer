@@ -45,6 +45,9 @@ pub trait Executor: Send + Sync {
     async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), ExchangeError> {
         Ok(())
     }
+
+    /// Get the exchange identifier
+    fn exchange_id(&self) -> ExchangeId;
 }
 
 /// Extended exchange client trait with full capabilities
@@ -73,9 +76,6 @@ pub trait ExchangeClient: Executor + Send + Sync {
 
     /// Normalize a symbol to exchange-specific format
     fn normalize_symbol(&self, symbol: &str) -> String;
-
-    /// Get the exchange identifier
-    fn exchange_id(&self) -> ExchangeId;
 }
 
 /// Trait for WebSocket market data providers

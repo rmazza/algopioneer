@@ -95,6 +95,10 @@ impl Executor for CoinbaseExchangeClient {
             .await
             .map_err(ExchangeError::from_boxed)
     }
+
+    fn exchange_id(&self) -> ExchangeId {
+        ExchangeId::Coinbase
+    }
 }
 
 #[async_trait]
