@@ -3,11 +3,11 @@
 //! Implements the `trade` subcommand for running the Moving Average
 //! Crossover strategy on Coinbase.
 
-use crate::interface::cli::SimpleTradingConfig;
+use crate::application::trading::SimpleTradingEngine;
+use crate::domain::state::TradeState;
 use crate::infrastructure::exchange::coinbase::AppEnv;
 use crate::infrastructure::logging::{CsvRecorder, TradeRecorder};
-use crate::domain::state::TradeState;
-use crate::application::trading::SimpleTradingEngine;
+use crate::interface::cli::SimpleTradingConfig;
 
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;

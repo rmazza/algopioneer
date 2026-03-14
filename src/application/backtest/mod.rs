@@ -187,7 +187,7 @@ pub fn run(
             equity_curve.push(last_equity);
             continue;
         };
-        
+
         let execution_price = Decimal::from_str(&format!("{:.8}", raw_price))
             .map_err(|e| BacktestError::DecimalConversion(e.to_string()))?;
 
@@ -216,7 +216,7 @@ pub fn run(
                 } else {
                     Decimal::ZERO
                 };
-                
+
                 trades.push(TradeRecord {
                     entry_idx: last_buy_idx,
                     exit_idx: next_idx,
@@ -255,7 +255,7 @@ pub fn run(
 
         let current_equity = capital + (position * execution_price);
         equity_curve.push(current_equity);
-        
+
         if last_equity > Decimal::ZERO {
             let ret = (current_equity - last_equity) / last_equity;
             returns.push(ret);
@@ -275,7 +275,7 @@ pub fn run(
                 } else {
                     Decimal::ZERO
                 };
-                
+
                 trades.push(TradeRecord {
                     entry_idx: last_buy_idx,
                     exit_idx: data_len - 1,
@@ -285,7 +285,7 @@ pub fn run(
                     pnl,
                     pnl_pct,
                 });
-                
+
                 capital += proceeds;
                 if slipped_price > last_buy_price {
                     winning_trades += 1;
@@ -319,7 +319,11 @@ pub fn run(
 }
 
 fn win_rate(wins: u32, total: u32) -> Decimal {
-    if total == 0 { Decimal::ZERO } else { Decimal::from(wins) / Decimal::from(total) }
+    if total == 0 {
+        Decimal::ZERO
+    } else {
+        Decimal::from(wins) / Decimal::from(total)
+    }
 }
 
 fn calculate_risk_adjusted_ratios(returns: &[Decimal], rf: Decimal) -> (Decimal, Decimal) {
@@ -330,12 +334,12 @@ fn calculate_risk_adjusted_ratios(returns: &[Decimal], rf: Decimal) -> (Decimal,
     let n = returns.len() as f64;
     let returns_f64: Vec<f64> = returns.iter().filter_map(|r| r.to_f64()).collect();
     let mean = returns_f64.iter().sum::<f64>() / n;
-    
+
     let variance = returns_f64.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let std_dev = variance.sqrt();
-    
-    let rf_daily = rf.to_f64().unwrap_or(0.0) / 252.0; 
-    
+
+    let rf_daily = rf.to_f64().unwrap_or(0.0) / 252.0;
+
     let sharpe = if std_dev > f64::EPSILON {
         let annual_return = mean * 252.0;
         let annual_vol = std_dev * 252.0f64.sqrt();
@@ -358,8 +362,12 @@ fn calculate_risk_adjusted_ratios(returns: &[Decimal], rf: Decimal) -> (Decimal,
     };
 
     (
-        Decimal::from_f64_retain(sharpe).unwrap_or(Decimal::ZERO).round_dp(4),
-        Decimal::from_f64_retain(sortino).unwrap_or(Decimal::ZERO).round_dp(4),
+        Decimal::from_f64_retain(sharpe)
+            .unwrap_or(Decimal::ZERO)
+            .round_dp(4),
+        Decimal::from_f64_retain(sortino)
+            .unwrap_or(Decimal::ZERO)
+            .round_dp(4),
     )
 }
 
@@ -376,7 +384,11 @@ fn calculate_profit_factor(trades: &[TradeRecord]) -> Decimal {
     }
 
     if gross_loss.is_zero() {
-        if gross_profit.is_zero() { Decimal::ZERO } else { dec!(999) }
+        if gross_profit.is_zero() {
+            Decimal::ZERO
+        } else {
+            dec!(999)
+        }
     } else {
         gross_profit / gross_loss
     }
@@ -402,8 +414,12 @@ fn calculate_expectancy(win_rate: Decimal, trades: &[TradeRecord]) -> Decimal {
         }
     }
 
-    if win_count > 0 { avg_win /= Decimal::from(win_count); }
-    if loss_count > 0 { avg_loss /= Decimal::from(loss_count); }
+    if win_count > 0 {
+        avg_win /= Decimal::from(win_count);
+    }
+    if loss_count > 0 {
+        avg_loss /= Decimal::from(loss_count);
+    }
 
     (win_rate * avg_win) - ((Decimal::ONE - win_rate) * avg_loss)
 }
@@ -486,29 +502,29 @@ pub async fn run_dual(
             Signal::Buy if current_direction == 0 && capital > Decimal::ZERO => {
                 let slipped_a = exec_p_a * slippage_mult_buy;
                 let slipped_b = exec_p_b * slippage_mult_sell;
-                
+
                 let leg_allocation = (capital * config.position_size_pct) / dec!(2);
-                position_size = leg_allocation / slipped_a; 
-                
+                position_size = leg_allocation / slipped_a;
+
                 last_entry_price_a = slipped_a;
                 last_entry_price_b = slipped_b;
                 current_direction = 1;
-                
+
                 capital -= leg_allocation * dec!(2);
                 debug!(price_a = %slipped_a, price_b = %slipped_b, "LONG SPREAD executed");
             }
-            
+
             Signal::Sell if current_direction == 0 && capital > Decimal::ZERO => {
                 let slipped_a = exec_p_a * slippage_mult_sell;
                 let slipped_b = exec_p_b * slippage_mult_buy;
-                
+
                 let leg_allocation = (capital * config.position_size_pct) / dec!(2);
                 position_size = leg_allocation / slipped_a;
-                
+
                 last_entry_price_a = slipped_a;
                 last_entry_price_b = slipped_b;
                 current_direction = -1;
-                
+
                 capital -= leg_allocation * dec!(2);
                 debug!(price_a = %slipped_a, price_b = %slipped_b, "SHORT SPREAD executed");
             }
@@ -520,8 +536,16 @@ pub async fn run_dual(
                     (exec_p_a * slippage_mult_buy, exec_p_b * slippage_mult_sell)
                 };
 
-                let pnl_a = if current_direction == 1 { (exit_a - last_entry_price_a) * position_size } else { (last_entry_price_a - exit_a) * position_size };
-                let pnl_b = if current_direction == 1 { (last_entry_price_b - exit_b) * position_size } else { (exit_b - last_entry_price_b) * position_size };
+                let pnl_a = if current_direction == 1 {
+                    (exit_a - last_entry_price_a) * position_size
+                } else {
+                    (last_entry_price_a - exit_a) * position_size
+                };
+                let pnl_b = if current_direction == 1 {
+                    (last_entry_price_b - exit_b) * position_size
+                } else {
+                    (exit_b - last_entry_price_b) * position_size
+                };
 
                 let total_pnl = pnl_a + pnl_b;
                 let original_cost = (last_entry_price_a + last_entry_price_b) * position_size;
@@ -530,7 +554,7 @@ pub async fn run_dual(
                 trades.push(TradeRecord {
                     entry_idx: i,
                     exit_idx: next_idx,
-                    entry_price: last_entry_price_a, 
+                    entry_price: last_entry_price_a,
                     exit_price: exit_a,
                     size: position_size,
                     pnl: total_pnl,
@@ -538,14 +562,26 @@ pub async fn run_dual(
                 });
 
                 capital += original_cost + total_pnl;
-                if total_pnl > Decimal::ZERO { winning_trades += 1; } else { losing_trades += 1; }
-                
+                if total_pnl > Decimal::ZERO {
+                    winning_trades += 1;
+                } else {
+                    losing_trades += 1;
+                }
+
                 position_size = Decimal::ZERO;
                 current_direction = 0;
 
-                if capital > peak_capital { peak_capital = capital; }
-                let dd = if peak_capital > Decimal::ZERO { (peak_capital - capital) / peak_capital } else { Decimal::ZERO };
-                if dd > max_drawdown { max_drawdown = dd; }
+                if capital > peak_capital {
+                    peak_capital = capital;
+                }
+                let dd = if peak_capital > Decimal::ZERO {
+                    (peak_capital - capital) / peak_capital
+                } else {
+                    Decimal::ZERO
+                };
+                if dd > max_drawdown {
+                    max_drawdown = dd;
+                }
             }
             _ => {}
         }
@@ -553,8 +589,16 @@ pub async fn run_dual(
         let current_equity = if current_direction == 0 {
             capital
         } else {
-            let unrealized_a = if current_direction == 1 { (exec_p_a - last_entry_price_a) * position_size } else { (last_entry_price_a - exec_p_a) * position_size };
-            let unrealized_b = if current_direction == 1 { (last_entry_price_b - exec_p_b) * position_size } else { (exec_p_b - last_entry_price_b) * position_size };
+            let unrealized_a = if current_direction == 1 {
+                (exec_p_a - last_entry_price_a) * position_size
+            } else {
+                (last_entry_price_a - exec_p_a) * position_size
+            };
+            let unrealized_b = if current_direction == 1 {
+                (last_entry_price_b - exec_p_b) * position_size
+            } else {
+                (exec_p_b - last_entry_price_b) * position_size
+            };
             let cost = (last_entry_price_a + last_entry_price_b) * position_size;
             capital + cost + unrealized_a + unrealized_b
         };
@@ -588,7 +632,10 @@ pub async fn run_dual(
     })
 }
 
-fn synchronize_dual_data(leg_a: &DataFrame, leg_b: &DataFrame) -> Result<DualLegData, BacktestError> {
+fn synchronize_dual_data(
+    leg_a: &DataFrame,
+    leg_b: &DataFrame,
+) -> Result<DualLegData, BacktestError> {
     let joined = leg_a.join(
         leg_b,
         ["timestamp"],
@@ -599,7 +646,7 @@ fn synchronize_dual_data(leg_a: &DataFrame, leg_b: &DataFrame) -> Result<DualLeg
 
     let ts = joined.column("timestamp")?.i64()?;
     let close_a = joined.column("close")?.f64()?;
-    let close_b = joined.column("close_right")?.f64()?; 
+    let close_b = joined.column("close_right")?.f64()?;
 
     let height = joined.height();
     let mut out_ts = Vec::with_capacity(height);

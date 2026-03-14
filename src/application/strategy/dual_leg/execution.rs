@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info, instrument, warn};
 
 use crate::application::ports::exchange::Executor;
-use crate::domain::orders::OrderState;
 use crate::application::resilience::CircuitBreaker;
+use crate::domain::orders::OrderState;
 use crate::domain::types::OrderSide;
 use std::time::Instant;
 
@@ -171,10 +171,13 @@ pub async fn perform_recovery_with_backoff(
     for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
         task.attempts = attempt;
 
-        // MC-1 FIX: Proactively cancel ANY existing orders for this symbol 
+        // MC-1 FIX: Proactively cancel ANY existing orders for this symbol
         // to prevent wash trade detection or "stuck" orders during recovery.
         if let Err(e) = client.cancel_all_orders(&task.symbol).await {
-            warn!("Failed to cancel existing orders for {} during recovery: {}", task.symbol, e);
+            warn!(
+                "Failed to cancel existing orders for {} during recovery: {}",
+                task.symbol, e
+            );
         }
 
         // MC-1 FIX: Use limit_price if available.
@@ -716,8 +719,9 @@ impl ExecutionEngine {
     /// Check market hours status (for Alpaca equity trading)
     pub fn check_market_hours(
         &self,
-    ) -> impl std::future::Future<Output = Result<bool, crate::domain::exchange::ExchangeError>> + Send + '_
-    {
+    ) -> impl std::future::Future<Output = Result<bool, crate::domain::exchange::ExchangeError>>
+           + Send
+           + '_ {
         self.client.check_market_hours()
     }
 }

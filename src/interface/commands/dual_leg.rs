@@ -3,16 +3,16 @@
 //! Implements the `dual-leg` subcommand for running Basis or Pairs
 //! trading strategies with dual-leg execution.
 
-use crate::interface::cli::DualLegCliConfig;
-use crate::infrastructure::exchange::alpaca::{AlpacaClient, AlpacaWebSocketProvider};
-use crate::infrastructure::exchange::coinbase::{AppEnv, CoinbaseClient};
 use crate::application::ports::exchange::Executor;
 use crate::application::ports::exchange::WebSocketProvider;
-use crate::infrastructure::logging::{CsvRecorder, TradeRecorder};
 use crate::application::strategy::dual_leg::{
     BasisManager, DualLegConfig, DualLegStrategy, ExecutionEngine, HedgeMode, InstrumentType,
     PairsManager, RecoveryWorker, RiskMonitor, SystemClock, TransactionCostModel,
 };
+use crate::infrastructure::exchange::alpaca::{AlpacaClient, AlpacaWebSocketProvider};
+use crate::infrastructure::exchange::coinbase::{AppEnv, CoinbaseClient};
+use crate::infrastructure::logging::{CsvRecorder, TradeRecorder};
+use crate::interface::cli::DualLegCliConfig;
 
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
@@ -81,11 +81,17 @@ pub async fn run_dual_leg_trading(
     let client: Arc<dyn Executor + Send + Sync> = match exchange_id {
         crate::domain::exchange::ExchangeId::Alpaca => {
             let inner = Arc::new(AlpacaClient::new(env, recorder)?);
-            Arc::new(crate::application::risk::RiskManagedExecutor::new(inner, risk_engine))
+            Arc::new(crate::application::risk::RiskManagedExecutor::new(
+                inner,
+                risk_engine,
+            ))
         }
         _ => {
             let inner = Arc::new(CoinbaseClient::new(env, recorder)?);
-            Arc::new(crate::application::risk::RiskManagedExecutor::new(inner, risk_engine))
+            Arc::new(crate::application::risk::RiskManagedExecutor::new(
+                inner,
+                risk_engine,
+            ))
         }
     };
 
@@ -196,8 +202,12 @@ pub async fn run_dual_leg_trading(
 
     // WebSocket Integration
     let ws_client: Box<dyn WebSocketProvider> = match exchange_id {
-        crate::domain::exchange::ExchangeId::Alpaca => Box::new(AlpacaWebSocketProvider::from_env()?),
-        _ => Box::new(crate::infrastructure::exchange::coinbase::CoinbaseWebSocketProvider::from_env()?),
+        crate::domain::exchange::ExchangeId::Alpaca => {
+            Box::new(AlpacaWebSocketProvider::from_env()?)
+        }
+        _ => Box::new(
+            crate::infrastructure::exchange::coinbase::CoinbaseWebSocketProvider::from_env()?,
+        ),
     };
     let products = vec![leg1_id.to_string(), leg2_id.to_string()];
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);

@@ -226,10 +226,9 @@ impl EntryStrategy for PairsManager {
                 let ratio = v1 / v2;
                 if !(MIN_SAFE_PRICE_RATIO..=MAX_SAFE_PRICE_RATIO).contains(&ratio) {
                     let count = self.precision_rejections.fetch_add(1, Ordering::Relaxed) + 1;
-                    crate::infrastructure::telemetry::metrics::record_precision_rejection(&format!(
-                        "{}/{}",
-                        leg1.symbol, leg2.symbol
-                    ));
+                    crate::infrastructure::telemetry::metrics::record_precision_rejection(
+                        &format!("{}/{}", leg1.symbol, leg2.symbol),
+                    );
                     error!(
                         "PRECISION ERROR: Price ratio {:.2e} exceeds safe f64 bounds [{:.2e}, {:.2e}]. Rejecting signal. (Total rejections: {})",
                         ratio, MIN_SAFE_PRICE_RATIO, MAX_SAFE_PRICE_RATIO, count

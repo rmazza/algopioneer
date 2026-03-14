@@ -5,9 +5,9 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::application::strategy::dual_leg::MarketData;
 use crate::infrastructure::coinbase::websocket::CoinbaseWebsocket;
 use crate::infrastructure::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
-use crate::application::strategy::dual_leg::MarketData;
 
 /// Coinbase WebSocket provider implementing the WebSocketProvider trait
 pub struct CoinbaseWebSocketProvider {

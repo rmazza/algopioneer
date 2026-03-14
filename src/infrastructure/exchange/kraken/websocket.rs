@@ -6,8 +6,8 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::infrastructure::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
 use crate::application::strategy::dual_leg::MarketData;
+use crate::infrastructure::exchange::{ExchangeConfig, ExchangeError, WebSocketProvider};
 
 /// Kraken WebSocket provider (stub implementation)
 pub struct KrakenWebSocketProvider {

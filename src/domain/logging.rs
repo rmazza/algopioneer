@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use thiserror::Error;
 use std::fmt;
+use thiserror::Error;
 
 /// Error type for trade recording operations
 #[derive(Debug, Error)]

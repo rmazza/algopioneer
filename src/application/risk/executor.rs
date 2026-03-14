@@ -1,7 +1,7 @@
-use crate::domain::exchange::ExchangeError;
-use crate::application::ports::exchange::Executor;
 use crate::application::orders::{OrderId, OrderState};
+use crate::application::ports::exchange::Executor;
 use crate::application::risk::DailyRiskEngine;
+use crate::domain::exchange::ExchangeError;
 use crate::domain::types::OrderSide;
 use async_trait::async_trait;
 use rust_decimal::Decimal;

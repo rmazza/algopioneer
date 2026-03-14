@@ -11,8 +11,8 @@ use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::exchange::ExchangeError;
 use crate::application::ports::exchange::Executor;
+use crate::domain::exchange::ExchangeError;
 
 /// Result of a position reconciliation check.
 #[derive(Debug, Clone)]

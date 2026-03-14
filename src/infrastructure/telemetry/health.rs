@@ -49,8 +49,8 @@
 //! | `degraded` | Testing recovery | HalfOpen |
 //! | `critical` | Blocking requests | Open |
 
-use crate::infrastructure::telemetry::metrics;
 use crate::application::resilience::{CircuitBreaker, CircuitState};
+use crate::infrastructure::telemetry::metrics;
 use axum::{routing::get, Json, Router};
 use chrono::Utc; // Added for `chrono::Utc::now()`
 use serde::{Deserialize, Serialize};

@@ -4,11 +4,15 @@
 //! with the strategy supervisor.
 
 use crate::application::discovery::config::PortfolioPairConfig;
-use crate::infrastructure::exchange::coinbase::{AppEnv, CoinbaseClient, CoinbaseWebSocketProvider};
-use crate::domain::exchange::ExchangeId;
-use crate::infrastructure::logging::{CsvRecorder, TradeRecorder};
-use crate::application::strategy::dual_leg::{DualLegLiveConfig, DualLegStrategyLive, DualLegStrategyType};
+use crate::application::strategy::dual_leg::{
+    DualLegLiveConfig, DualLegStrategyLive, DualLegStrategyType,
+};
 use crate::application::strategy::supervisor::StrategySupervisor;
+use crate::domain::exchange::ExchangeId;
+use crate::infrastructure::exchange::coinbase::{
+    AppEnv, CoinbaseClient, CoinbaseWebSocketProvider,
+};
+use crate::infrastructure::logging::{CsvRecorder, TradeRecorder};
 
 use rust_decimal::prelude::ToPrimitive;
 use std::fs::File;
@@ -84,7 +88,9 @@ pub async fn run_portfolio(
             } else {
                 crate::application::risk::DailyRiskConfig::default()
             };
-            let risk_engine = Arc::new(crate::application::risk::DailyRiskEngine::new(risk_config.clone()));
+            let risk_engine = Arc::new(crate::application::risk::DailyRiskEngine::new(
+                risk_config.clone(),
+            ));
             let alpaca_client = Arc::new(crate::application::risk::RiskManagedExecutor::new(
                 alpaca_client,
                 risk_engine,
@@ -94,14 +100,20 @@ pub async fn run_portfolio(
 
             // STATE PERSISTENCE: Initialize DynamoDB state store when feature is enabled
             #[cfg(feature = "dynamodb")]
-            let state_store: Option<Arc<dyn crate::infrastructure::logging::StateStore>> = {
+            let state_store: Option<
+                Arc<dyn crate::infrastructure::logging::StateStore>,
+            > = {
                 info!("Initializing DynamoDB state store for position persistence");
-                let recorder =
-                    crate::infrastructure::logging::DynamoDbRecorder::from_env("algopioneer-trades").await;
+                let recorder = crate::infrastructure::logging::DynamoDbRecorder::from_env(
+                    "algopioneer-trades",
+                )
+                .await;
                 Some(Arc::new(recorder) as Arc<dyn crate::infrastructure::logging::StateStore>)
             };
             #[cfg(not(feature = "dynamodb"))]
-            let state_store: Option<Arc<dyn crate::infrastructure::logging::StateStore>> = None;
+            let state_store: Option<
+                Arc<dyn crate::infrastructure::logging::StateStore>,
+            > = None;
 
             // Initialize Supervisor
             let mut supervisor = StrategySupervisor::new().with_risk_config(risk_config);
@@ -180,8 +192,13 @@ pub async fn run_portfolio(
     } else {
         crate::application::risk::DailyRiskConfig::default()
     };
-    let risk_engine = Arc::new(crate::application::risk::DailyRiskEngine::new(risk_config.clone()));
-    let client = Arc::new(crate::application::risk::RiskManagedExecutor::new(client, risk_engine));
+    let risk_engine = Arc::new(crate::application::risk::DailyRiskEngine::new(
+        risk_config.clone(),
+    ));
+    let client = Arc::new(crate::application::risk::RiskManagedExecutor::new(
+        client,
+        risk_engine,
+    ));
 
     // Use CoinbaseWebSocketProvider which implements WebSocketProvider trait
     let ws_client = Box::new(CoinbaseWebSocketProvider::from_env()?);

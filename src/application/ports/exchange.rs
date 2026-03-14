@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
-use crate::domain::types::{MarketData, OrderSide};
-use crate::domain::exchange::{ExchangeError, ExchangeId, Candle, Granularity};
+use crate::domain::exchange::{Candle, ExchangeError, ExchangeId, Granularity};
 use crate::domain::orders::{OrderId, OrderState};
+use crate::domain::types::{MarketData, OrderSide};
 
 /// Core trait for order execution - exchange implementations must provide this
 #[async_trait]
@@ -38,7 +38,9 @@ pub trait Executor: Send + Sync {
 
     /// Cancel an order on the exchange.
     async fn cancel_order(&self, _order_id: &OrderId) -> Result<(), ExchangeError> {
-        Err(ExchangeError::Other("cancel_order not implemented".to_string()))
+        Err(ExchangeError::Other(
+            "cancel_order not implemented".to_string(),
+        ))
     }
 
     /// Cancel ALL open orders for a symbol.

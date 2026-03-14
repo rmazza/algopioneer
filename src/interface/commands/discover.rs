@@ -7,9 +7,9 @@ use crate::application::discovery::config::{
     PortfolioPairConfig, DEFAULT_CANDIDATES, DEFAULT_EQUITY_CANDIDATES,
 };
 use crate::application::discovery::{discover_and_optimize, DiscoveryConfig};
+use crate::application::strategy::dual_leg::SystemClock;
 use crate::infrastructure::exchange::alpaca::AlpacaClient;
 use crate::infrastructure::exchange::coinbase::{AppEnv, CoinbaseClient};
-use crate::application::strategy::dual_leg::SystemClock;
 
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;

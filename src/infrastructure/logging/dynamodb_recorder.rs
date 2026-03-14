@@ -3,8 +3,8 @@
 //! Writes trades to AWS DynamoDB for persistent, queryable storage.
 //! Requires the `dynamodb` feature flag.
 
-use crate::domain::logging::{RecordError, TradeRecord};
 use crate::application::ports::logging::TradeRecorder;
+use crate::domain::logging::{RecordError, TradeRecord};
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
@@ -105,8 +105,8 @@ impl TradeRecorder for DynamoDbRecorder {
 // StateStore Implementation for Position State Persistence
 // ============================================================================
 
-use crate::domain::logging::PositionStateRecord;
 use crate::application::ports::logging::StateStore;
+use crate::domain::logging::PositionStateRecord;
 
 #[async_trait]
 impl StateStore for DynamoDbRecorder {

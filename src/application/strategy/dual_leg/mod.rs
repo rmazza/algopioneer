@@ -21,8 +21,8 @@ pub mod entry;
 pub mod execution;
 pub mod exit;
 
-use crate::infrastructure::coinbase::CoinbaseClient;
 use crate::application::strategy::Signal;
+use crate::infrastructure::coinbase::CoinbaseClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
@@ -707,7 +707,7 @@ impl DualLegStrategy {
             position_id: None,                              // STATE PERSISTENCE
             strategy_type: "pairs".to_string(),             // STATE PERSISTENCE (default)
             is_paper: false,                                // STATE PERSISTENCE (default)
-            state_restored: false,                           // PORTFOLIO FIX (default)
+            state_restored: false,                          // PORTFOLIO FIX (default)
             last_market_check: 0,                           // MARKET HOURS
             is_market_open: true,                           // MARKET HOURS (assume open initially)
             max_position_usd: None,                         // SAFETY GUARD (set via builder)
@@ -775,7 +775,10 @@ impl DualLegStrategy {
             // MC-2 FIX: Emit metric for Halted state to enable alerting
             // P-MC-3 FIX: Use pre-computed pair_name
             if new_state == StrategyState::Halted {
-                crate::infrastructure::telemetry::metrics::record_strategy_halted("dual_leg", &self.pair_name);
+                crate::infrastructure::telemetry::metrics::record_strategy_halted(
+                    "dual_leg",
+                    &self.pair_name,
+                );
                 error!(
                     pair = %self.pair_name,
                     "CRITICAL: Strategy entered Halted state - manual intervention required"
@@ -798,7 +801,9 @@ impl DualLegStrategy {
     }
 
     /// STATE PERSISTENCE: Convert current state to a PositionStateRecord for storage.
-    fn to_position_state_record(&self) -> Option<crate::infrastructure::logging::PositionStateRecord> {
+    fn to_position_state_record(
+        &self,
+    ) -> Option<crate::infrastructure::logging::PositionStateRecord> {
         let position_id = self.position_id.as_ref()?;
 
         let (state_str, direction, leg1_qty, leg2_qty, leg1_entry_price, leg2_entry_price) =
@@ -1697,7 +1702,10 @@ impl DualLegStrategy {
                             Halting to prevent further damage. Manual intervention required.",
                             leg1_value, leg2_value, imbalance * dec!(100), self.max_imbalance_ratio * dec!(100)
                         );
-                        crate::infrastructure::telemetry::metrics::record_strategy_halted("dual_leg", &self.pair_name);
+                        crate::infrastructure::telemetry::metrics::record_strategy_halted(
+                            "dual_leg",
+                            &self.pair_name,
+                        );
                         self.state = StrategyState::Halted;
                         return;
                     }
@@ -1862,7 +1870,10 @@ impl Executor for CoinbaseClient {
         Ok(order_id)
     }
 
-    async fn get_position(&self, symbol: &str) -> Result<Decimal, crate::domain::exchange::ExchangeError> {
+    async fn get_position(
+        &self,
+        symbol: &str,
+    ) -> Result<Decimal, crate::domain::exchange::ExchangeError> {
         CoinbaseClient::get_position(self, symbol)
             .await
             .map_err(crate::domain::exchange::ExchangeError::from_boxed)
@@ -2316,7 +2327,8 @@ mod tests {
             side: OrderSide,
             quantity: Decimal,
             _price: Option<Decimal>,
-        ) -> Result<crate::domain::orders::OrderId, crate::domain::exchange::ExchangeError> {
+        ) -> Result<crate::domain::orders::OrderId, crate::domain::exchange::ExchangeError>
+        {
             let mut count = self.call_count.lock().await;
             *count += 1;
 
@@ -2332,7 +2344,10 @@ mod tests {
                 .push((symbol.to_string(), side, quantity));
 
             // MC-2 FIX: Return mock order ID
-            Ok(crate::domain::orders::OrderId::new(format!("mock-{}", *count)))
+            Ok(crate::domain::orders::OrderId::new(format!(
+                "mock-{}",
+                *count
+            )))
         }
 
         async fn get_position(

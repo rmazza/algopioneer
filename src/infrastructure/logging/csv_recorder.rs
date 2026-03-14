@@ -2,8 +2,8 @@
 //!
 //! Writes trades to a CSV file. Suitable for development and testing.
 
-use crate::domain::logging::{RecordError, TradeRecord};
 use crate::application::ports::logging::TradeRecorder;
+use crate::domain::logging::{RecordError, TradeRecord};
 use async_trait::async_trait;
 use std::fs::OpenOptions;
 use std::io::Write;

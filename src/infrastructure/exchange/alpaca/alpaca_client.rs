@@ -3,9 +3,9 @@
 //! A higher-level client that wraps `AlpacaExchangeClient` and provides
 //! an interface compatible with `CoinbaseClient` for use with strategies.
 
+use crate::application::strategy::dual_leg::{Clock, SystemClock};
 use crate::infrastructure::coinbase::AppEnv;
 use crate::infrastructure::logging::{TradeRecord, TradeRecorder, TradeSide};
-use crate::application::strategy::dual_leg::{Clock, SystemClock};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
@@ -22,9 +22,11 @@ use apca::api::v2::position as alpaca_position;
 use apca::data::v2::bars as alpaca_bars;
 use apca::{ApiInfo, Client, RequestError};
 
-use crate::infrastructure::exchange::alpaca::utils;
-use crate::infrastructure::exchange::{Candle, ExchangeConfig, ExchangeError, Executor, Granularity};
 use crate::domain::types::OrderSide;
+use crate::infrastructure::exchange::alpaca::utils;
+use crate::infrastructure::exchange::{
+    Candle, ExchangeConfig, ExchangeError, Executor, Granularity,
+};
 
 /// Alpaca client with same interface as CoinbaseClient
 ///
@@ -60,7 +62,13 @@ impl AlpacaClient {
             )
         })?;
 
-        Self::with_credentials_and_clock(&api_key, &api_secret, env, recorder, Arc::new(SystemClock))
+        Self::with_credentials_and_clock(
+            &api_key,
+            &api_secret,
+            env,
+            recorder,
+            Arc::new(SystemClock),
+        )
     }
 
     pub fn with_credentials(
@@ -96,8 +104,9 @@ impl AlpacaClient {
         );
 
         // NOTE: We construct ApiInfo directly to avoid mutating global environment variables
-        let api_info = ApiInfo::from_parts(base_url, api_key, api_secret)
-            .map_err(|e| ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e)))?;
+        let api_info = ApiInfo::from_parts(base_url, api_key, api_secret).map_err(|e| {
+            ExchangeError::Configuration(format!("Failed to create Alpaca API info: {}", e))
+        })?;
 
         let client = Client::new(api_info);
 
@@ -230,19 +239,19 @@ impl AlpacaClient {
             // PAPER TRADING HOTFIX:
             // Dual-leg State Machine assumes order completion asynchronously due to PendingNew.
             // On paper, Market orders fill instantly, preventing runaway drift.
-            
+
             // NOTE: Alpaca rejects fractional quantities for some tickers and configurations.
             // Flooring here ensures we don't send fractions like 4.048419092 which causes rejections.
             // We apply the same flooring logic as Limit orders.
             let floored = size.floor();
-            
+
             warn!(
                 "PAPER TRADING HOTFIX: Forcing Market order for floored quantity {} (was {}) to prevent async tracking flaws. Limit price {:?} ignored.",
                 floored, size, price
             );
-            
+
             // If floored is zero but original size was not, we could skip or just send floored
-            // and let the API reject size=0, or let strategy handle size=0 earlier. 
+            // and let the API reject size=0, or let strategy handle size=0 earlier.
             // In earlier code, returning (size, None) caused rejection anyway.
             (floored, None)
         } else {
@@ -286,8 +295,8 @@ impl AlpacaClient {
         let client = &self.client;
 
         // ALPACA FIX: Wash Trade Prevention (MC-1)
-        // If placing an order fails with 403 (wash trade), it's usually because of 
-        // existing orders on the opposite side. We proactively cancel ALL open 
+        // If placing an order fails with 403 (wash trade), it's usually because of
+        // existing orders on the opposite side. We proactively cancel ALL open
         // orders for this symbol before placing a new one.
         if let Err(e) = self.cancel_all_orders(product_id).await {
             warn!(symbol = %symbol, error = %e, "Failed to cancel existing orders before placement (ignoring)");
@@ -314,7 +323,10 @@ impl AlpacaClient {
         }
 
         // MC-4 FIX: Record order latency
-        crate::infrastructure::telemetry::metrics::record_order_latency(&symbol, start.elapsed().as_secs_f64());
+        crate::infrastructure::telemetry::metrics::record_order_latency(
+            &symbol,
+            start.elapsed().as_secs_f64(),
+        );
         crate::infrastructure::telemetry::metrics::record_order(&symbol, side, true);
 
         // MC-3 FIX: Return order ID for tracking
@@ -540,7 +552,10 @@ impl AlpacaClient {
                 let s_lower = s.to_lowercase();
                 if s.contains("429") || s_lower.contains("rate limit") {
                     ExchangeError::RateLimited(1000)
-                } else if ["500", "502", "503", "504"].iter().any(|&code| s.contains(code)) {
+                } else if ["500", "502", "503", "504"]
+                    .iter()
+                    .any(|&code| s.contains(code))
+                {
                     ExchangeError::ExchangeInternal(s)
                 } else if s.contains("401") || s.contains("403") {
                     ExchangeError::Configuration(s)
@@ -622,7 +637,9 @@ impl Executor for AlpacaClient {
             | alpaca_order::Status::Calculated
             | alpaca_order::Status::PendingNew
             | alpaca_order::Status::PendingReplace => crate::domain::orders::OrderState::Pending,
-            alpaca_order::Status::PartiallyFilled => crate::domain::orders::OrderState::PartiallyFilled,
+            alpaca_order::Status::PartiallyFilled => {
+                crate::domain::orders::OrderState::PartiallyFilled
+            }
             alpaca_order::Status::Filled => crate::domain::orders::OrderState::Filled,
             alpaca_order::Status::DoneForDay => crate::domain::orders::OrderState::Filled,
             alpaca_order::Status::Canceled | alpaca_order::Status::PendingCancel => {
@@ -646,7 +663,10 @@ impl Executor for AlpacaClient {
     }
 
     /// Cancel order on Alpaca
-    async fn cancel_order(&self, order_id: &crate::domain::orders::OrderId) -> Result<(), ExchangeError> {
+    async fn cancel_order(
+        &self,
+        order_id: &crate::domain::orders::OrderId,
+    ) -> Result<(), ExchangeError> {
         let alpaca_id = order_id.as_str();
         let client = &self.client;
 

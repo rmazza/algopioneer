@@ -2,11 +2,11 @@
 //!
 //! Provides concrete implementations and helpers for trade recording.
 
+pub use crate::application::ports::logging::{StateStore, TradeRecorder};
+pub use crate::domain::logging::{PositionStateRecord, RecordError, TradeRecord, TradeSide};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-pub use crate::domain::logging::{TradeRecord, TradeSide, RecordError, PositionStateRecord};
-pub use crate::application::ports::logging::{TradeRecorder, StateStore};
 
 impl TradeRecord {
     pub fn with_timestamp(

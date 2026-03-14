@@ -14,9 +14,11 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use algopioneer::interface::cli::{BacktestCliConfig, BacktestStrategyType, Cli, Commands, DualLegCliConfig};
-use algopioneer::interface::commands;
 use algopioneer::infrastructure::exchange::coinbase::AppEnv;
+use algopioneer::interface::cli::{
+    BacktestCliConfig, BacktestStrategyType, Cli, Commands, DualLegCliConfig,
+};
+use algopioneer::interface::commands;
 use clap::Parser;
 use dotenvy::dotenv;
 use tracing::error;

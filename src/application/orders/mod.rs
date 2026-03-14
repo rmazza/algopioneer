@@ -5,8 +5,8 @@
 mod reconciler;
 mod tracker;
 
+pub use crate::domain::orders::{FillStatus, OrderId, OrderState, TrackedOrder};
 pub use reconciler::{
     PositionReconciler, ReconciliationAction, ReconciliationConfig, ReconciliationResult,
 };
 pub use tracker::{OrderTracker, OrderTrackingError};
-pub use crate::domain::orders::{FillStatus, OrderId, OrderState, TrackedOrder};

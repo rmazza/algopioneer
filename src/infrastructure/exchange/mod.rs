@@ -7,13 +7,15 @@ pub mod alpaca;
 pub mod coinbase;
 pub mod kraken;
 
-use chrono::{Utc, TimeZone};
+use chrono::{TimeZone, Utc};
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 
-pub use crate::domain::exchange::{ExchangeError, ExchangeId, Candle, Granularity};
-pub use crate::application::ports::exchange::{Executor, ExchangeClient, WebSocketProvider, WebSocketHandle};
+pub use crate::application::ports::exchange::{
+    ExchangeClient, Executor, WebSocketHandle, WebSocketProvider,
+};
+pub use crate::domain::exchange::{Candle, ExchangeError, ExchangeId, Granularity};
 
 // Re-export concrete clients for convenience
 pub use alpaca::AlpacaClient;

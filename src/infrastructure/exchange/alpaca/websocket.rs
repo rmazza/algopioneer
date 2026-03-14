@@ -25,11 +25,11 @@ use tokio::time::interval;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 
+use crate::domain::types::MarketData;
 use crate::infrastructure::exchange::alpaca::utils;
 use crate::infrastructure::exchange::{
     ExchangeConfig, ExchangeError, ExchangeId, WebSocketHandle, WebSocketProvider,
 };
-use crate::domain::types::MarketData;
 
 /// Static instrument_id to avoid heap allocation per tick
 static ALPACA_INSTRUMENT_ID: &str = "alpaca";

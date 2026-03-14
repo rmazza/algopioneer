@@ -4,9 +4,9 @@
 //! on historical data with configurable strategies and data sources.
 
 use crate::application::backtest::{self, BacktestConfig, BacktestResult};
-use crate::interface::cli::{BacktestCliConfig, BacktestStrategyType};
-use crate::application::strategy::moving_average::MovingAverageCrossover;
 use crate::application::strategy::dual_leg::PairsManager;
+use crate::application::strategy::moving_average::MovingAverageCrossover;
+use crate::interface::cli::{BacktestCliConfig, BacktestStrategyType};
 
 use polars::prelude::*;
 use rust_decimal_macros::dec;
@@ -77,7 +77,7 @@ pub async fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError
     );
 
     let candle_count = config.duration_to_candles()?;
-    
+
     // Result of the backtest
     let result = match config.strategy {
         BacktestStrategyType::MovingAverage => {
@@ -95,7 +95,9 @@ pub async fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError
         }
         BacktestStrategyType::DualLeg => {
             if config.symbols.len() < 2 {
-                return Err(BacktestError::Data("Dual-leg strategy requires exactly 2 symbols".to_string()));
+                return Err(BacktestError::Data(
+                    "Dual-leg strategy requires exactly 2 symbols".to_string(),
+                ));
             }
             let s1 = &config.symbols[0];
             let s2 = &config.symbols[1];
@@ -111,7 +113,13 @@ pub async fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError
                 load_csv_data(s2, candle_count)?
             };
 
-            info!(rows1 = df1.height(), rows2 = df2.height(), "Data loaded for {} and {}", s1, s2);
+            info!(
+                rows1 = df1.height(),
+                rows2 = df2.height(),
+                "Data loaded for {} and {}",
+                s1,
+                s2
+            );
 
             // Create a PairsManager for signal generation
             // Using default parameters for the backtest
@@ -146,7 +154,10 @@ fn print_backtest_results(result: &BacktestResult) {
     info!("------------------------");
 }
 
-fn write_backtest_outputs(result: &BacktestResult, config: &BacktestCliConfig) -> Result<(), BacktestError> {
+fn write_backtest_outputs(
+    result: &BacktestResult,
+    config: &BacktestCliConfig,
+) -> Result<(), BacktestError> {
     fs::create_dir_all(&config.output_dir)?;
 
     let output = BacktestOutput {
@@ -176,7 +187,10 @@ fn write_backtest_outputs(result: &BacktestResult, config: &BacktestCliConfig) -
 
     let trades_path = Path::new(&config.output_dir).join("trades.csv");
     let mut trades_file = File::create(&trades_path)?;
-    writeln!(trades_file, "entry_idx,exit_idx,entry_price,exit_price,size,pnl,pnl_pct")?;
+    writeln!(
+        trades_file,
+        "entry_idx,exit_idx,entry_price,exit_price,size,pnl,pnl_pct"
+    )?;
     for t in &result.trades {
         writeln!(
             trades_file,

@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+use crate::application::strategy::dual_leg::OrderSide;
 use crate::infrastructure::exchange::{
     Candle, ExchangeClient, ExchangeConfig, ExchangeError, ExchangeId, Executor, Granularity,
 };
-use crate::application::strategy::dual_leg::OrderSide;
 
 /// Kraken exchange client (stub implementation)
 pub struct KrakenExchangeClient {

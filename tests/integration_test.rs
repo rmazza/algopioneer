@@ -1,8 +1,8 @@
-use algopioneer::application::strategy::dual_leg::*;
-use algopioneer::domain::types::{MarketData, OrderSide};
-use algopioneer::domain::orders::{OrderId, OrderState};
-use algopioneer::domain::exchange::{ExchangeError, ExchangeId};
 use algopioneer::application::ports::exchange::Executor;
+use algopioneer::application::strategy::dual_leg::*;
+use algopioneer::domain::exchange::{ExchangeError, ExchangeId};
+use algopioneer::domain::orders::{OrderId, OrderState};
+use algopioneer::domain::types::{MarketData, OrderSide};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use mockall::mock;
@@ -22,8 +22,7 @@ use tokio::time::Duration;
 
 /// Type alias the async Result type to reduce complexity warnings
 type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-type ExecuteOrderResult =
-    BoxedFuture<Result<OrderId, ExchangeError>>;
+type ExecuteOrderResult = BoxedFuture<Result<OrderId, ExchangeError>>;
 
 mock! {
     pub ExecutorImpl {
@@ -45,10 +44,7 @@ impl Executor for MockExecutorImpl {
             .await
     }
 
-    async fn get_position(
-        &self,
-        _symbol: &str,
-    ) -> Result<Decimal, ExchangeError> {
+    async fn get_position(&self, _symbol: &str) -> Result<Decimal, ExchangeError> {
         Ok(Decimal::ZERO)
     }
 
@@ -62,7 +58,7 @@ impl Executor for MockExecutorImpl {
     fn exchange_id(&self) -> ExchangeId {
         ExchangeId::Coinbase
     }
-    }
+
     async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
         Ok(true)
     }
@@ -239,33 +235,25 @@ async fn test_pairs_trading_cycle() {
         .expect_execute_order_mock()
         .with(eq("A"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-pairs-1")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-pairs-1")) }));
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("B"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-pairs-2")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-pairs-2")) }));
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("A"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-pairs-3")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-pairs-3")) }));
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("B"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-pairs-4")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-pairs-4")) }));
 
     let mock_executor = Arc::new(mock_executor);
     let (_recovery_tx, _recovery_rx) = mpsc::channel(10);
@@ -412,33 +400,25 @@ async fn test_basis_trading_cycle() {
         .expect_execute_order_mock()
         .with(eq("BTC-USD"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-basis-1")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-basis-1")) }));
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("BTC-USDT"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-basis-2")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-basis-2")) }));
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("BTC-USD"), eq("sell"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-basis-3")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-basis-3")) }));
 
     mock_executor
         .expect_execute_order_mock()
         .with(eq("BTC-USDT"), eq("buy"), always())
         .times(1)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-basis-4")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-basis-4")) }));
 
     let mock_executor = Arc::new(mock_executor);
     let (_recovery_tx, _recovery_rx) = mpsc::channel(10);
@@ -554,11 +534,7 @@ async fn test_recovery_worker_retry() {
         .times(1)
         .in_sequence(&mut seq)
         .returning(|_, _, _| {
-            Box::pin(async {
-                Err(ExchangeError::Other(
-                    "Simulated Failure 1".to_string(),
-                ))
-            })
+            Box::pin(async { Err(ExchangeError::Other("Simulated Failure 1".to_string())) })
         });
 
     mock_executor
@@ -566,9 +542,7 @@ async fn test_recovery_worker_retry() {
         .with(eq("BTC-USD"), eq("buy"), always())
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _, _| {
-            Box::pin(async { Ok(OrderId::new("mock-recovery")) })
-        });
+        .returning(|_, _, _| Box::pin(async { Ok(OrderId::new("mock-recovery")) }));
 
     let mock_executor = Arc::new(mock_executor);
     let (recovery_tx, recovery_rx) = mpsc::channel(10);
@@ -604,7 +578,9 @@ async fn test_recovery_worker_retry() {
 
 #[tokio::test]
 async fn test_synthetic_provider() {
-    use algopioneer::infrastructure::coinbase::market_data_provider::{MarketDataProvider, SyntheticProvider};
+    use algopioneer::infrastructure::coinbase::market_data_provider::{
+        MarketDataProvider, SyntheticProvider,
+    };
 
     let provider = SyntheticProvider::new(dec!(50000), 0.0001, 100);
     let symbols = vec!["BTC-USD".to_string(), "ETH-USD".to_string()];

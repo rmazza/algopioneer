@@ -7,9 +7,9 @@
 //!   cargo run --example optimize_pairs -- --leg1 BTC-USD --leg2 ETH-USD --days 7
 //!   cargo run --example optimize_pairs -- --mock  # Use mock data
 
-use algopioneer::infrastructure::coinbase::{AppEnv, CoinbaseClient};
 use algopioneer::application::strategy::dual_leg::{EntryStrategy, MarketData, PairsManager};
 use algopioneer::application::strategy::Signal;
+use algopioneer::infrastructure::coinbase::{AppEnv, CoinbaseClient};
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::Parser;

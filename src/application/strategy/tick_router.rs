@@ -4,8 +4,8 @@
 //! that distributes market data to multiple strategy channels with
 //! automatic backpressure handling and cleanup of closed channels.
 
-use crate::infrastructure::telemetry::metrics;
 use crate::domain::types::MarketData;
+use crate::infrastructure::telemetry::metrics;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;

@@ -3,8 +3,8 @@
 //! Emits structured logs for trades that can be captured by CloudWatch Logs
 //! or any tracing subscriber. Zero additional dependencies.
 
-use crate::domain::logging::{RecordError, TradeRecord};
 use crate::application::ports::logging::TradeRecorder;
+use crate::domain::logging::{RecordError, TradeRecord};
 use async_trait::async_trait;
 use tracing::info;
 

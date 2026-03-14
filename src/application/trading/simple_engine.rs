@@ -3,12 +3,12 @@
 //! This engine implements a simple moving average crossover strategy
 //! with support for both live and paper trading modes.
 
-use crate::interface::cli::SimpleTradingConfig;
-use crate::infrastructure::exchange::coinbase::CoinbaseClient;
-use crate::infrastructure::logging::TradeRecorder;
-use crate::domain::state::{PositionDetail, TradeState};
 use crate::application::strategy::moving_average::MovingAverageCrossover;
 use crate::application::strategy::Signal;
+use crate::domain::state::{PositionDetail, TradeState};
+use crate::infrastructure::exchange::coinbase::CoinbaseClient;
+use crate::infrastructure::logging::TradeRecorder;
+use crate::interface::cli::SimpleTradingConfig;
 
 use cbadv::time::Granularity;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -53,7 +53,10 @@ impl SimpleTradingEngine {
         let state = TradeState::load();
 
         // MC-4: Initialize Daily Risk Engine
-        let risk_config = if matches!(config.env, crate::infrastructure::exchange::coinbase::AppEnv::Paper) {
+        let risk_config = if matches!(
+            config.env,
+            crate::infrastructure::exchange::coinbase::AppEnv::Paper
+        ) {
             crate::application::risk::DailyRiskConfig::paper_trading()
         } else {
             crate::application::risk::DailyRiskConfig::default()
