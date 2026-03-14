@@ -789,10 +789,6 @@ impl crate::application::ports::exchange::ExchangeClient for AlpacaClient {
     fn normalize_symbol(&self, symbol: &str) -> String {
         utils::to_alpaca_symbol(symbol).into_owned()
     }
-
-    fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
-        crate::domain::exchange::ExchangeId::Alpaca
-    }
 }
 
 // Implement DiscoveryDataSource for pair discovery pipeline

@@ -116,10 +116,6 @@ impl ExchangeClient for KrakenExchangeClient {
     fn normalize_symbol(&self, symbol: &str) -> String {
         Self::normalize_to_kraken(symbol)
     }
-
-    fn exchange_id(&self) -> ExchangeId {
-        ExchangeId::Kraken
-    }
 }
 
 #[cfg(test)]

@@ -63,6 +63,10 @@ impl<E: Executor + Send + Sync> Executor for RiskManagedExecutor<E> {
     ) -> Result<(OrderState, Decimal, Option<Decimal>), ExchangeError> {
         self.inner.get_order_status(order_id).await
     }
+
+    fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+        self.inner.exchange_id()
+    }
 }
 
 #[cfg(test)]

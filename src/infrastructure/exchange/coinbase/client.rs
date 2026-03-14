@@ -148,8 +148,4 @@ impl ExchangeClient for CoinbaseExchangeClient {
         // Coinbase uses symbols as-is (e.g., "BTC-USD")
         symbol.to_string()
     }
-
-    fn exchange_id(&self) -> ExchangeId {
-        ExchangeId::Coinbase
-    }
 }
