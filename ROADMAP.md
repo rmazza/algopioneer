@@ -4,10 +4,21 @@ Technical debt and enhancement tracking for algopioneer.
 
 ## High Priority
 
+### ARC-1: Enforce Architectural Boundaries
+**Status**: The audit in v1.9.2 identified that the `application` layer (e.g., `simple_engine.rs`, `dual_leg/mod.rs`) is directly importing concrete types from `infrastructure` (e.g., `CoinbaseClient`, `LogThrottle`) instead of using traits from `src/application/ports/`.
+
+**Impact**: This violates Clean Architecture principles, making the application logic tightly coupled to specific infrastructure implementations. It hinders testability and exchange-agnostic execution.
+
+**Required Action**:
+- Refactor all `application` modules to use the `ExchangeClient`, `TradeRecorder`, and `MarketDataProvider` traits defined in `src/application/ports/`.
+- Use Dependency Injection in `main.rs` to wire implementation details into the application services.
+
+---
+
 ### MC-4: State Reconciliation for Overlapping Pairs
 **Status**: The system queries the aggregate Alpaca account position to reconcile state. If multiple strategies trade the same symbol (e.g., WFC-JPM and WMT-WFC both trading WFC), they will both claim the total aggregate position for themselves.
 
-**Impact**: This leads to cross-pollution of shared symbols, causing the strategy to think it is massively unhedged. This results in the strategy entering a `Halted` state.
+**Impact**: This leads to cross-pollution of shared symbols. Currently, the code issues a `warn!` and updates the internal position quantity to match the aggregate total (Case 2), which causes incorrect PnL tracking and potential over-hedging.
 
 **Required Action**:
 - Track `Client Order IDs` internally to map execution fills strictly to specific strategy instances.
