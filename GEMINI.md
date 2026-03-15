@@ -136,8 +136,8 @@ Production-grade modular application with dependency injection, trait-based abst
     *   `COINBASE_API_SECRET`
     *   `KRAKEN_API_KEY` (optional, for Kraken support)
     *   `KRAKEN_API_SECRET` (optional, for Kraken support)
-    *   `APCA_API_KEY_ID` (optional, for Alpaca support)
-    *   `APCA_API_SECRET_KEY` (optional, for Alpaca support)
+    *   `ALPACA_API_KEY` (optional, for Alpaca support)
+    *   `ALPACA_API_SECRET` (optional, for Alpaca support)
 
 **Build:**
 

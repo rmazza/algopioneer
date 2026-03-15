@@ -30,18 +30,21 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
 - **Backtest Simulation**: Evaluate strategy performance on historical data
 
 ### Production Features
-- ✅ **Live Trading**: Real-time execution on Coinbase Advanced Trade
-- ✅ **Paper Trading**: Risk-free simulation mode for testing
-- ✅ **Position Reconciliation**: Automatic recovery from network failures
-- ✅ **Circuit Breaker**: Cascading failure prevention with auto-recovery
-- ✅ **PnL Aggregation**: Portfolio-level risk monitoring and tracking
-- ✅ **Health Monitoring**: `/health` HTTP endpoint for Kubernetes/Docker
-- ✅ **Distributed Tracing**: OpenTelemetry integration for observability
-- ✅ **Prometheus Metrics**: `/metrics` endpoint with order latency, PnL, and circuit breaker state
-- ✅ **Daily Risk Limits**: Configurable daily loss thresholds with automatic trading halt
-- ✅ **Panic Recovery**: Supervisor pattern with automatic strategy restart
-- ✅ **WebSocket Stability**: Proper task cleanup preventing resource leaks
-- ✅ **Trade Recording**: Modular trade logging to CSV or DynamoDB (via feature flag)
+- ✅ **Clean Architecture (v1.9.0)**: Domain-driven design with decoupled layers (domain, application, infrastructure, interface).
+- ✅ **Dual-Leg Backtesting (v1.9.0)**: Advanced simulation for spread trading with Sharpe, Sortino, and Profit Factor metrics.
+- ✅ **Live Trading**: Real-time execution on Coinbase Advanced Trade and Alpaca.
+- ✅ **Paper Trading**: Risk-free simulation mode for testing.
+- ✅ **Position Reconciliation**: Automatic recovery from network failures.
+- ✅ **Circuit Breaker**: Cascading failure prevention with auto-recovery.
+- ✅ **PnL Aggregation**: Portfolio-level risk monitoring and tracking.
+- ✅ **Health Monitoring**: `/health` HTTP endpoint for Kubernetes/Docker.
+- ✅ **Distributed Tracing**: OpenTelemetry integration for observability.
+- ✅ **Prometheus Metrics**: `/metrics` endpoint with order latency, PnL, and circuit breaker state.
+- ✅ **Daily Risk Limits**: Configurable daily loss thresholds with automatic trading halt.
+- ✅ **Panic Recovery**: Supervisor pattern with automatic strategy restart.
+- ✅ **Position Imbalance Detection**: Safety guards to prevent runaway positions.
+- ✅ **WebSocket Stability**: Proper task cleanup preventing resource leaks.
+- ✅ **Trade Recording**: Modular trade logging to CSV or DynamoDB (via feature flag).
 - ✅ **Multi-Exchange Architecture**: Extensible design supporting Coinbase (Crypto), Kraken (Experimental), and Alpaca (US Equities).
 - ✅ **Autopilot Mode**: Self-healing mechanism that automatically discovers new pairs, compares them with active config, and redeploys if improvements are found (`autopilot.sh`).
 
@@ -71,8 +74,8 @@ AlgoPioneer is an enterprise-grade algorithmic trading platform designed for the
     COINBASE_API_SECRET=your_api_secret
     
     # Optional: Alpaca API (for US Equities)
-    ALPACA_KEY_ID=your_alpaca_key
-    ALPACA_SECRET_KEY=your_alpaca_secret
+    ALPACA_API_KEY=your_alpaca_key
+    ALPACA_API_SECRET=your_alpaca_secret
     
     # Optional: Kraken API
     KRAKEN_API_KEY=your_kraken_key
@@ -139,6 +142,17 @@ cargo run --release -- trade --product-id BTC-USD --duration 60
 cargo run --release -- trade --product-id BTC-USD --paper
 ```
 
+**Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--product-id` | Required | Product to trade (e.g., "BTC-USD") |
+| `--duration` | `60` | Duration in seconds between cycles |
+| `--paper` | `false` | Run in paper trading mode |
+| `--order-size` | `0.001` | Order size in base currency |
+| `--short-window`| `5` | Short moving average window size |
+| `--long-window` | `20` | Long moving average window size |
+| `--max-history` | `200` | Maximum history points to keep |
+
 ### 3. Dual-Leg Trading (Basis & Pairs)
 
 Run dual-leg strategies using the `dual-leg` command.
@@ -152,6 +166,20 @@ cargo run --release -- dual-leg --strategy basis --symbols BTC-USD,BTC-USDT --pa
 ```bash
 cargo run --release -- dual-leg --strategy pairs --symbols BTC-USD,ETH-USD --paper
 ```
+
+**Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--strategy` | Required | Strategy type: "basis" or "pairs" |
+| `--symbols` | Required | Two symbols (e.g., "BTC-USD,BTC-USDT") |
+| `--exchange` | `coinbase` | Exchange: "coinbase", "kraken", "alpaca" |
+| `--paper` | `false` | Run in paper trading mode |
+| `--order-size` | `0.00001`| Order size in base currency |
+| `--min-profit-threshold` | `0.005` | Minimum profit for exits |
+| `--stop-loss-threshold` | `-0.05` | Stop loss threshold (negative) |
+| `--max-tick-age-ms` | `2000` | Maximum tick age before dropping |
+| `--execution-timeout-ms`| `30000`| Order execution timeout (ms) |
+| `--throttle-interval-secs`| `5` | Logging throttle interval (s) |
 
 ### 4. Portfolio Mode
 
@@ -180,12 +208,12 @@ cargo run --release -- backtest --strategy moving_average --symbols BTC-USD --sy
 **Options:**
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--strategy` | `moving_average` | Strategy: "moving_average" or "dual_leg" |
+| `--strategy` | `moving-average` | Strategy: "moving-average" or "dual-leg" |
 | `--exchange` | `coinbase` | Exchange: "coinbase" or "alpaca" |
-| `--symbols` | Required | Comma-separated symbols (2 for dual_leg) |
-| `--duration` | `60` | Backtest duration in minutes |
+| `--symbols` | `BTC-USD` | Comma-separated symbols (2 for dual-leg) |
+| `--duration` | `7d` | Backtest duration (e.g., "7d", "30d", "1y") |
 | `--synthetic` | `false` | Use synthetic data for testing |
-| `--output-dir` | None | Directory for JSON output. Use `--output-dir ./results` to specify JSON output directory. |
+| `--output-dir` | `backtest_results` | Directory for JSON output. |
 | `--initial-capital` | `10000.0` | Initial capital (USD) |
 
 ### 6. Autopilot (Self-Healing & Rebalancing)
@@ -209,72 +237,40 @@ algopioneer/
 ├── src/
 │   ├── main.rs                 # CLI entry point with jemalloc and command dispatch
 │   ├── lib.rs                  # Library root
-│   ├── cli/                    # CLI definitions
-│   │   ├── mod.rs              # Cli struct and Commands enum
-│   │   └── config.rs           # Configuration structs (DualLegCliConfig, etc.)
-│   ├── commands/               # Command handlers
-│   │   ├── mod.rs              # Command exports
-│   │   ├── trade.rs            # Moving average trade handler
-│   │   ├── backtest.rs         # Backtest handler
-│   │   ├── dual_leg.rs         # Dual-leg trading handler
-│   │   ├── portfolio.rs        # Portfolio mode handler
-│   │   └── discover.rs         # Pair discovery handler
-│   ├── coinbase/               # Legacy Coinbase integration
-│   │   ├── mod.rs              # Coinbase API client
-│   │   ├── websocket.rs        # Real-time WebSocket data streaming
-│   │   └── market_data_provider.rs
-│   ├── exchange/               # Exchange abstraction layer
-│   │   ├── mod.rs              # Traits (Executor, ExchangeClient, WebSocketProvider)
-│   │   ├── coinbase/           # Coinbase implementation
-│   │   ├── kraken/             # Kraken implementation (experimental)
-│   │   └── alpaca/             # Alpaca implementation (US Equities)
-│   ├── orders/                 # Order management
-│   │   ├── mod.rs              # Order types and traits
-│   │   ├── tracker.rs          # Order state tracking
-│   │   ├── reconciler.rs       # Position reconciliation
-│   │   └── types.rs            # Order domain types
-│   ├── risk/                   # Risk management
-│   │   ├── mod.rs              # Risk module exports
-│   │   ├── daily_limit.rs      # Daily loss limit engine
-│   │   └── executor.rs         # Risk-aware order executor
-│   ├── logging/                # Trade recording
-│   │   ├── mod.rs              # Logging traits
-│   │   ├── recorder.rs         # Recorder implementations
-│   │   ├── csv_recorder.rs     # CSV file recorder
-│   │   └── dynamodb_recorder.rs # AWS DynamoDB recorder (feature-gated)
-│   ├── discovery/              # Automated pair discovery
-│   │   ├── mod.rs              # Module exports
-│   │   ├── config.rs           # DiscoveryConfig with serde support
-│   │   ├── error.rs            # Typed errors with thiserror
-│   │   ├── filter.rs           # Correlation + half-life filtering
-│   │   ├── optimizer.rs        # Grid search parameter optimization
-│   │   └── sector.rs           # Token sector classification
-│   ├── strategy/               # Trading strategies
-│   │   ├── mod.rs              # Strategy traits
-│   │   ├── dual_leg_trading.rs # Dual-leg arbitrage with state machine
-│   │   ├── moving_average.rs   # Moving average crossover strategy
-│   │   ├── supervisor.rs       # Strategy supervisor with panic recovery
-│   │   └── tick_router.rs      # Market data routing with backpressure
-│   ├── math/                   # Mathematical utilities
-│   │   ├── mod.rs              # Math module exports
-│   │   └── kalman.rs           # Kalman filter for dynamic hedge ratios
-│   ├── backtest/               # Backtesting engine
-│   │   └── mod.rs              # Deterministic backtest with Decimal arithmetic
-│   ├── resilience/             # Resilience patterns
-│   │   ├── mod.rs              # Resilience exports
-│   │   └── circuit_breaker.rs  # Circuit breaker with RwLock
-│   ├── health.rs               # HTTP health check endpoint (/health)
-│   ├── metrics.rs              # Prometheus metrics (/metrics)
-│   ├── observability.rs        # OpenTelemetry tracing integration
-│   └── types.rs                # Shared domain types (MarketData, OrderSide)
-├── tests/
-│   ├── integration_test.rs     # Integration tests with mock executor
-│   └── proptest_financial.rs   # Property-based tests for financial math
+│   ├── domain/                 # Core domain logic (Business Rules)
+│   │   ├── mod.rs              # Domain module exports
+│   │   ├── types.rs            # Shared domain types (MarketData, OrderSide)
+│   │   ├── events.rs           # System-wide event definitions
+│   │   ├── orders.rs           # Order entities and logic
+│   │   ├── exchange.rs         # Exchange domain models
+│   │   ├── math/               # Mathematical utilities (Kalman Filter)
+│   │   └── state/              # Application state types
+│   ├── application/            # Application services and use cases
+│   │   ├── mod.rs              # Application module exports
+│   │   ├── strategy/           # Trading strategies (Dual-Leg, Moving Average)
+│   │   ├── trading/            # Core trading engines
+│   │   ├── discovery/          # Automated pair discovery and optimization
+│   │   ├── backtest/           # Deterministic backtesting engine
+│   │   ├── risk/               # Risk management (Daily Limits, Executor)
+│   │   ├── orders/             # Order management (Tracker, Reconciler)
+│   │   ├── resilience/         # Resilience patterns (Circuit Breaker)
+│   │   └── ports/              # Output ports (Traits for infrastructure)
+│   ├── infrastructure/         # External implementations (Detail)
+│   │   ├── mod.rs              # Infrastructure module exports
+│   │   ├── exchange/           # Exchange clients (Coinbase, Alpaca, Kraken)
+│   │   ├── logging/            # Trade recording (CSV, DynamoDB)
+│   │   ├── persistence/        # Database and state persistence
+│   │   └── telemetry/          # Observability (OpenTelemetry, Prometheus)
+│   └── interface/              # Input adapters (CLI, Commands)
+│       ├── mod.rs              # Interface module exports
+│       ├── cli/                # CLI definitions and argument parsing
+│       └── commands/           # Command handlers and orchestration
+├── tests/                      # Integration and property-based tests
+├── terraform/                  # Infrastructure as Code (AWS)
 ├── Cargo.toml                  # Dependencies and project metadata
 ├── .env                        # API credentials (not committed)
 ├── autopilot.sh                # Autopilot rebalancing script
-├── deploy_alpaca.sh            # Alpaca deployment script
-└── compare_pairs.py            # Pair comparison logic for Autopilot
+└── deploy_alpaca.sh            # Alpaca deployment script
 ```
 
 ### Key Components
