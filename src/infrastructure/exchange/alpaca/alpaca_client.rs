@@ -544,7 +544,6 @@ impl AlpacaClient {
     }
 
     /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
-
     fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
         match e {
             RequestError::Endpoint(inner) => {
