@@ -62,13 +62,12 @@ let mut trade_returns: SmallVec<[Decimal; 32]> = SmallVec::new();
 ---
 
 ### MC-2 (Alpaca): Optimize String Allocations in WebSocket Hot Path
-**Location**: `src/exchange/alpaca/websocket.rs`
+**Location**: `src/infrastructure/exchange/alpaca/websocket.rs`
 
-Deferred from Alpaca Code Review. The `handle_message` function performs unnecessary string allocations during JSON parsing/deserialization which is a hot path.
+**Status**: **PARTIALLY ADDRESSED** (Zero-allocation parsing implemented in `parse_trade_from_value`, but `s.clone()` remains for symbol mapping).
 
-**Planned Improvement**:
-- Use `Cow<str>` or `&str` with `serde_json::from_slice` where possible.
-- Avoid cloning strings when passing to `MarketData`.
+**Remaining Improvement**:
+- Use `Cow<'static, str>` or reference-based symbol mapping to avoid clones.
 
 ---
 
@@ -81,19 +80,16 @@ Some modules use `Error` suffix (e.g., `ExecutionError`, `ExchangeError`) while 
 
 ## Completed ✅
 
-- [x] **MC-1**: Remove dead code fields (`sandbox`, `clock`) in `AlpacaWebSocketProvider`
-- [x] **MC-2**: Add numerical stability threshold (1e-12) to ADF test in `filter.rs`
-- [x] **CB-1**: Precision-safe price parsing in Alpaca WebSocket
-- [x] **MC-3**: O(1) symbol lookup with HashMap in WebSocket handler
-- [x] **CB-2**: Alpaca Discovery Fixes (Decimal z-scores, daily bars support)
-- [x] **CB-3**: Reliability improvements (Clock injection, graceful error handling)
-- [x] **CB-5**: Safe access in Market Data Provider (removed unwrap)
-- [x] **N-2**: Performance optimization in Alpaca Utils (pre-computed powers of 10)
+### March 2026 - Clean Architecture & Backtesting (v1.9.0/1.9.1/1.9.2)
+- [x] **Project Reorganization**: Consolidated domain logic, application services, and infrastructure details.
+- [x] **Dual-Leg Backtesting**: Advanced spread trading simulation with risk metrics (Sharpe, Sortino).
+- [x] **Security Maintenance**: Upgrade `quinn-proto` and resolve integration test syntax issues.
+- [x] **Exchange Refactor**: Fix `exchange_id` duplication and `RiskManagedExecutor` implementation.
 
 ### Jan 2026 - Alpaca Module Review
 - [x] **MC-1**: Fix `JoinHandle` leak in `AlpacaWebSocketProvider`
 - [x] **MC-3**: Add high-resolution tick latency metrics
-- [x] **MC-4**: Optimize hot-path clone in market data routing
+- [x] **MC-4**: Optimize hot-path clone in market data routing (Consolidated with MC-2)
 - [x] **CB-1**: Implement graceful shutdown for WebSocket task
 - [x] **CB-2**: Add circuit breaker for reconnection logic
 - [x] **CB-3**: Fix unsafe boolean initialization (UB)
@@ -102,3 +98,13 @@ Some modules use `Error` suffix (e.g., `ExecutionError`, `ExchangeError`) while 
 
 ### Jan 2026 - Supervisor Resilience
 - [x] **NP-5**: Strategy Restart Policy - Exponential backoff with jitter, per-strategy restart budgets, cooldown reset
+
+### Prior Technical Debt
+- [x] **MC-1**: Remove dead code fields (`sandbox`, `clock`) in `AlpacaWebSocketProvider`
+- [x] **MC-2**: Add numerical stability threshold (1e-12) to ADF test in `filter.rs`
+- [x] **CB-1**: Precision-safe price parsing in Alpaca WebSocket
+- [x] **MC-3**: O(1) symbol lookup with HashMap in WebSocket handler
+- [x] **CB-2**: Alpaca Discovery Fixes (Decimal z-scores, daily bars support)
+- [x] **CB-3**: Reliability improvements (Clock injection, graceful error handling)
+- [x] **CB-5**: Safe access in Market Data Provider (removed unwrap)
+- [x] **N-2**: Performance optimization in Alpaca Utils (pre-computed powers of 10)

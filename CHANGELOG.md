@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2] - 2026-03-14
+### Changed
+- **Maintenance**: Performed workspace-wide formatting and fixed several Clippy warnings for improved code quality.
+- **Refactor**: Cleaned up the root directory by removing temporary artifacts and legacy configuration files.
+- **Project Structure**: Consolidated agent skills into `.gemini/skills/` and standardized command configurations.
+
+### Fixed
+- **Security**: Upgraded `quinn-proto` to v0.11.14 to address RUSTSEC-2026-0037.
+- **Exchange**: Removed duplicate `exchange_id` from `ExchangeClient` and corrected `RiskManagedExecutor` implementation.
+- **Tests**: Resolved syntax errors in `integration_test.rs` and stabilized integration testing suite.
+
 ## [1.9.1] - 2026-03-12
 ### Fixed
 - **CI**: Removed immutable 'latest' tag from ECR push to comply with repository security policy.
