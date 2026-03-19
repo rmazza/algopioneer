@@ -161,7 +161,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. The Optimization Loop
     for window in windows {
         for z_entry in z_entries.clone() {
-            let mut manager = PairsManager::new(window, z_entry, z_exit);
+            let mut manager = PairsManager::new(
+                format!("{}:{}", self.spot_symbol, self.future_symbol),
+                window,
+                z_entry,
+                z_exit,
+            );
 
             let result = run_simulation(
                 &mut manager,

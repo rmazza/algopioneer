@@ -125,7 +125,7 @@ pub async fn run_dual_leg_trading(
         "pairs" => {
             // Pairs Trading: Z-Score based
             // Window 20, Entry Z=2.0, Exit Z=0.1
-            let manager = Box::new(PairsManager::new(500, 4.0, 0.1));
+            let manager = Box::new(PairsManager::new("BASIS:DEFAULT".to_string(), 500, 4.0, 0.1));
             // Pairs is usually Dollar Neutral
             let monitor =
                 RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);

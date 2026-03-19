@@ -123,7 +123,7 @@ pub async fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError
 
             // Create a PairsManager for signal generation
             // Using default parameters for the backtest
-            let mut strategy = PairsManager::new(20, 2.0, 0.5);
+            let mut strategy = PairsManager::new("BACKTEST".to_string(), 20, 2.0, 0.5);
             let bt_config = BacktestConfig::with_capital(config.initial_capital);
             backtest::run_dual(&mut strategy, &df1, &df2, &bt_config).await?
         }

@@ -2012,6 +2012,7 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
                 ))
             }
             DualLegStrategyType::Pairs => Box::new(PairsManager::new(
+                format!("{}:{}", self.config.dual_leg_config.spot_symbol, self.config.dual_leg_config.future_symbol),
                 self.config.window_size,
                 self.config.entry_z_score,
                 self.config.exit_z_score,
@@ -2160,7 +2161,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_z_score_calculation() {
-        let mut manager = PairsManager::new(5, 1.9, 0.1);
+        let mut manager = PairsManager::new("TEST:PAIR".to_string(), 5, 1.9, 0.1);
         for _ in 0..5 {
             let _ = manager
                 .analyze(

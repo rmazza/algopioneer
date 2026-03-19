@@ -9,7 +9,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::application::strategy::Signal;
 use crate::domain::types::MarketData;
@@ -90,6 +90,7 @@ impl EntryStrategy for BasisManager {
 /// Z-scores against changing market regimes. This prevents over-trading in low-vol
 /// environments and under-trading in high-vol environments.
 pub struct PairsManager {
+    symbol_pair: String,
     window_size: usize,
     entry_z_score: f64,
     exit_z_score: f64,
@@ -121,8 +122,14 @@ impl PairsManager {
     const DEFAULT_EWMA_ALPHA: f64 = 0.06;
 
     /// Create a new PairsManager with default EWMA alpha for adaptive thresholds.
-    pub fn new(window_size: usize, entry_z_score: f64, exit_z_score: f64) -> Self {
+    pub fn new(
+        symbol_pair: String,
+        window_size: usize,
+        entry_z_score: f64,
+        exit_z_score: f64,
+    ) -> Self {
         Self::new_adaptive(
+            symbol_pair,
             window_size,
             entry_z_score,
             exit_z_score,
@@ -132,16 +139,25 @@ impl PairsManager {
 
     /// Create a new PairsManager with explicit EWMA alpha for adaptive thresholds.
     pub fn new_adaptive(
+        symbol_pair: String,
         window_size: usize,
         entry_z_score: f64,
         exit_z_score: f64,
         ewma_alpha: f64,
     ) -> Self {
-        Self::new_with_kalman(window_size, entry_z_score, exit_z_score, ewma_alpha, false)
+        Self::new_with_kalman(
+            symbol_pair,
+            window_size,
+            entry_z_score,
+            exit_z_score,
+            ewma_alpha,
+            false,
+        )
     }
 
     /// Create a new PairsManager with dynamic hedge ratio tracking via Kalman Filter.
     pub fn new_with_kalman(
+        symbol_pair: String,
         window_size: usize,
         entry_z_score: f64,
         exit_z_score: f64,
@@ -149,6 +165,7 @@ impl PairsManager {
         enable_kalman: bool,
     ) -> Self {
         Self {
+            symbol_pair,
             window_size,
             entry_z_score,
             exit_z_score,
@@ -322,7 +339,8 @@ impl EntryStrategy for PairsManager {
         let effective_vol = self.ewma_volatility.max(MIN_VOLATILITY);
         let z_score = (spread - mean) / effective_vol;
 
-        debug!(
+        info!(
+            pair = %self.symbol_pair,
             "Pairs Spread: {:.6}, Z-Score (adaptive): {:.4}, EWMA Vol: {:.6}, Window StdDev: {:.6}",
             spread, z_score, self.ewma_volatility, std_dev
         );

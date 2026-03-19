@@ -407,7 +407,12 @@ async fn optimize_pair(
             // Convert Decimal to f64 for PairsManager API
             let z_entry = z_entry_dec.to_f64().unwrap_or(2.0);
             let z_exit = grid.z_exit.to_f64().unwrap_or(0.1);
-            let mut manager = PairsManager::new(window, z_entry, z_exit);
+            let mut manager = PairsManager::new(
+                format!("{}:{}", pair.symbol_a, pair.symbol_b),
+                window,
+                z_entry,
+                z_exit,
+            );
 
             let backtest_data = BacktestData {
                 timestamps: train_timestamps,
@@ -455,6 +460,7 @@ async fn optimize_pair(
 
     // Phase 2: Validate best parameters on TEST data (out-of-sample)
     let mut manager = PairsManager::new(
+        "OPTIMIZER".to_string(),
         train_result.window,
         train_result.z_entry,
         train_result.z_exit,
