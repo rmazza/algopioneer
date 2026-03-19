@@ -22,7 +22,6 @@ pub mod execution;
 pub mod exit;
 
 use crate::application::strategy::Signal;
-use crate::infrastructure::coinbase::CoinbaseClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
@@ -1847,43 +1846,8 @@ impl DualLegStrategy {
             _ => {}
         }
     }
+
 }
-
-#[async_trait]
-impl Executor for CoinbaseClient {
-    async fn execute_order(
-        &self,
-        symbol: &str,
-        side: OrderSide,
-        quantity: Decimal,
-        price: Option<Decimal>,
-    ) -> Result<crate::domain::orders::OrderId, crate::domain::exchange::ExchangeError> {
-        self.place_order(symbol, &side.to_string(), quantity, price)
-            .await
-            .map_err(crate::domain::exchange::ExchangeError::from_boxed)?;
-
-        // TODO(CB-1): CoinbaseClient::place_order() returns () and discards the exchange
-        // order ID. This fabricated UUID means get_order_status/cancel_order in recovery
-        // will use the trait defaults (always-filled, not-implemented) instead of real
-        // exchange state. Fix requires changing place_order to return the real order ID.
-        let order_id = crate::domain::orders::OrderId::new(format!("cb-{}", uuid::Uuid::new_v4()));
-        Ok(order_id)
-    }
-
-    async fn get_position(
-        &self,
-        symbol: &str,
-    ) -> Result<Decimal, crate::domain::exchange::ExchangeError> {
-        CoinbaseClient::get_position(self, symbol)
-            .await
-            .map_err(crate::domain::exchange::ExchangeError::from_boxed)
-    }
-
-    fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
-        crate::domain::exchange::ExchangeId::Coinbase
-    }
-}
-
 impl Drop for DualLegStrategy {
     fn drop(&mut self) {
         // CB-2 FIX: Abort all pending execution tasks on shutdown

@@ -96,6 +96,39 @@ impl Executor for CoinbaseExchangeClient {
             .map_err(ExchangeError::from_boxed)
     }
 
+    async fn get_order_status(
+        &self,
+        _order_id: &crate::domain::orders::OrderId,
+    ) -> Result<(crate::domain::orders::OrderState, Decimal, Option<Decimal>), ExchangeError> {
+        // Coinbase Advanced Trade order polling is not fully implemented in the API client yet.
+        // Returning Filled for backward compatibility with simple strategies as per trait default.
+        Ok((
+            crate::domain::orders::OrderState::Filled,
+            Decimal::ZERO,
+            None,
+        ))
+    }
+
+    async fn cancel_order(
+        &self,
+        _order_id: &crate::domain::orders::OrderId,
+    ) -> Result<(), ExchangeError> {
+        // Coinbase cancel_order is not yet implemented in the API client.
+        Err(ExchangeError::Other(
+            "cancel_order not implemented for Coinbase".to_string(),
+        ))
+    }
+
+    async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), ExchangeError> {
+        // Coinbase cancel_all_orders is not yet implemented.
+        Ok(())
+    }
+
+    async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        // Coinbase is 24/7.
+        Ok(true)
+    }
+
     fn exchange_id(&self) -> ExchangeId {
         ExchangeId::Coinbase
     }

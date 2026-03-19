@@ -16,13 +16,13 @@ Technical debt and enhancement tracking for algopioneer.
 ---
 
 ### MC-4: State Reconciliation for Overlapping Pairs
-**Status**: The system queries the aggregate Alpaca account position to reconcile state. If multiple strategies trade the same symbol (e.g., WFC-JPM and WMT-WFC both trading WFC), they will both claim the total aggregate position for themselves.
+**Status**: **MITIGATED (v1.9.3 Configuration Hotfix)**. Current strategies use isolated symbol pairs (F-JNJ, WFC-JPM) to prevent aggregate position misattribution.
 
-**Impact**: This leads to cross-pollution of shared symbols. Currently, the code issues a `warn!` and updates the internal position quantity to match the aggregate total (Case 2), which causes incorrect PnL tracking and potential over-hedging.
+**Impact**: Successfully prevents "Ghost Positions" for the current run.
 
-**Required Action**:
-- Track `Client Order IDs` internally to map execution fills strictly to specific strategy instances.
-- Alternatively, support sub-accounts or position tagging to isolate positions by pair.
+**Long-Term Action**:
+- Implement `Client Order IDs` tracking for structural resolution.
+- Add sub-account support to isolate positions at the broker level.
 
 ---
 

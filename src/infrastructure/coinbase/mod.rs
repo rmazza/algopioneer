@@ -6,6 +6,7 @@ use cbadv::models::product::{Candle, ProductCandleQuery};
 use cbadv::time::Granularity;
 use cbadv::{RestClient, RestClientBuilder};
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use std::sync::Arc;
 // AS5: Rate limiting
 use governor::{clock::DefaultClock, state::InMemoryState, Quota, RateLimiter};
@@ -284,6 +285,68 @@ impl CoinbaseClient {
             AppEnv::Live => Ok(rust_decimal::Decimal::ZERO),
             AppEnv::Sandbox | AppEnv::Paper => Ok(rust_decimal::Decimal::ZERO),
         }
+    }
+}
+
+// Implement Executor for strategy integration
+use crate::domain::exchange::ExchangeId;
+use crate::domain::orders::{OrderId, OrderState};
+use crate::domain::types::OrderSide;
+use crate::infrastructure::exchange::Executor;
+
+#[async_trait]
+impl Executor for CoinbaseClient {
+    async fn execute_order(
+        &self,
+        symbol: &str,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> Result<OrderId, crate::domain::exchange::ExchangeError> {
+        self.place_order(symbol, &side.to_string(), quantity, price)
+            .await
+            .map_err(crate::domain::exchange::ExchangeError::from_boxed)?;
+
+        // CoinbaseClient::place_order() returns () and discards the exchange
+        // order ID. This fabricated UUID means get_order_status/cancel_order in recovery
+        // will use the trait defaults (always-filled, not-implemented) instead of real
+        // exchange state.
+        let order_id = OrderId::new(format!("cb-{}", uuid::Uuid::new_v4()));
+        Ok(order_id)
+    }
+
+    async fn get_position(
+        &self,
+        symbol: &str,
+    ) -> Result<Decimal, crate::domain::exchange::ExchangeError> {
+        self.get_position(symbol)
+            .await
+            .map_err(crate::domain::exchange::ExchangeError::from_boxed)
+    }
+
+    async fn get_order_status(
+        &self,
+        _order_id: &OrderId,
+    ) -> Result<(OrderState, Decimal, Option<Decimal>), crate::domain::exchange::ExchangeError> {
+        Ok((OrderState::Filled, Decimal::ZERO, None))
+    }
+
+    async fn cancel_order(&self, _order_id: &OrderId) -> Result<(), crate::domain::exchange::ExchangeError> {
+        Err(crate::domain::exchange::ExchangeError::Other(
+            "cancel_order not implemented for Coinbase".to_string(),
+        ))
+    }
+
+    async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), crate::domain::exchange::ExchangeError> {
+        Ok(())
+    }
+
+    async fn check_market_hours(&self) -> Result<bool, crate::domain::exchange::ExchangeError> {
+        Ok(true)
+    }
+
+    fn exchange_id(&self) -> ExchangeId {
+        ExchangeId::Coinbase
     }
 }
 

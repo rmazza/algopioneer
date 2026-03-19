@@ -64,6 +64,18 @@ impl<E: Executor + Send + Sync> Executor for RiskManagedExecutor<E> {
         self.inner.get_order_status(order_id).await
     }
 
+    async fn cancel_order(&self, order_id: &OrderId) -> Result<(), ExchangeError> {
+        self.inner.cancel_order(order_id).await
+    }
+
+    async fn cancel_all_orders(&self, symbol: &str) -> Result<(), ExchangeError> {
+        self.inner.cancel_all_orders(symbol).await
+    }
+
+    async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+        self.inner.check_market_hours().await
+    }
+
     fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
         self.inner.exchange_id()
     }
@@ -93,6 +105,25 @@ mod tests {
             Ok(Decimal::ZERO)
         }
 
+        async fn get_order_status(
+            &self,
+            _order_id: &OrderId,
+        ) -> Result<(OrderState, Decimal, Option<Decimal>), ExchangeError> {
+            Ok((OrderState::Filled, Decimal::ZERO, None))
+        }
+
+        async fn cancel_order(&self, _order_id: &OrderId) -> Result<(), ExchangeError> {
+            Ok(())
+        }
+
+        async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), ExchangeError> {
+            Ok(())
+        }
+
+        async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+            Ok(true)
+        }
+
         fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
             crate::domain::exchange::ExchangeId::Coinbase
         }
@@ -113,11 +144,15 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // 2. Breach limit
+        // 2. Verify cancel_order delegation (MC-2 FIX)
+        let cancel_res = executor.cancel_order(&OrderId::new("test")).await;
+        assert!(cancel_res.is_ok());
+
+        // 3. Breach limit
         risk_engine.record_pnl(dec!(-150));
         assert_eq!(risk_engine.status(), RiskStatus::Halted);
 
-        // 3. Subsequent order should be blocked
+        // 4. Subsequent order should be blocked
         let result = executor
             .execute_order("BTC-USD", OrderSide::Buy, dec!(1), None)
             .await;
