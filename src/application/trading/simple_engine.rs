@@ -52,7 +52,7 @@ impl SimpleTradingEngine {
         let strategy = MovingAverageCrossover::new(config.short_window, config.long_window);
         let state = TradeState::load();
 
-        // MC-4: Initialize Daily Risk Engine
+        // Initialize Daily Risk Engine
         let risk_config = if matches!(
             config.env,
             crate::infrastructure::exchange::coinbase::AppEnv::Paper
@@ -101,7 +101,7 @@ impl SimpleTradingEngine {
             )
             .await?;
 
-        // MC-1 FIX: Convert to Decimal first to validate (reject NaN/Inf), then to f64 for strategy.
+        // Convert to Decimal first to validate (reject NaN/Inf), then to f64 for strategy.
         // This establishes an explicit precision boundary with validation at the exchange edge.
         // The MA strategy internally uses f64 for mathematical operations (sums, averages),
         // which is acceptable for relative comparisons. The validation here ensures we don't
@@ -161,7 +161,7 @@ impl SimpleTradingEngine {
 
                 match signal {
                     Signal::Buy => {
-                        // MC-4: Check daily loss limit
+                        // Check daily loss limit
                         if !self.risk_engine.is_trading_enabled() {
                             warn!("Buy signal ignored: Daily Risk Limit breached");
                             continue;
@@ -178,7 +178,7 @@ impl SimpleTradingEngine {
                             .await
                             .map_err(|e| e as Box<dyn std::error::Error>)?;
 
-                        // CB-1 FIX: Fail loudly on price conversion failure
+                        // Fail loudly on price conversion failure
                         let entry_price = match Decimal::from_f64(latest_candle.close) {
                             Some(p) => p,
                             None => {
@@ -205,7 +205,7 @@ impl SimpleTradingEngine {
                         }
                     }
                     Signal::Sell => {
-                        // MC-4: Check daily loss limit
+                        // Check daily loss limit
                         if !self.risk_engine.is_trading_enabled() {
                             warn!("Sell signal ignored: Daily Risk Limit breached");
                             continue;
@@ -222,7 +222,7 @@ impl SimpleTradingEngine {
                             .await
                             .map_err(|e| e as Box<dyn std::error::Error>)?;
 
-                        // CB-1 FIX: Fail loudly on price conversion failure
+                        // Fail loudly on price conversion failure
                         let exit_price = match Decimal::from_f64(latest_candle.close) {
                             Some(p) => p,
                             None => {
@@ -240,7 +240,7 @@ impl SimpleTradingEngine {
                         if let Some(closed) = self.state.close_position(&self.config.product_id) {
                             let pnl = (exit_price - closed.entry_price) * closed.quantity;
 
-                            // MC-4: Record PnL
+                            // Record PnL
                             self.risk_engine.record_pnl(pnl);
 
                             info!(

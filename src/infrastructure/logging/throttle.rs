@@ -57,7 +57,7 @@ pub struct DualLegLogThrottler {
     pub unstable_state: LogThrottle,
     pub tick_age: LogThrottle,
     pub sync_issue: LogThrottle,
-    /// P1 FIX: Throttler for load shedding warnings (stale tick drops)
+    /// Throttler for load shedding warnings (stale tick drops)
     pub latency_drop: LogThrottle,
 }
 

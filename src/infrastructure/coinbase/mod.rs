@@ -77,7 +77,7 @@ impl CoinbaseClient {
             .build()?;
 
         // AS5: Initialize rate limiter (Coinbase Advanced Trade: 10 requests/second)
-        // BI-1 FIX: Use compile-time const to eliminate panic risk in constructor
+        // Use compile-time const to eliminate panic risk in constructor
         // SAFETY: RATE_LIMIT_NZ is a compile-time constant of 10, guaranteed non-zero
         const RATE_LIMIT_NZ: NonZeroU32 = match NonZeroU32::new(10) {
             Some(v) => v,
@@ -327,17 +327,24 @@ impl Executor for CoinbaseClient {
     async fn get_order_status(
         &self,
         _order_id: &OrderId,
-    ) -> Result<(OrderState, Decimal, Option<Decimal>), crate::domain::exchange::ExchangeError> {
+    ) -> Result<(OrderState, Decimal, Option<Decimal>), crate::domain::exchange::ExchangeError>
+    {
         Ok((OrderState::Filled, Decimal::ZERO, None))
     }
 
-    async fn cancel_order(&self, _order_id: &OrderId) -> Result<(), crate::domain::exchange::ExchangeError> {
+    async fn cancel_order(
+        &self,
+        _order_id: &OrderId,
+    ) -> Result<(), crate::domain::exchange::ExchangeError> {
         Err(crate::domain::exchange::ExchangeError::Other(
             "cancel_order not implemented for Coinbase".to_string(),
         ))
     }
 
-    async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), crate::domain::exchange::ExchangeError> {
+    async fn cancel_all_orders(
+        &self,
+        _symbol: &str,
+    ) -> Result<(), crate::domain::exchange::ExchangeError> {
         Ok(())
     }
 

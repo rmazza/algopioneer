@@ -13,7 +13,7 @@ pub struct PortfolioPairConfig {
     /// Rolling window size for z-score calculation (in ticks)
     pub window_size: usize,
     /// Z-score threshold to enter a position (must be positive)
-    /// CB-2 FIX: Using Decimal for deterministic threshold comparisons
+    /// Using Decimal for deterministic threshold comparisons
     pub entry_z_score: Decimal,
     /// Z-score threshold to exit a position (must be < entry_z_score)
     pub exit_z_score: Decimal,
@@ -298,7 +298,7 @@ pub struct GridSearchConfig {
     /// Window sizes to test
     pub windows: Vec<usize>,
     /// Z-score entry thresholds to test
-    /// MC-1 FIX: Using Decimal for consistency with PortfolioPairConfig
+    /// Using Decimal for consistency with PortfolioPairConfig
     pub z_entries: Vec<Decimal>,
     /// Fixed Z-score exit threshold (mean reversion)
     pub z_exit: Decimal,

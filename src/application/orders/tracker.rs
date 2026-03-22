@@ -178,7 +178,7 @@ impl OrderTracker {
 
     /// Mark order as cancelled.
     ///
-    /// MC-2 FIX: Uses single write lock to eliminate TOCTOU race condition.
+    /// Uses single write lock to eliminate TOCTOU race condition.
     /// Atomically transitions order to Cancelled state while preserving
     /// any fills that occurred before cancellation.
     pub async fn mark_cancelled(&self, id: &OrderId) -> Option<TrackedOrder> {

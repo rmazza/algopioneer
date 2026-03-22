@@ -17,13 +17,13 @@ use crate::domain::types::MarketData;
 // Re-export TransactionCostModel and Spread as they're used by BasisManager
 pub use super::{Spread, TransactionCostModel};
 
-// CF3: Precision Safety Constants
+// Precision Safety Constants
 // Conservative bounds for f64 price ratio conversions to prevent precision loss
 // in statistical arbitrage calculations. Ratios outside these bounds will be rejected.
 const MAX_SAFE_PRICE_RATIO: f64 = 1e12; // Conservative limit for f64 precision
 const MIN_SAFE_PRICE_RATIO: f64 = 1e-12; // Reciprocal of max for symmetry
 
-// NP-1 FIX: Extract magic number to named constant for precision warning throttling
+// Extract magic number to named constant for precision warning throttling
 const PRECISION_WARNING_LOG_INTERVAL: u64 = 1000;
 
 /// Trait for entry logic strategies.
@@ -71,7 +71,7 @@ impl EntryStrategy for BasisManager {
         if net_spread > self.entry_threshold_bps {
             Signal::Buy
         } else if spread.value_bps < self.exit_threshold_bps {
-            Signal::Exit // CF2: Explicit exit signal
+            Signal::Exit // Explicit exit signal
         } else {
             Signal::Hold
         }
@@ -100,7 +100,7 @@ pub struct PairsManager {
     running_sum: f64,
     /// Running sum of squares for O(1) variance calculation
     running_sq_sum: f64,
-    // CF3 FIX: Precision monitoring metrics
+    // Precision monitoring metrics
     precision_rejections: AtomicU64,
     precision_warnings: AtomicU64,
     // Phase 2: EWMA volatility tracking for adaptive thresholds
@@ -110,9 +110,9 @@ pub struct PairsManager {
     ewma_alpha: f64,
     /// Whether EWMA has been initialized (needs bootstrap period)
     ewma_initialized: bool,
-    // MC-1 FIX: Counter for periodic recalculation to prevent f64 drift
+    // Counter for periodic recalculation to prevent f64 drift
     tick_count: u64,
-    // P2: Dynamic hedge ratio via Kalman Filter
+    // Dynamic hedge ratio via Kalman Filter
     /// Optional Kalman Filter for tracking time-varying hedge ratio (beta).
     kalman: Option<crate::domain::math::KalmanHedgeRatio>,
 }
@@ -186,7 +186,7 @@ impl PairsManager {
         }
     }
 
-    /// CF3 FIX: Get precision monitoring metrics
+    /// Get precision monitoring metrics
     pub fn get_precision_metrics(&self) -> (u64, u64) {
         (
             self.precision_rejections.load(Ordering::Relaxed),
@@ -204,7 +204,7 @@ impl PairsManager {
         self.ewma_initialized
     }
 
-    /// P2: Get the current dynamic hedge ratio from Kalman Filter.
+    /// Get the current dynamic hedge ratio from Kalman Filter.
     pub fn get_dynamic_hedge_ratio(&self) -> Option<f64> {
         const KALMAN_WARMUP_TICKS: u64 = 100;
         self.kalman.as_ref().and_then(|k| {
@@ -216,7 +216,7 @@ impl PairsManager {
         })
     }
 
-    /// P2: Check if Kalman Filter is enabled
+    /// Check if Kalman Filter is enabled
     pub fn is_kalman_enabled(&self) -> bool {
         self.kalman.is_some()
     }
@@ -239,7 +239,7 @@ impl EntryStrategy for PairsManager {
                     return Signal::Hold;
                 }
 
-                // CF3 FIX: Enforce hard limits on price ratios
+                // Enforce hard limits on price ratios
                 let ratio = v1 / v2;
                 if !(MIN_SAFE_PRICE_RATIO..=MAX_SAFE_PRICE_RATIO).contains(&ratio) {
                     let count = self.precision_rejections.fetch_add(1, Ordering::Relaxed) + 1;
@@ -279,7 +279,7 @@ impl EntryStrategy for PairsManager {
             }
         };
 
-        // P2: Update Kalman Filter and compute spread
+        // Update Kalman Filter and compute spread
         let spread = if let Some(ref mut kalman) = self.kalman {
             let ln_p1 = p1.ln();
             let ln_p2 = p2.ln();
@@ -294,7 +294,7 @@ impl EntryStrategy for PairsManager {
         self.running_sq_sum += spread * spread;
         self.spread_history.push_back(spread);
 
-        // MC-4 FIX: Reduced from 10,000 to 5,000 to limit f64 drift accumulation
+        // Reduced from 10,000 to 5,000 to limit f64 drift accumulation
         const RECALC_INTERVAL: u64 = 5_000;
         self.tick_count += 1;
         if self.tick_count.is_multiple_of(RECALC_INTERVAL) {

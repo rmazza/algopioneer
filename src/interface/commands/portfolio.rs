@@ -63,7 +63,7 @@ pub async fn run_portfolio(
     // Handle exchange-specific initialization
     match exchange_id {
         ExchangeId::Alpaca => {
-            // Alpaca path - use AlpacaClient and AlpacaWebSocketProvider
+            // path - use AlpacaClient and AlpacaWebSocketProvider
             info!("Initializing Alpaca exchange for Portfolio mode");
 
             use crate::infrastructure::exchange::alpaca::{AlpacaClient, AlpacaWebSocketProvider};
@@ -131,7 +131,7 @@ pub async fn run_portfolio(
                     entry_z_score: json_config.entry_z_score.to_f64().unwrap_or(2.0),
                     exit_z_score: json_config.exit_z_score.to_f64().unwrap_or(0.1),
                     strategy_type: DualLegStrategyType::Pairs,
-                    // N-1 FIX: Use default values for new config fields
+                    // Use default values for new config fields
                     circuit_breaker_threshold: 5,
                     circuit_breaker_timeout_secs: 60,
                     basis_entry_bps: rust_decimal_macros::dec!(10.0),
@@ -213,14 +213,14 @@ pub async fn run_portfolio(
         );
 
         // Convert to Live Config
-        // CB-2 FIX: Convert Decimal z-scores from config to f64 for internal use
+        // Convert Decimal z-scores from config to f64 for internal use
         let live_config = DualLegLiveConfig {
             dual_leg_config: json_config.dual_leg_config,
             window_size: json_config.window_size,
             entry_z_score: json_config.entry_z_score.to_f64().unwrap_or(2.0),
             exit_z_score: json_config.exit_z_score.to_f64().unwrap_or(0.1),
             strategy_type: DualLegStrategyType::Pairs, // Legacy portfolio only supported Pairs
-            // N-1 FIX: Use default values for new config fields
+            // Use default values for new config fields
             circuit_breaker_threshold: 5,
             circuit_breaker_timeout_secs: 60,
             basis_entry_bps: rust_decimal_macros::dec!(10.0),

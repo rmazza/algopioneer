@@ -214,7 +214,6 @@ impl MovingAverageCrossover {
         // crossover signals forward by the difference between the long and short
         // window sizes. This mirrors a common interpretation where the long
         // window introduces additional latency.
-        //
         // UPDATE: Removed shift to align with live execution. Signals are now generated
         // immediately when the crossover is detected.
 
@@ -487,7 +486,6 @@ mod tests {
         // The first few are Hold because the long window isn't filled.
         // A Buy signal should appear when the short MA crosses above the long MA.
         // A Sell signal should appear when the short MA crosses below the long MA.
-        //
         // With shift removed:
         // Buy at index 7 (Price 53.0)
         // Sell at index 12 (Price 55.0)

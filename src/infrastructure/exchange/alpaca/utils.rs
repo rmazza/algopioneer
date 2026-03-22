@@ -9,7 +9,7 @@ use tracing::{error, warn};
 
 /// Convert internal symbol format to Alpaca format (zero-alloc when possible)
 ///
-/// # Performance (N-2 FIX)
+/// # Performance
 /// Uses `Cow<str>` to avoid allocation when symbol has no dash.
 /// For equities (most Alpaca usage), this is the common case.
 ///
@@ -35,7 +35,7 @@ pub fn to_alpaca_symbol(symbol: &str) -> Cow<'_, str> {
 /// volume (<100/day). Consider `num_decimal` trait implementation if
 /// scaling to HFT frequencies.
 ///
-/// N-4 FIX: #[inline] for hot path (called per-tick)
+/// #[inline] for hot path (called per-tick)
 #[inline]
 pub fn decimal_to_num(d: Decimal) -> Result<Num, ExchangeError> {
     d.to_string().parse::<Num>().map_err(|e| {
@@ -52,7 +52,7 @@ pub fn decimal_to_num(d: Decimal) -> Result<Num, ExchangeError> {
 }
 
 /// Convert num_decimal::Num to Decimal with error handling.
-/// N-4 FIX: #[inline] for hot path (called per-tick)
+/// #[inline] for hot path (called per-tick)
 #[inline]
 pub fn num_to_decimal(n: &Num) -> Result<Decimal, ExchangeError> {
     n.to_string().parse::<Decimal>().map_err(|e| {

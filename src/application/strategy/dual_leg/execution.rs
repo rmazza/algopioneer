@@ -35,7 +35,7 @@ pub enum TaskPriority {
     Normal = 2,   // Regular retries
 }
 
-// N2: Named constant instead of magic number
+// Named constant instead of magic number
 const MAX_CONCURRENT_RECOVERIES: usize = 5;
 
 // Maximum recovery attempts before abandoning
@@ -96,7 +96,7 @@ impl RecoveryWorker {
                             let semaphore = self.semaphore.clone();
                             let span = tracing::info_span!("recovery_task", symbol = %task.symbol);
 
-                            // MC-2 FIX: Acquire semaphore BEFORE spawning to prevent task explosion.
+                            // Acquire semaphore BEFORE spawning to prevent task explosion.
                             // Previously, unlimited tasks could be spawned and all wait for permits.
                             // Now we apply backpressure at the channel level by blocking here.
                             let permit = match semaphore.acquire_owned().await {
@@ -171,7 +171,7 @@ pub async fn perform_recovery_with_backoff(
     for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
         task.attempts = attempt;
 
-        // MC-1 FIX: Proactively cancel ANY existing orders for this symbol
+        // Proactively cancel ANY existing orders for this symbol
         // to prevent wash trade detection or "stuck" orders during recovery.
         if let Err(e) = client.cancel_all_orders(&task.symbol).await {
             warn!(
@@ -180,7 +180,7 @@ pub async fn perform_recovery_with_backoff(
             );
         }
 
-        // MC-1 FIX: Use limit_price if available.
+        // Use limit_price if available.
         let order_id = match client
             .execute_order(&task.symbol, task.action, task.quantity, task.limit_price)
             .await
@@ -200,7 +200,7 @@ pub async fn perform_recovery_with_backoff(
                         "CRITICAL: Recovery abandoned for {} after {} attempts.",
                         task.symbol, MAX_RECOVERY_ATTEMPTS
                     );
-                    // MC-5 FIX: Instrument recovery submission failure
+                    // Instrument recovery submission failure
                     crate::infrastructure::telemetry::metrics::RECOVERY_ATTEMPTS
                         .with_label_values(&[task.symbol.as_str(), "failure"])
                         .inc();
@@ -259,7 +259,7 @@ pub async fn perform_recovery_with_backoff(
                 "Recovery Successful & Verified for {} on attempt {}",
                 task.symbol, attempt
             );
-            // MC-5 FIX: Instrument recovery success
+            // Instrument recovery success
             crate::infrastructure::telemetry::metrics::RECOVERY_ATTEMPTS
                 .with_label_values(&[task.symbol.as_str(), "success"])
                 .inc();
@@ -282,7 +282,7 @@ pub async fn perform_recovery_with_backoff(
                 "CRITICAL: Recovery abandoned for {} after {} attempts (Verification Failed).",
                 task.symbol, MAX_RECOVERY_ATTEMPTS
             );
-            // MC-5 FIX: Instrument recovery failure
+            // Instrument recovery failure
             crate::infrastructure::telemetry::metrics::RECOVERY_ATTEMPTS
                 .with_label_values(&[task.symbol.as_str(), "failure"])
                 .inc();
@@ -299,7 +299,7 @@ pub async fn perform_recovery_with_backoff(
 
 /// Handles concurrent execution of orders on both legs with circuit breaker protection.
 ///
-/// # MC-3 NOTE on Circuit Breaker Sharing
+/// NOTE on Circuit Breaker Sharing
 /// The `CircuitBreaker` is owned by this `ExecutionEngine` instance. If you wrap
 /// `ExecutionEngine` in an `Arc` and share it across multiple trading pairs, the circuit
 /// breaker state will be shared - a failure on one pair will affect all pairs.
@@ -436,7 +436,7 @@ impl ExecutionEngine {
             ));
         }
 
-        // N-1 FIX: Skip execution if quantity is zero
+        // Skip execution if quantity is zero
         if quantity.is_zero() || hedge_qty.is_zero() {
             tracing::warn!(
                 quantity = %quantity,
@@ -483,7 +483,7 @@ impl ExecutionEngine {
             PositionDirection::Short => "short entry",
         };
 
-        // CB-2 FIX: Handle double failure explicitly to preserve both error messages.
+        // Handle double failure explicitly to preserve both error messages.
         // This ensures complete telemetry when both legs fail simultaneously.
         match (&spot_res, &future_res) {
             (Err(spot_e), Err(fut_e)) => {
@@ -605,7 +605,7 @@ impl ExecutionEngine {
         // Execute with wash trade prevention for Alpaca
         let (spot_res, future_res) = match (spot_leg, future_leg) {
             (Some(s), Some(f)) => {
-                // MC-1 FIX: If exchange is Alpaca, add delay between legs to prevent wash trade detection
+                // If exchange is Alpaca, add delay between legs to prevent wash trade detection
                 if self.client.exchange_id() == crate::domain::exchange::ExchangeId::Alpaca {
                     let s_res = s.await;
                     // Small delay to let Alpaca process the first leg and clear its internal "potential wash trade" state

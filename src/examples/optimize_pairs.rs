@@ -162,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for window in windows {
         for z_entry in z_entries.clone() {
             let mut manager = PairsManager::new(
-                format!("{}:{}", self.spot_symbol, self.future_symbol),
+                "BTC-USD:ETH-USD".to_string(),
                 window,
                 z_entry,
                 z_exit,

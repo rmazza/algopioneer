@@ -58,7 +58,7 @@ impl CoinbaseWebsocket {
         }
     }
 
-    /// CF2 FIX: Connect with retry logic and exponential backoff
+    /// Connect with retry logic and exponential backoff
     async fn connect_with_retry(
         &self,
         max_retries: u32,
@@ -108,7 +108,7 @@ impl CoinbaseWebsocket {
         product_ids: Vec<String>,
         sender: Sender<MarketData>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // CF2 FIX: Wrap connection in reconnection loop
+        // Wrap connection in reconnection loop
         const MAX_RECONNECT_ATTEMPTS: u32 = u32::MAX; // Infinite reconnection attempts
         const CONNECTION_MAX_RETRIES: u32 = 5; // Max retries per connection attempt
 

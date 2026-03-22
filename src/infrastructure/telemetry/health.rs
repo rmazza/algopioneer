@@ -73,7 +73,7 @@ pub struct HealthResponse {
 impl Default for HealthResponse {
     /// Create a default health response.
     ///
-    /// # MC-1 Documentation: Wall Clock Usage
+    /// Documentation: Wall Clock Usage
     ///
     /// This module uses `Utc::now()` directly because:
     /// 1. Health endpoints are for operational monitoring, not strategy logic
@@ -89,7 +89,7 @@ impl Default for HealthResponse {
             active_positions: 0,
             recovery_queue_depth: 0,
             uptime_seconds: 0,
-            timestamp: Utc::now().timestamp(), // MC-1: Acceptable for operational monitoring
+            timestamp: Utc::now().timestamp(), // Acceptable for operational monitoring
         }
     }
 }

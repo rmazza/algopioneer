@@ -144,7 +144,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // 2. Verify cancel_order delegation (MC-2 FIX)
+        // 2. Verify cancel_order delegation
         let cancel_res = executor.cancel_order(&OrderId::new("test")).await;
         assert!(cancel_res.is_ok());
 

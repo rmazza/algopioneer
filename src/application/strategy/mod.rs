@@ -18,7 +18,7 @@ pub use dual_leg::MarketData;
 pub enum Signal {
     Buy,
     Sell,
-    Exit, // CF2: Explicit exit signal for mean reversion
+    Exit, // Explicit exit signal for mean reversion
     Hold,
 }
 

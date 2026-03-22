@@ -69,7 +69,7 @@ pub async fn run_dual_leg_trading(
         None
     };
 
-    // MC-4: Initialize Daily Risk Engine and wrap client
+    // Initialize Daily Risk Engine and wrap client
     let risk_config = if paper {
         crate::application::risk::DailyRiskConfig::paper_trading()
     } else {
@@ -95,7 +95,7 @@ pub async fn run_dual_leg_trading(
         }
     };
 
-    // CF1 FIX: Create bounded Recovery Channel (capacity 20) to apply backpressure
+    // Create bounded Recovery Channel (capacity 20) to apply backpressure
     // This prevents unbounded queuing and ensures recovery tasks are never dropped
     let (recovery_tx, recovery_rx) = tokio::sync::mpsc::channel(20);
     // Create Feedback Channel for Recovery Worker -> Strategy
@@ -125,7 +125,12 @@ pub async fn run_dual_leg_trading(
         "pairs" => {
             // Pairs Trading: Z-Score based
             // Window 20, Entry Z=2.0, Exit Z=0.1
-            let manager = Box::new(PairsManager::new("BASIS:DEFAULT".to_string(), 500, 4.0, 0.1));
+            let manager = Box::new(PairsManager::new(
+                "BASIS:DEFAULT".to_string(),
+                500,
+                4.0,
+                0.1,
+            ));
             // Pairs is usually Dollar Neutral
             let monitor =
                 RiskMonitor::new(dec!(3.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
@@ -229,7 +234,7 @@ pub async fn run_dual_leg_trading(
         while let Some(data) = ws_rx.recv().await {
             tracing::debug!("Demux received: {} at {}", data.symbol, data.price);
             let arc_data = Arc::new(data);
-            // P-4 FIX: Use clone only when we need to continue using arc_data
+            // Use clone only when we need to continue using arc_data
             // In if-else chain, only one branch executes, so second clone was unnecessary
             if arc_data.symbol == leg1_id_clone {
                 if leg1_tx.send(arc_data).await.is_err() {

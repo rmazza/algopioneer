@@ -152,7 +152,7 @@ impl KalmanHedgeRatio {
         let kalman_gain = p_predicted * x / s;
 
         // State update with bounds: β = β + K * innovation
-        // MC-2 FIX: Clamp beta to prevent extreme hedge ratios during regime breaks
+        // Clamp beta to prevent extreme hedge ratios during regime breaks
         self.beta = (self.beta + kalman_gain * innovation).clamp(-10.0, 10.0);
 
         // Covariance update: P = (I - K * H) * P = (1 - K * x) * P

@@ -34,7 +34,7 @@ pub enum SupervisorError {
 /// Strategies that panic will be automatically restarted up to `max_restarts`
 /// times with increasing delays between attempts.
 ///
-/// # MC-5 Known Limitation: Auto-Restart Not Implemented
+/// Known Limitation: Auto-Restart Not Implemented
 ///
 /// **IMPORTANT**: While this policy calculates backoff delays and tracks restart
 /// budgets, the actual restart logic is NOT YET IMPLEMENTED. Currently, when a
@@ -170,7 +170,7 @@ impl PortfolioPnL {
 
     /// Update PnL for a strategy.
     ///
-    /// # Performance (P-CB-2 FIX)
+    /// # Performance
     /// Uses `get_mut` to avoid allocation when key exists (common case).
     /// Only allocates on first insertion per strategy.
     #[inline]
@@ -287,7 +287,7 @@ impl StrategySupervisor {
         // Create WebSocket data channel
         let (ws_tx, mut ws_rx) = mpsc::channel::<MarketData>(1000);
 
-        // MC-3 FIX: Use spawn_and_subscribe which returns handle for structured concurrency
+        // Use spawn_and_subscribe which returns handle for structured concurrency
         let ws_symbols = all_symbols.clone();
         let ws_handle = match ws_provider.spawn_and_subscribe(ws_symbols, ws_tx).await {
             Ok(handle) => {
@@ -329,7 +329,7 @@ impl StrategySupervisor {
 
         for mut strategy in self.strategies.drain(..) {
             let id = strategy.id();
-            // MC-5 FIX: Graceful handling instead of expect() panic
+            // Graceful handling instead of expect() panic
             let rx = match strategy_receivers.remove(&id) {
                 Some(r) => r,
                 None => {
@@ -352,7 +352,7 @@ impl StrategySupervisor {
                     "Strategy starting"
                 );
 
-                // BI-2 FIX: Spawn the strategy in a separate task to catch panics
+                // Spawn the strategy in a separate task to catch panics
                 // JoinError::is_panic() detects if the inner task panicked
                 let inner_id = strategy_id.clone();
                 let inner_handle = tokio::spawn(async move {
@@ -426,20 +426,20 @@ impl StrategySupervisor {
         });
 
         // Wait for strategies to complete with restart tracking
-        // NP-5 FIX: Track restart state per strategy
+        // Track restart state per strategy
         let mut restart_states: HashMap<String, StrategyRestartState> = HashMap::new();
 
         while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(run_result) => {
-                    // MC-4: Record PnL in daily risk engine
+                    // Record PnL in daily risk engine
                     self.risk_engine.record_pnl(run_result.final_pnl);
 
                     // Get or create restart state for this strategy
                     let restart_state = restart_states.entry(run_result.id.clone()).or_default();
 
                     if run_result.panicked {
-                        // NP-5 FIX: Check cooldown BEFORE recording failure
+                        // Check cooldown BEFORE recording failure
                         // If enough time has passed since last successful start, reset the budget
                         restart_state
                             .maybe_reset_cooldown(self.restart_policy.cooldown_period_secs);
@@ -459,7 +459,7 @@ impl StrategySupervisor {
                                 .restart_policy
                                 .calculate_delay(restart_state.restart_count.saturating_sub(1));
 
-                            // NP-5 FIX: Log restart attempt with backoff info
+                            // Log restart attempt with backoff info
                             // Note: Actual restart not implemented - requires strategy factory pattern
                             error!(
                                 strategy_id = %run_result.id,
@@ -502,13 +502,13 @@ impl StrategySupervisor {
             }
         }
 
-        // CB-1 FIX: Join the router task (don't orphan it)
+        // Join the router task (don't orphan it)
         match router_handle.await {
             Ok(()) => info!("Market data router exited cleanly"),
             Err(e) => error!("CRITICAL: Market data router panicked: {:?}", e),
         }
 
-        // MC-3 FIX: Cleanup WebSocket handle on supervisor exit
+        // Cleanup WebSocket handle on supervisor exit
         if let Some(handle) = ws_handle {
             if handle.is_finished() {
                 // Task already finished - check if it panicked

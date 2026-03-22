@@ -56,7 +56,7 @@ pub trait DiscoveryDataSource: Send + Sync {
     }
 
     /// Returns true if this data source prefers daily bars for discovery.
-    /// Alpaca free tier should return true due to limited hourly data.
+    /// free tier should return true due to limited hourly data.
     fn prefers_daily_bars(&self) -> bool {
         false
     }
@@ -98,7 +98,7 @@ pub struct OptimizedPair {
 impl OptimizedPair {
     /// Convert to PortfolioPairConfig for use with PortfolioManager
     ///
-    /// # CB-2 FIX
+    ///
     /// Converts f64 z-scores to Decimal for deterministic threshold comparisons.
     pub fn to_portfolio_config(&self, allocation: Decimal) -> PortfolioPairConfig {
         PortfolioPairConfig {
@@ -115,7 +115,7 @@ impl OptimizedPair {
                 entry_cooldown_ms: 30_000,
             },
             window_size: self.window,
-            // CB-2 FIX: Convert f64 to Decimal for financial precision
+            // Convert f64 to Decimal for financial precision
             entry_z_score: Decimal::from_f64_retain(self.z_entry).unwrap_or(dec!(2.0)),
             exit_z_score: Decimal::from_f64_retain(self.z_exit).unwrap_or(dec!(0.1)),
         }
@@ -221,7 +221,7 @@ impl Position {
 
 /// Calculate Sharpe ratio from trade returns using Welford's Online Algorithm.
 ///
-/// # Numerical Stability (P0 Fix)
+/// # Numerical Stability
 /// The naive two-pass variance algorithm is susceptible to **catastrophic cancellation**
 /// when variance is small relative to the square of the mean. This is common in HFT
 /// where returns cluster tightly around a small positive mean (e.g., 1 bps ± 0.01 bps).
@@ -566,7 +566,7 @@ async fn optimize_pair(
 
 /// Fetch historical candle data using any DiscoveryDataSource
 ///
-/// # CB-1 Fix
+///
 /// Time is now injected via Clock trait for deterministic discovery and testing.
 ///
 /// # DRY Principle
@@ -693,7 +693,7 @@ async fn fetch_candle_data<D: DiscoveryDataSource>(
 /// 3. Run grid search optimization on viable pairs
 /// 4. Return ranked results
 ///
-/// # CB-1 Fix
+///
 /// Accepts a `Clock` trait for deterministic time handling, enabling reproducible
 /// discovery runs and proper integration testing.
 ///
@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(pair.profit_per_trade, dec!(50));
     }
 
-    /// P0 FIX: Test Welford's algorithm handles small variance without catastrophic cancellation.
+    /// Test Welford's algorithm handles small variance without catastrophic cancellation.
     /// This scenario is common in HFT where returns cluster tightly around a small mean.
     #[test]
     fn test_sharpe_ratio_small_variance_numerical_stability() {

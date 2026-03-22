@@ -21,6 +21,6 @@ mod alpaca_client;
 pub mod utils;
 mod websocket;
 
-// MC-3 FIX: Single unified client export (DRY principle)
+// Single unified client export (DRY principle)
 pub use alpaca_client::AlpacaClient;
 pub use websocket::AlpacaWebSocketProvider;

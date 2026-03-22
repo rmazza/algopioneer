@@ -399,7 +399,7 @@ mod tests {
         }
     }
 
-    // Principal's Challenge: Overflow saturation tests
+    // 's Challenge: Overflow saturation tests
     #[test]
     fn test_overflow_saturation() {
         // Test positive overflow

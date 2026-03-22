@@ -15,7 +15,7 @@ use crate::infrastructure::exchange::{
 /// Coinbase exchange client implementing the ExchangeClient trait
 pub struct CoinbaseExchangeClient {
     inner: CoinbaseClient,
-    /// NP-3 FIX: Config retained for future features:
+    /// Config retained for future features:
     /// - Dynamic API key rotation
     /// - Sandbox mode switching at runtime  
     /// - Rate limit configuration per-instance
@@ -83,7 +83,7 @@ impl Executor for CoinbaseExchangeClient {
             .await
             .map_err(ExchangeError::from_boxed)?;
 
-        // MC-2 FIX: Generate order ID for tracking
+        // Generate order ID for tracking
         // Note: Coinbase Live mode isn't fully implemented yet, so we generate a local ID
         let order_id = crate::domain::orders::OrderId::new(format!("cb-{}", uuid::Uuid::new_v4()));
         Ok(order_id)

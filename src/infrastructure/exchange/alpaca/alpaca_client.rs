@@ -28,7 +28,7 @@ use crate::infrastructure::exchange::{
     Candle, ExchangeConfig, ExchangeError, Executor, Granularity,
 };
 
-/// Alpaca client with same interface as CoinbaseClient
+/// client with same interface as CoinbaseClient
 ///
 /// Provides order execution, position tracking, and candle fetching
 /// with paper trading support and rate limiting.
@@ -37,7 +37,7 @@ pub struct AlpacaClient {
     mode: AppEnv,
     rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, InMemoryState, DefaultClock>>,
     recorder: Option<Arc<dyn TradeRecorder>>,
-    /// CB-3 FIX: Injected clock for deterministic timestamps
+    /// Injected clock for deterministic timestamps
     clock: Arc<dyn Clock>,
 }
 
@@ -152,7 +152,7 @@ impl AlpacaClient {
         }
     }
 
-    /// N-2 FIX: Build order request (extracted to eliminate duplication)
+    /// Build order request (extracted to eliminate duplication)
     ///
     /// Creates an Alpaca order request for both market and limit orders.
     /// This helper is used by both Live and Paper trading modes.
@@ -181,8 +181,8 @@ impl AlpacaClient {
 
     /// Place an order on Alpaca
     ///
-    /// MC-3 FIX: Returns order ID for tracking, cancellation, and reconciliation.
-    /// Principal's Challenge: Deduplicated logic for Live/Paper modes.
+    /// Returns order ID for tracking, cancellation, and reconciliation.
+    /// 's Challenge: Deduplicated logic for Live/Paper modes.
     pub async fn place_order(
         &self,
         product_id: &str,
@@ -190,13 +190,13 @@ impl AlpacaClient {
         size: Decimal,
         price: Option<Decimal>,
     ) -> Result<String, ExchangeError> {
-        // ALPACA FIX: Round quantity to 9 decimal places to prevent API rejections
-        // Alpaca supports up to 9 decimal places of precision.
+        // Round quantity to 9 decimal places to prevent API rejections
+        // supports up to 9 decimal places of precision.
         let size = size.round_dp(9);
 
         self.rate_limiter.until_ready().await;
 
-        // MC-1 FIX: Check market hours before order submission
+        // Check market hours before order submission
         // US equities only trade 9:30 AM - 4:00 PM ET (Mon-Fri)
         // Paper trading is exempt since Alpaca Paper API accepts orders 24/7
         if !self.is_paper() {
@@ -227,13 +227,13 @@ impl AlpacaClient {
             "Placing Alpaca order"
         );
 
-        // N-1 FIX: Use helper to parse side
+        // Use helper to parse side
         let order_side = Self::parse_order_side(side);
 
-        // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional
+        // Limit orders require whole shares, Market orders allow fractional
         // Floor the quantity for limit orders to avoid OrderRejected errors
         // This may leave "dust" (fractional remainder) in the account
-        // ALPACA FIX: Limit orders require whole shares, Market orders allow fractional.
+        // Limit orders require whole shares, Market orders allow fractional.
         // If we have a fractional quantity < 1 share, we MUST use a Market order.
         let (adjusted_size, final_price) = if self.is_paper() {
             // PAPER TRADING HOTFIX:
@@ -273,12 +273,12 @@ impl AlpacaClient {
             }
         };
 
-        // CB-2 FIX: Propagate conversion errors instead of silent fallback
+        // Propagate conversion errors instead of silent fallback
         let qty_num = utils::decimal_to_num(adjusted_size)
             .map_err(|e| ExchangeError::Other(format!("Failed to convert quantity: {}", e)))?;
 
-        // N-2 FIX: Convert limit price if present
-        // ALPACA FIX: Round prices to 2 decimal places for US equities (tick size = $0.01)
+        // Convert limit price if present
+        // Round prices to 2 decimal places for US equities (tick size = $0.01)
         let limit_num = match final_price {
             Some(p) => {
                 let rounded = p.round_dp(2);
@@ -289,12 +289,12 @@ impl AlpacaClient {
             None => None,
         };
 
-        // N-2 FIX: Use helper to build request
+        // Use helper to build request
         let request = Self::build_order_request(symbol.as_ref(), order_side, qty_num, limit_num);
 
         let client = &self.client;
 
-        // ALPACA FIX: Wash Trade Prevention (MC-1)
+        // Wash Trade Prevention (MC-1)
         // If placing an order fails with 403 (wash trade), it's usually because of
         // existing orders on the opposite side. We proactively cancel ALL open
         // orders for this symbol before placing a new one.
@@ -322,14 +322,14 @@ impl AlpacaClient {
             self.record_paper_trade(product_id, side, size, price).await;
         }
 
-        // MC-4 FIX: Record order latency
+        // Record order latency
         crate::infrastructure::telemetry::metrics::record_order_latency(
             &symbol,
             start.elapsed().as_secs_f64(),
         );
         crate::infrastructure::telemetry::metrics::record_order(&symbol, side, true);
 
-        // MC-3 FIX: Return order ID for tracking
+        // Return order ID for tracking
         Ok(order_id)
     }
 
@@ -345,7 +345,7 @@ impl AlpacaClient {
                 let symbol = utils::to_alpaca_symbol(product_id);
                 let client = &self.client;
 
-                // MC-3 FIX: Use List (GetAll) to avoid 404 errors on missing positions.
+                // Use List (GetAll) to avoid 404 errors on missing positions.
                 // The API returns 404 if we query a specific symbol that has no position,
                 // capturing this error correctly is difficult due to generic error types.
                 // Listing all is safer and negligible performance cost (few positions).
@@ -366,7 +366,7 @@ impl AlpacaClient {
                             ))
                         })?;
 
-                        // ALPACA FIX: Negate quantity for short positions
+                        // Negate quantity for short positions
                         if let alpaca_position::Side::Short = pos.side {
                             qty = -qty;
                         }
@@ -385,7 +385,7 @@ impl AlpacaClient {
 
     /// Get candles for a symbol
     ///
-    /// MC-1 FIX: Delegates to ExchangeClient trait to avoid code duplication
+    /// Delegates to ExchangeClient trait to avoid code duplication
     pub async fn get_product_candles(
         &mut self,
         product_id: &str,
@@ -405,7 +405,7 @@ impl AlpacaClient {
 
     /// Get candles with pagination
     ///
-    /// MC-1 FIX: Delegates to ExchangeClient trait to avoid code duplication
+    /// Delegates to ExchangeClient trait to avoid code duplication
     pub async fn get_product_candles_paginated(
         &mut self,
         product_id: &str,
@@ -480,7 +480,7 @@ impl AlpacaClient {
                 self.clock.now(),
             );
 
-            // PRINCIPAL FIX: Spawn recording to avoid blocking order path
+            // Spawn recording to avoid blocking order path
             // This is fire-and-forget; logging failures shouldn't crash strategy
             // Clone recorder arc to move into task
             let recorder = recorder.clone();
@@ -543,7 +543,7 @@ impl AlpacaClient {
         Ok(())
     }
 
-    /// PRINCIPAL FIX: Helper to map Alpaca errors to granular ExchangeError
+    /// Helper to map Alpaca errors to granular ExchangeError
     fn map_alpaca_error<E: std::fmt::Display>(e: RequestError<E>) -> ExchangeError {
         match e {
             RequestError::Endpoint(inner) => {
@@ -594,7 +594,7 @@ impl Executor for AlpacaClient {
             OrderSide::Sell => "sell",
         };
 
-        // MC-2 FIX: Return the actual order ID from place_order
+        // Return the actual order ID from place_order
         let order_id_str = self.place_order(symbol, side_str, quantity, price).await?;
         Ok(crate::domain::orders::OrderId::new(order_id_str))
     }
@@ -609,7 +609,7 @@ impl Executor for AlpacaClient {
 
     /// Poll order status from Alpaca
     ///
-    /// MC-4 FIX: Maps Alpaca status to crate::domain::orders::OrderState for verification
+    /// Maps Alpaca status to crate::domain::orders::OrderState for verification
     async fn get_order_status(
         &self,
         order_id: &crate::domain::orders::OrderId,
@@ -691,7 +691,7 @@ impl Executor for AlpacaClient {
     }
 }
 
-// MC-3 FIX: Implement ExchangeClient trait for unified client (DRY principle)
+// Implement ExchangeClient trait for unified client (DRY principle)
 // This consolidates functionality from the deleted AlpacaExchangeClient.
 #[async_trait]
 impl crate::application::ports::exchange::ExchangeClient for AlpacaClient {
@@ -888,7 +888,7 @@ impl DiscoveryDataSource for AlpacaClient {
         result.map_err(|e: ExchangeError| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
-    /// Alpaca free tier has limited hourly data; prefer daily bars for discovery
+    /// free tier has limited hourly data; prefer daily bars for discovery
     fn prefers_daily_bars(&self) -> bool {
         true
     }

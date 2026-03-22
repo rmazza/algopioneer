@@ -92,7 +92,7 @@ lazy_static! {
         vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
     ).expect("FATAL: Failed to register MARKET_DATA_POLL_LATENCY metric - check for duplicate registration");
 
-    // MC-3 FIX: WebSocket tick latency histogram
+    // WebSocket tick latency histogram
     /// Latency between exchange timestamp and local receive time (ms)
     /// Critical for detecting stale data during network degradation
     pub static ref WS_TICK_LATENCY: HistogramVec = register_histogram_vec!(
@@ -102,7 +102,7 @@ lazy_static! {
         vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
     ).expect("FATAL: Failed to register WS_TICK_LATENCY metric - check for duplicate registration");
 
-    // --- Pairs Manager Precision Metrics (CB-2 FIX) ---
+    // --- Pairs Manager Precision Metrics ---
 
     /// Price ratio rejections due to f64 precision limits
     /// Triggers when price ratios exceed safe bounds (e.g., BTC/SHIB with >10^12 ratio)
@@ -117,7 +117,7 @@ lazy_static! {
         &["pair"]
     ).expect("FATAL: Failed to register PAIRS_PRECISION_WARNINGS metric - check for duplicate registration");
 
-    // MC-2 FIX: Strategy halted events for alerting
+    // Strategy halted events for alerting
     /// Strategy entered Halted state (critical failure requiring manual intervention)
     pub static ref STRATEGY_HALTED: IntCounterVec = register_int_counter_vec!(
         opts!("algopioneer_strategy_halted_total", "Strategy entered Halted state"),
@@ -165,7 +165,7 @@ pub fn record_poll_latency(symbol: &str, status: &str, latency_secs: f64) {
         .observe(latency_secs);
 }
 
-/// MC-3 FIX: Record WebSocket tick latency (exchange timestamp to local receive)
+/// Record WebSocket tick latency (exchange timestamp to local receive)
 /// Critical for detecting stale data during network degradation
 #[inline]
 pub fn record_ws_tick_latency(symbol: &str, exchange: &str, latency_ms: f64) {
@@ -174,17 +174,17 @@ pub fn record_ws_tick_latency(symbol: &str, exchange: &str, latency_ms: f64) {
         .observe(latency_ms);
 }
 
-/// CB-2 FIX: Record precision rejection for extreme price ratios
+/// Record precision rejection for extreme price ratios
 pub fn record_precision_rejection(pair: &str) {
     PAIRS_PRECISION_REJECTIONS.with_label_values(&[pair]).inc();
 }
 
-/// CB-2 FIX: Record precision warning for price ratios approaching limits
+/// Record precision warning for price ratios approaching limits
 pub fn record_precision_warning(pair: &str) {
     PAIRS_PRECISION_WARNINGS.with_label_values(&[pair]).inc();
 }
 
-/// MC-2 FIX: Record when a strategy enters Halted state
+/// Record when a strategy enters Halted state
 pub fn record_strategy_halted(strategy_id: &str, pair: &str) {
     STRATEGY_HALTED
         .with_label_values(&[strategy_id, pair])
@@ -193,19 +193,19 @@ pub fn record_strategy_halted(strategy_id: &str, pair: &str) {
 
 /// Get metrics as text for /metrics endpoint
 ///
-/// CB-3 FIX: Handles encoding errors gracefully instead of panicking
+/// Handles encoding errors gracefully instead of panicking
 pub fn gather_metrics() -> String {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
 
-    // CB-3 FIX: Handle encoding errors gracefully
+    // Handle encoding errors gracefully
     if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
         tracing::error!("Failed to encode Prometheus metrics: {}", e);
         return String::new();
     }
 
-    // CB-3 FIX: Handle UTF-8 conversion errors gracefully
+    // Handle UTF-8 conversion errors gracefully
     match String::from_utf8(buffer) {
         Ok(s) => s,
         Err(e) => {

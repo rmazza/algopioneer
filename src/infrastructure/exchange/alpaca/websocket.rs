@@ -37,7 +37,7 @@ static ALPACA_INSTRUMENT_ID: &str = "alpaca";
 /// IEX feed URL (free tier)
 const WS_URL_IEX: &str = "wss://stream.data.alpaca.markets/v2/iex";
 
-// Alpaca WebSocket message types
+// WebSocket message types
 #[derive(Debug, Deserialize)]
 struct AlpacaMessage {
     #[serde(rename = "T")]
@@ -46,7 +46,7 @@ struct AlpacaMessage {
     msg: Option<String>,
 }
 
-/// Alpaca WebSocket provider for real-time market data streaming
+/// WebSocket provider for real-time market data streaming
 ///
 /// Connects to Alpaca's real-time stock data WebSocket for sub-second
 /// price updates. Uses the IEX feed (free tier).
@@ -124,10 +124,10 @@ impl AlpacaWebSocketProvider {
         ))
     }
 
-    /// CB-1 FIX: Parse trade from serde_json::Value without f64 precision loss
-    /// MC-2 FIX: Zero-allocation parsing (no to_string() call)
-    /// MC-3 FIX: O(1) HashMap lookup instead of O(n) Vec scan
-    /// MC-1 FIX: No Utc::now() fallback - strict timestamp parsing
+    /// Parse trade from serde_json::Value without f64 precision loss
+    /// Zero-allocation parsing (no to_string() call)
+    /// O(1) HashMap lookup instead of O(n) Vec scan
+    /// No Utc::now() fallback - strict timestamp parsing
     fn parse_trade_from_value(
         value: &serde_json::Value,
         symbol_map: &HashMap<String, String>,
@@ -141,7 +141,7 @@ impl AlpacaWebSocketProvider {
         let alpaca_symbol = value.get("S")?.as_str()?;
         let timestamp_str = value.get("t")?.as_str()?;
 
-        // MC-2 FIX: Explicitly reject unexpected symbols instead of silent fallback
+        // Explicitly reject unexpected symbols instead of silent fallback
         let original_symbol = match symbol_map.get(alpaca_symbol) {
             Some(s) => s.clone(),
             None => {
@@ -154,7 +154,7 @@ impl AlpacaWebSocketProvider {
             }
         };
 
-        // CB-1 FIX: Precision-safe price parsing
+        // Precision-safe price parsing
         // Try string first (preferred), fall back to f64 if Alpaca sends numeric
         let price = if let Some(s) = value.get("p")?.as_str() {
             // Best case: string value preserves precision
@@ -166,7 +166,7 @@ impl AlpacaWebSocketProvider {
             return None;
         };
 
-        // MC-1 FIX: Strict timestamp - no Utc::now() fallback
+        // Strict timestamp - no Utc::now() fallback
         let timestamp_millis = timestamp_str
             .parse::<DateTime<Utc>>()
             .ok()?
@@ -174,7 +174,7 @@ impl AlpacaWebSocketProvider {
 
         Some(MarketData {
             symbol: original_symbol,
-            // MC-2 FIX: Use static &str converted to owned only once
+            // Use static &str converted to owned only once
             // This is unavoidable since MarketData owns the String, but we document the cost
             instrument_id: Some(ALPACA_INSTRUMENT_ID.to_owned()),
             price,
@@ -185,7 +185,7 @@ impl AlpacaWebSocketProvider {
 
 #[async_trait]
 impl WebSocketProvider for AlpacaWebSocketProvider {
-    /// CB-2 FIX: Spawn WebSocket task and return handle for structured concurrency.
+    /// Spawn WebSocket task and return handle for structured concurrency.
     async fn spawn_and_subscribe(
         &self,
         symbols: Vec<String>,
@@ -196,7 +196,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             "Starting Alpaca WebSocket streaming"
         );
 
-        // MC-3 FIX: Use HashMap for O(1) symbol lookup
+        // Use HashMap for O(1) symbol lookup
         // Key: Alpaca symbol, Value: Original symbol
         let symbol_map: HashMap<String, String> = symbols
             .iter()
@@ -208,7 +208,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         let api_key = self.api_key.clone();
         let api_secret = self.api_secret.clone();
 
-        // CB-2 FIX: Store JoinHandle for structured concurrency
+        // Store JoinHandle for structured concurrency
         // The handle is returned to caller for proper lifecycle management
         let handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
             const MAX_RECONNECT_ATTEMPTS: u32 = u32::MAX;
@@ -216,7 +216,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
             let mut reconnect_count = 0;
 
-            // CB-2 FIX: Log at entry point for observability
+            // Log at entry point for observability
             info!("Alpaca WebSocket background task started");
 
             loop {
@@ -342,11 +342,11 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                         msg = read.next() => {
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
-                                    // MC-3 FIX: Capture receive time for latency calculation
+                                    // Capture receive time for latency calculation
                                     let receive_time_ms = chrono::Utc::now().timestamp_millis();
 
-                                    // Alpaca sends arrays of messages
-                                    // MC-2 FIX: Parse directly, no intermediate to_string()
+                                    // sends arrays of messages
+                                    // Parse directly, no intermediate to_string()
                                     if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
                                         for msg_value in messages {
                                             if let Some(data) = Self::parse_trade_from_value(
@@ -355,7 +355,7 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
                                             ) {
                                                 let symbol = data.symbol.clone();
 
-                                                // MC-3 FIX: Record tick latency (exchange ts to local receive)
+                                                // Record tick latency (exchange ts to local receive)
                                                 let latency_ms = (receive_time_ms - data.timestamp) as f64;
                                                 if latency_ms >= 0.0 {
                                                     crate::infrastructure::telemetry::metrics::record_ws_tick_latency(&symbol, "alpaca", latency_ms);
@@ -419,11 +419,11 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             info!("Alpaca WebSocket task exiting");
         });
 
-        // CB-2 FIX: Return the handle for structured concurrency
+        // Return the handle for structured concurrency
         Ok(WebSocketHandle::new(handle, ExchangeId::Alpaca))
     }
 
-    /// CB-2 FIX: Legacy method - delegates to spawn_and_subscribe but discards handle.
+    /// Legacy method - delegates to spawn_and_subscribe but discards handle.
     ///
     /// Use `spawn_and_subscribe` for new code to enable proper shutdown.
     async fn connect_and_subscribe(
@@ -458,7 +458,7 @@ mod tests {
     fn test_parse_trade_with_string_price() {
         let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
 
-        // CB-1 FIX: Test with string price (precision-safe)
+        // Test with string price (precision-safe)
         let value: serde_json::Value = serde_json::json!({
             "T": "t",
             "S": "AAPL",
@@ -506,7 +506,7 @@ mod tests {
     fn test_parse_trade_bad_timestamp_returns_none() {
         let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
 
-        // MC-1 FIX: Bad timestamp should return None, not fallback to Utc::now()
+        // Bad timestamp should return None, not fallback to Utc::now()
         let value: serde_json::Value = serde_json::json!({
             "T": "t",
             "S": "AAPL",
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_parse_trade_unsubscribed_symbol_returns_none() {
-        // MC-2 FIX: Verify that unexpected symbols are dropped, not silently accepted
+        // Verify that unexpected symbols are dropped, not silently accepted
         let symbol_map: HashMap<String, String> = [("AAPL".to_string(), "AAPL".to_string())].into();
 
         let value: serde_json::Value = serde_json::json!({

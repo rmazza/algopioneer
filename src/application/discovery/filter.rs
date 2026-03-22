@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 /// Fallback half-life for non-stationary or invalid spreads (hours)
 const NON_STATIONARY_HALF_LIFE: f64 = 1000.0;
 
-/// MC-1 FIX: Maximum safe price ratio for correlation calculations
+/// Maximum safe price ratio for correlation calculations
 /// Beyond this ratio, f64 precision loss may affect results
 const MAX_PRICE_RATIO: f64 = 1e9;
 
@@ -40,7 +40,7 @@ pub struct CandidatePair {
 ///
 /// Returns a value in [-1.0, 1.0], or None if calculation fails.
 ///
-/// # MC-1 FIX: Precision Guard
+/// Precision Guard
 /// Returns None if price ratio exceeds MAX_PRICE_RATIO to prevent f64 precision loss.
 ///
 /// # Mathematical Definition
@@ -50,7 +50,7 @@ pub fn calculate_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
         return None;
     }
 
-    // MC-1 FIX: Check for extreme price ratios that could cause precision loss
+    // Check for extreme price ratios that could cause precision loss
     let mean_a: f64 = a.iter().sum::<f64>() / a.len() as f64;
     let mean_b: f64 = b.iter().sum::<f64>() / b.len() as f64;
 
@@ -194,7 +194,7 @@ pub fn adf_test(spread: &[f64]) -> (f64, bool) {
         denominator += y_centered * y_centered;
     }
 
-    // MC-2 FIX: More conservative bound for numerical stability
+    // More conservative bound for numerical stability
     // f64::EPSILON (~2.2e-16) is too small; OLS can become unstable
     // at larger denominators when data is near-constant or highly correlated
     const NUMERICAL_STABILITY_THRESHOLD: f64 = 1e-12;

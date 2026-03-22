@@ -260,7 +260,12 @@ async fn test_pairs_trading_cycle() {
     let (engine_recovery_tx, _engine_recovery_rx) = mpsc::channel(10);
     let execution_engine = ExecutionEngine::new(mock_executor.clone(), engine_recovery_tx, 5, 60);
 
-    let entry_manager = Box::new(PairsManager::new("BTC-USD:ETH-USD".to_string(), 5, 1.9, 1.0));
+    let entry_manager = Box::new(PairsManager::new(
+        "BTC-USD:ETH-USD".to_string(),
+        5,
+        1.9,
+        1.0,
+    ));
     let risk_monitor =
         RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral);
 

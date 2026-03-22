@@ -83,11 +83,11 @@ pub async fn run_discover_pairs(
     );
 
     // Build discovery config
-    // CB-1/CB-2 FIX: Alpaca uses daily bars, so thresholds need adjustment:
+    // Alpaca uses daily bars, so thresholds need adjustment:
     // - half_life is in SAMPLES not hours, so 48.0 = 48 days with daily data
     // - min_trades must be realistic for daily data (63 samples with 90-day lookback)
     let (adjusted_max_half_life, adjusted_min_trades, adjusted_train_ratio) = if is_alpaca {
-        // Alpaca: daily bars
+        // daily bars
         // max_half_life = 30 samples (30 days) is reasonable for daily mean reversion
         // min_trades = 3 is achievable with 63 daily samples
         // train_ratio = 0.8 to maximize training data
@@ -116,7 +116,7 @@ pub async fn run_discover_pairs(
     let clock = SystemClock;
 
     let results = if is_alpaca {
-        // Alpaca path - use AlpacaClient for equities
+        // path - use AlpacaClient for equities
         let mut client = AlpacaClient::new(AppEnv::Live, None)?;
         discover_and_optimize(&mut client, &config, &clock).await
     } else {

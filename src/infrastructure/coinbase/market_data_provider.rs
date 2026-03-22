@@ -116,7 +116,7 @@ impl MarketDataProvider for SyntheticProvider {
 
                 for symbol in &symbols {
                     // Generate random walk price using sine wave for predictable variation
-                    // CB-5 FIX: Use safe access instead of unwrap()
+                    // Use safe access instead of unwrap()
                     let current_price = current_prices.get(symbol).copied().unwrap_or(base_price);
                     let change_pct = (tick_count as f64 * 0.01).sin() * volatility;
                     let change =

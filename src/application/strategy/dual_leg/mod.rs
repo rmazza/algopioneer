@@ -102,7 +102,7 @@ impl From<crate::domain::exchange::ExchangeError> for ExecutionError {
 
 // Recovery constants moved to execution.rs
 
-// P1 FIX: Load Shedding Threshold
+// Load Shedding Threshold
 // Maximum allowed latency (in milliseconds) before a tick is considered stale.
 // During high-volatility events or WebSocket floods, processing stale ticks
 // leads to execution on prices that no longer exist, causing massive slippage.
@@ -464,7 +464,7 @@ pub enum StrategyState {
     Halted,      // New State: "Something is broken, human needed."
 }
 
-// N8: Display impl for better logging
+// Display impl for better logging
 impl std::fmt::Display for StrategyState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -583,7 +583,7 @@ impl RiskMonitor {
             HedgeMode::DeltaNeutral => match self.instrument_type {
                 InstrumentType::Linear => Ok(leg1_qty),
                 InstrumentType::Inverse => {
-                    // N-3 FIX: Zero check already handled above (leg2_price <= ZERO returns early at L557)
+                    // Zero check already handled above (leg2_price <= ZERO returns early at L557)
                     Ok(leg1_qty * leg2_price)
                 }
             },
@@ -627,9 +627,9 @@ pub struct DualLegStrategy {
     validator: Box<dyn TickValidator>,
     // AS9: Exit policy for flexible exit logic
     exit_policy: Box<dyn ExitPolicy>,
-    // CB-2 FIX: Track spawned execution tasks for structured concurrency
+    // Track spawned execution tasks for structured concurrency
     active_executions: tokio::task::JoinSet<()>,
-    // P-MC-3 FIX: Pre-computed pair name for metrics (avoids format! per-call)
+    // Pre-computed pair name for metrics (avoids format! per-call)
     pair_name: String,
     // STATE PERSISTENCE: Optional state store for surviving restarts
     state_store: Option<std::sync::Arc<dyn crate::infrastructure::logging::StateStore>>,
@@ -681,7 +681,7 @@ impl DualLegStrategy {
             config.stop_loss_threshold,
         ));
 
-        // P-MC-3 FIX: Pre-compute pair name once at construction
+        // Pre-compute pair name once at construction
         let pair_name = format!("{}/{}", config.spot_symbol, config.future_symbol);
 
         Self {
@@ -700,8 +700,8 @@ impl DualLegStrategy {
             config,
             validator,                                      // AS2
             exit_policy,                                    // AS9
-            active_executions: tokio::task::JoinSet::new(), // CB-2
-            pair_name,                                      // P-MC-3
+            active_executions: tokio::task::JoinSet::new(),
+            pair_name,
             state_store: None,                              // STATE PERSISTENCE
             position_id: None,                              // STATE PERSISTENCE
             strategy_type: "pairs".to_string(),             // STATE PERSISTENCE (default)
@@ -739,7 +739,7 @@ impl DualLegStrategy {
         );
         self.state_store = Some(store);
         self.position_id = Some(position_id.clone());
-        // N-4 FIX: split(':').next() on a non-empty string can never return None
+        // split(':').next() on a non-empty string can never return None
         self.strategy_type = position_id.split(':').next().unwrap().to_string();
         self.is_paper = is_paper;
         self
@@ -771,8 +771,8 @@ impl DualLegStrategy {
             self.state = new_state.clone();
             self.last_state_change_ts = self.clock.now_ts_millis();
 
-            // MC-2 FIX: Emit metric for Halted state to enable alerting
-            // P-MC-3 FIX: Use pre-computed pair_name
+            // Emit metric for Halted state to enable alerting
+            // Use pre-computed pair_name
             if new_state == StrategyState::Halted {
                 crate::infrastructure::telemetry::metrics::record_strategy_halted(
                     "dual_leg",
@@ -790,7 +790,7 @@ impl DualLegStrategy {
                 }
             }
 
-            // STATE PERSISTENCE: CB-2 FIX: Track persistence task in JoinSet
+            // STATE PERSISTENCE: Track persistence task in JoinSet
             if let Some(handle) = self.persist_state_async() {
                 self.active_executions.spawn(async move {
                     let _ = handle.await;
@@ -892,7 +892,7 @@ impl DualLegStrategy {
     }
 
     /// STATE PERSISTENCE: Persist current state asynchronously.
-    /// CB-2 FIX: Returns JoinHandle so callers can track the task via JoinSet,
+    /// Returns JoinHandle so callers can track the task via JoinSet,
     /// preventing orphaned tasks on shutdown.
     fn persist_state_async(&self) -> Option<tokio::task::JoinHandle<()>> {
         if let (Some(store), Some(record)) =
@@ -945,7 +945,7 @@ impl DualLegStrategy {
                     Some("long") => PositionDirection::Long,
                     Some("short") => PositionDirection::Short,
                     other => {
-                        // N-7 FIX: Warn on corrupted direction instead of silent default
+                        // Warn on corrupted direction instead of silent default
                         warn!(direction = ?other, "Corrupted direction in persisted state, defaulting to Long");
                         PositionDirection::Long
                     }
@@ -1018,7 +1018,7 @@ impl DualLegStrategy {
     /// (`UNKNOWN_ENTRY_PRICE`) instead of zero. On the first tick, `process_tick`
     /// detects this marker and resets entry prices to current market prices,
     /// effectively starting PnL tracking from zero for the recovered session.
-    /// CB-3 FIX: Reconcile strategy state with exchange positions.
+    /// Reconcile strategy state with exchange positions.
     ///
     /// Uses a 4-case matrix (stored state × exchange state) to correctly handle:
     /// - Case 1: Flat + no positions → confirmed flat
@@ -1180,7 +1180,7 @@ impl DualLegStrategy {
         // This restores entry prices from the last session if available.
         self.state_restored = self.load_persisted_state().await;
 
-        // CB-3 FIX: Always reconcile with exchange.
+        // Always reconcile with exchange.
         // If state was restored, reconcile validates quantities and preserves entry prices.
         // If not, reconcile detects orphan positions and uses UNKNOWN_ENTRY_PRICE markers.
         self.reconcile_state().await;
@@ -1286,7 +1286,7 @@ impl DualLegStrategy {
                         }
                     }
                     Signal::Sell => {
-                        // CF1 FIX: Short Entry Successful
+                        // Short Entry Successful
                         info!("Short Entry Successful. Transitioning to InPosition.");
                         if let StrategyState::Entering {
                             direction,
@@ -1308,7 +1308,7 @@ impl DualLegStrategy {
                         }
                     }
                     Signal::Exit => {
-                        // CF2 FIX: Exit Successful
+                        // Exit Successful
                         info!("Exit Successful. Transitioning to Flat.");
                         self.transition_state(StrategyState::Flat);
                     }
@@ -1338,7 +1338,7 @@ impl DualLegStrategy {
                         }
                     }
                     Signal::Sell => {
-                        // CF1 FIX: Short Entry Failure
+                        // Short Entry Failure
                         if matches!(
                             reason,
                             ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)
@@ -1350,7 +1350,7 @@ impl DualLegStrategy {
                         }
                     }
                     Signal::Exit => {
-                        // CF2 FIX: Exit Failure
+                        // Exit Failure
                         if matches!(
                             reason,
                             ExecutionError::NetworkError(_) | ExecutionError::Unknown(_)
@@ -1433,8 +1433,8 @@ impl DualLegStrategy {
         error!("MANUAL INTERVENTION REQUIRED: Strategy is in Reconciling state. Please check exchange positions and restart if necessary.");
     }
 
-    /// MC-1 FIX: Consolidated entry signal handler for both Long and Short directions.
-    /// MC-2 FIX: Checks max_position_usd before allowing entry.
+    /// Consolidated entry signal handler for both Long and Short directions.
+    /// Checks max_position_usd before allowing entry.
     async fn handle_entry_signal(
         &mut self,
         direction: PositionDirection,
@@ -1446,7 +1446,7 @@ impl DualLegStrategy {
         }
 
         // WASH TRADE PREVENTION: Enforce cooldown after exit before allowing re-entry.
-        // Alpaca flags rapid sell→buy on the same symbol as a potential wash trade (HTTP 403).
+        // flags rapid sell→buy on the same symbol as a potential wash trade (HTTP 403).
         let now = self.clock.now_ts_millis();
         let elapsed = now - self.last_state_change_ts;
         if elapsed < self.config.entry_cooldown_ms {
@@ -1468,7 +1468,7 @@ impl DualLegStrategy {
             return;
         }
 
-        // MC-2 FIX: Check max_position_usd before entry
+        // Check max_position_usd before entry
         if let Some(max_usd) = self.max_position_usd {
             if self.config.order_size > max_usd {
                 warn!(
@@ -1480,7 +1480,7 @@ impl DualLegStrategy {
             }
         }
 
-        // ALPACA FIX: Floor to whole shares since Alpaca rejects fractional limit orders.
+        // Floor to whole shares since Alpaca rejects fractional limit orders.
         // This ensures the strategy state matches the actual filled quantity.
         let leg1_qty = (self.config.order_size / leg1.price).floor();
         if leg1_qty.is_zero() {
@@ -1491,7 +1491,7 @@ impl DualLegStrategy {
             .risk_monitor
             .calc_hedge_ratio(leg1_qty, leg1.price, leg2.price)
         {
-            // ALPACA FIX: Floor hedge quantity to whole shares to match exchange fill.
+            // Floor hedge quantity to whole shares to match exchange fill.
             let hedge_qty = raw_hedge_qty.floor();
             if hedge_qty.is_zero() {
                 warn!("Calculated hedge quantity rounds to zero, skipping entry");
@@ -1524,7 +1524,7 @@ impl DualLegStrategy {
                 PositionDirection::Short => Signal::Sell,
             };
 
-            // CB-2 FIX: Use JoinSet for structured concurrency
+            // Use JoinSet for structured concurrency
             self.active_executions.spawn(async move {
                 let result = match engine
                     .execute_basis_entry(&pair, direction, leg1_qty, hedge_qty, p1, p2)
@@ -1593,14 +1593,12 @@ impl DualLegStrategy {
             return;
         }
 
-        // --- P1 FIX: Load Shedding ---
+        // --- Load Shedding ---
         // Drop stale ticks to prevent execution on prices that no longer exist.
         // During high-volatility events or WebSocket floods, channel buffers fill and
         // processing lags behind. Executing on 5-second-old prices causes massive slippage.
-        //
         // SAFETY: Reconciling/Halted states already returned above, so we only shed load
         // during normal operation when we can afford to skip stale data.
-        //
         // HOT PATH: Simple i64 subtraction - single CPU instruction.
         let now = self.clock.now_ts_millis();
         let tick_latency = now - leg1.timestamp.max(leg2.timestamp);
@@ -1724,7 +1722,7 @@ impl DualLegStrategy {
         let signal = self.entry_manager.analyze(leg1, leg2).await;
 
         match signal {
-            // MC-1 FIX: Consolidated Buy/Sell into a single handler
+            // Consolidated Buy/Sell into a single handler
             Signal::Buy => {
                 self.handle_entry_signal(PositionDirection::Long, leg1, leg2)
                     .await
@@ -1734,7 +1732,7 @@ impl DualLegStrategy {
                     .await
             }
             Signal::Exit => {
-                // CF2 FIX: Handle Exit Signal (Mean Reversion)
+                // Handle Exit Signal (Mean Reversion)
                 if let StrategyState::InPosition {
                     direction,
                     leg1_qty,
@@ -1770,7 +1768,7 @@ impl DualLegStrategy {
 
                     if !self
                         .exit_policy
-                        // MC-3 FIX: Pass actual entry/current prices so percentage-based
+                        // Pass actual entry/current prices so percentage-based
                         // exit policies (MinimumProfitPolicy, StopLossPolicy) can function
                         .should_exit(leg1_entry_price, leg1.price, net_pnl)
                         .await
@@ -1817,7 +1815,7 @@ impl DualLegStrategy {
 
                     debug!("Executing Exit with Limit Prices - Spot: {} (Market: {}), Future: {} (Market: {})", p1_limit, leg1.price, p2_limit, leg2.price);
 
-                    // CB-2 FIX: Use JoinSet for structured concurrency
+                    // Use JoinSet for structured concurrency
                     self.active_executions.spawn(async move {
                         let result = match engine
                             .execute_basis_exit(
@@ -1846,11 +1844,10 @@ impl DualLegStrategy {
             _ => {}
         }
     }
-
 }
 impl Drop for DualLegStrategy {
     fn drop(&mut self) {
-        // CB-2 FIX: Abort all pending execution tasks on shutdown
+        // Abort all pending execution tasks on shutdown
         let pending = self.active_executions.len();
         self.active_executions.abort_all();
         info!(
@@ -1877,7 +1874,7 @@ pub struct DualLegLiveConfig {
     pub entry_z_score: f64,
     pub exit_z_score: f64,
     pub strategy_type: DualLegStrategyType,
-    // N-1 FIX: Extracted magic numbers into config
+    // Extracted magic numbers into config
     /// Circuit breaker failure threshold before tripping (default: 5)
     pub circuit_breaker_threshold: u32,
     /// Circuit breaker timeout in seconds before attempting recovery (default: 60)
@@ -1888,7 +1885,7 @@ pub struct DualLegLiveConfig {
     pub basis_exit_bps: Decimal,
     /// Maximum leverage for risk monitor (default: 3.0)
     pub max_leverage: Decimal,
-    // MC-1 FIX: Configurable drift recalculation interval
+    // Configurable drift recalculation interval
     /// Interval (in ticks) for recalculating running sums to prevent f64 drift (default: 10_000)
     /// Guidance: For 1000 ticks/sec, use 10_000 (10s). For 1 tick/min, use 1_000 (~17 hours).
     pub drift_recalc_interval: u64,
@@ -1902,7 +1899,7 @@ pub struct DualLegLiveConfig {
     pub max_imbalance_ratio: Decimal,
 }
 
-/// N-1 FIX: Default implementation with production-ready values
+/// Default implementation with production-ready values
 impl Default for DualLegLiveConfig {
     fn default() -> Self {
         Self {
@@ -1976,7 +1973,7 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
 
     /// Build the internal DualLegStrategy with all dependencies
     ///
-    /// # CB-1 NOTE on Panic Safety
+    /// NOTE on Panic Safety
     /// The Recovery Worker is spawned as a detached task. Its internal `run()` method uses
     /// `JoinSet` which gracefully handles panics from individual recovery tasks by logging
     /// them without crashing the entire worker. If the worker's top-level `run()` panics,
@@ -1993,7 +1990,7 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
             recovery_worker.run().await;
         });
 
-        // N-1 FIX: Use config values instead of magic numbers
+        // Use config values instead of magic numbers
         let execution_engine = ExecutionEngine::new(
             self.executor.clone(),
             recovery_tx.clone(),
@@ -2004,7 +2001,7 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
         // Create entry manager based on strategy type
         let entry_manager: Box<dyn EntryStrategy> = match self.config.strategy_type {
             DualLegStrategyType::Basis => {
-                // N-1 FIX: Use config values
+                // Use config values
                 Box::new(BasisManager::new(
                     self.config.basis_entry_bps,
                     self.config.basis_exit_bps,
@@ -2012,14 +2009,18 @@ impl<E: Executor + 'static> DualLegStrategyLive<E> {
                 ))
             }
             DualLegStrategyType::Pairs => Box::new(PairsManager::new(
-                format!("{}:{}", self.config.dual_leg_config.spot_symbol, self.config.dual_leg_config.future_symbol),
+                format!(
+                    "{}:{}",
+                    self.config.dual_leg_config.spot_symbol,
+                    self.config.dual_leg_config.future_symbol
+                ),
                 self.config.window_size,
                 self.config.entry_z_score,
                 self.config.exit_z_score,
             )),
         };
 
-        // N-1 FIX: Use config value for leverage
+        // Use config value for leverage
         let risk_monitor = RiskMonitor::new(
             self.config.max_leverage,
             InstrumentType::Linear,
@@ -2123,7 +2124,7 @@ impl<E: Executor + 'static> LiveStrategy for DualLegStrategyLive<E> {
                     }
                 }
                 StrategyInput::PairedTick { leg1, leg2 } => {
-                    // MC-2 FIX: Use tokio::join! for concurrent sends to prevent temporal desync
+                    // Use tokio::join! for concurrent sends to prevent temporal desync
                     // If one channel is full while the other isn't, sequential sends would
                     // create leg timing skew - exactly what PairedTick is designed to prevent
                     let (r1, r2) = tokio::join!(leg1_tx.send(leg1), leg2_tx.send(leg2));
@@ -2308,7 +2309,7 @@ mod tests {
                 .await
                 .push((symbol.to_string(), side, quantity));
 
-            // MC-2 FIX: Return mock order ID
+            // Return mock order ID
             Ok(crate::domain::orders::OrderId::new(format!(
                 "mock-{}",
                 *count

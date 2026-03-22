@@ -116,7 +116,7 @@ impl EventLog {
         serde_json::to_writer(&mut writer, event)?;
         writeln!(writer)?;
         writer.flush()?;
-        // MC-3 FIX: Ensure data is synced to disk, not just OS buffer
+        // Ensure data is synced to disk, not just OS buffer
         writer.get_ref().sync_all()
     }
 
