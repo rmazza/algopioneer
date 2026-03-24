@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.6] - 2026-03-23
+### Added
+- **Wash Trade Prevention**: Added `exit_cooldown_ms` to `DualLegConfig` to prevent rapid entry-exit cycles that trigger Alpaca rejections.
+
+### Fixed
+- **Recovery Logic**: Implemented quantity capping in `RecoveryWorker` to match actual exchange positions, preventing "insufficient quantity" errors during recovery.
+- **Reliability**: Ensured `last_state_change_ts` is updated on all state transitions, including definitive exit failures, to prevent immediate retry loops.
+- **State Management**: Improved orphan position recovery logic to prevent accidental adoption of positions belonging to other strategies in portfolio mode.
+
+## [1.9.5] - 2026-03-22
+### Added
+- **Optimization**: Created `examples/optimize_alpaca_pairs.rs` for grid-search parameter optimization on stocks.
+- **Data Tooling**: Created `examples/download_alpaca_data.rs` to fetch 90 days of hourly historical data.
+- **CLI**: Added `--window`, `--z-entry`, and `--z-exit` overrides to the `backtest` command.
+
+### Fixed
+- **Backtest Engine**: Fixed critical bug where open positions were not liquidated at the end of dual-leg backtests, leading to incorrect final capital reports.
+- **Backtest Engine**: Fixed position sizing in `run_dual` to use true dollar-neutral (50/50) allocation instead of share-neutral, preventing accidental massive leverage.
+- **Configuration**: Updated `pairs_config.json` with optimized parameters for UAL/F and MA/C.
+
 ## [1.9.4] - 2026-03-19
 ### Added
 - **Observability**: Promoted Z-score logging from `debug` to `info` level and added pair identification to log messages.

@@ -153,6 +153,7 @@ async fn test_phoenix_recovery() {
         fee_tier: TransactionCostModel::new(dec!(5.0), dec!(10.0), dec!(1.0)),
         throttle_interval_secs: 5,
         entry_cooldown_ms: 0,
+        exit_cooldown_ms: 0,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -280,6 +281,7 @@ async fn test_pairs_trading_cycle() {
         fee_tier: TransactionCostModel::new(dec!(0.0), dec!(0.0), dec!(0.0)),
         throttle_interval_secs: 5,
         entry_cooldown_ms: 0,
+        exit_cooldown_ms: 0,
     };
 
     let mut strategy = DualLegStrategy::new(
@@ -445,6 +447,7 @@ async fn test_basis_trading_cycle() {
         fee_tier: cost_model,
         throttle_interval_secs: 5,
         entry_cooldown_ms: 0,
+        exit_cooldown_ms: 0,
     };
 
     let mut strategy = DualLegStrategy::new(

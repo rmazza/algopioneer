@@ -113,6 +113,7 @@ impl OptimizedPair {
                 fee_tier: TransactionCostModel::default(),
                 throttle_interval_secs: 5,
                 entry_cooldown_ms: 30_000,
+                exit_cooldown_ms: 30_000,
             },
             window_size: self.window,
             // Convert f64 to Decimal for financial precision

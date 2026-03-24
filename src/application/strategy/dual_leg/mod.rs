@@ -251,9 +251,35 @@ pub struct DualLegConfig {
     /// Prevents Alpaca wash trade detection (HTTP 403) from rapid exit→re-entry cycles.
     #[serde(default = "default_entry_cooldown_ms")]
     pub entry_cooldown_ms: i64,
+    /// Minimum time (ms) to wait after an entry before allowing an exit.
+    /// Prevents Alpaca wash trade detection (HTTP 403) from rapid entry→exit cycles.
+    #[serde(default = "default_exit_cooldown_ms")]
+    pub exit_cooldown_ms: i64,
+}
+
+impl Default for DualLegConfig {
+    fn default() -> Self {
+        Self {
+            spot_symbol: "BTC-USD".to_string(),
+            future_symbol: "ETH-USD".to_string(),
+            order_size: dec!(100.0),
+            max_tick_age_ms: 2000,
+            execution_timeout_ms: 30000,
+            min_profit_threshold: dec!(0.005),
+            stop_loss_threshold: dec!(-0.02),
+            fee_tier: TransactionCostModel::default(),
+            throttle_interval_secs: 5,
+            entry_cooldown_ms: 30_000,
+            exit_cooldown_ms: 30_000,
+        }
+    }
 }
 
 fn default_entry_cooldown_ms() -> i64 {
+    30_000 // 30 seconds default
+}
+
+fn default_exit_cooldown_ms() -> i64 {
     30_000 // 30 seconds default
 }
 
@@ -271,6 +297,7 @@ pub struct DualLegConfigBuilder {
     fee_tier: TransactionCostModel,
     throttle_interval_secs: u64,
     entry_cooldown_ms: i64,
+    exit_cooldown_ms: i64,
 }
 
 impl Default for DualLegConfigBuilder {
@@ -285,7 +312,8 @@ impl Default for DualLegConfigBuilder {
             stop_loss_threshold: dec!(-0.05),
             fee_tier: TransactionCostModel::default(),
             throttle_interval_secs: 5,
-            entry_cooldown_ms: 30_000, // 30 seconds default
+            entry_cooldown_ms: 30_000,
+            exit_cooldown_ms: 30_000,
         }
     }
 }
@@ -357,6 +385,11 @@ impl DualLegConfigBuilder {
         self
     }
 
+    pub fn exit_cooldown_ms(mut self, ms: i64) -> Self {
+        self.exit_cooldown_ms = ms;
+        self
+    }
+
     /// Build and validate the configuration.
     /// Returns Err if required fields are missing or validation fails.
     pub fn build(self) -> Result<DualLegConfig, String> {
@@ -412,6 +445,7 @@ impl DualLegConfigBuilder {
             fee_tier: self.fee_tier,
             throttle_interval_secs: self.throttle_interval_secs,
             entry_cooldown_ms: self.entry_cooldown_ms,
+            exit_cooldown_ms: self.exit_cooldown_ms,
         })
     }
 }
@@ -1741,6 +1775,22 @@ impl DualLegStrategy {
                     leg2_entry_price,
                 } = self.state
                 {
+                    // WASH TRADE PREVENTION: Enforce cooldown after entry before allowing exit.
+                    let now = self.clock.now_ts_millis();
+                    let elapsed = now - self.last_state_change_ts;
+                    if elapsed < self.config.exit_cooldown_ms {
+                        if self.throttler.tick_age.should_log() {
+                            let suppressed = self.throttler.tick_age.get_and_reset_suppressed_count();
+                            warn!(
+                                elapsed_ms = elapsed,
+                                cooldown_ms = self.config.exit_cooldown_ms,
+                                suppressed = suppressed,
+                                "Exit blocked: cooldown period active after entry"
+                            );
+                        }
+                        return;
+                    }
+
                     // AS-1: Use direction for PnL calculation
                     // Long: PnL = (exit - entry) for leg1, (entry - exit) for leg2
                     // Short: PnL = (entry - exit) for leg1, (exit - entry) for leg2
@@ -2149,6 +2199,7 @@ impl<E: Executor + 'static> LiveStrategy for DualLegStrategyLive<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use tokio::sync::Mutex;
     use tokio::time::Duration;
 
@@ -2318,13 +2369,245 @@ mod tests {
 
         async fn get_position(
             &self,
-            _symbol: &str,
+            symbol: &str,
         ) -> Result<Decimal, crate::domain::exchange::ExchangeError> {
+            if symbol == "WFC" {
+                return Ok(dec!(-782));
+            }
             Ok(Decimal::ZERO)
         }
 
         fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
-            crate::domain::exchange::ExchangeId::Coinbase
+            crate::domain::exchange::ExchangeId::Alpaca
+        }
+
+        async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), crate::domain::exchange::ExchangeError> {
+            Ok(())
+        }
+
+        async fn cancel_order(&self, _order_id: &crate::domain::orders::OrderId) -> Result<(), crate::domain::exchange::ExchangeError> {
+            Ok(())
+        }
+
+        async fn check_market_hours(&self) -> Result<bool, crate::domain::exchange::ExchangeError> {
+            Ok(true)
+        }
+
+        async fn get_order_status(
+            &self,
+            _id: &crate::domain::orders::OrderId,
+        ) -> Result<(crate::domain::orders::OrderState, Decimal, Option<Decimal>), crate::domain::exchange::ExchangeError> {
+            Ok((crate::domain::orders::OrderState::Filled, Decimal::ZERO, None))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recovery_quantity_capping() {
+        let executor = Arc::new(MockExecutor::new());
+        let (feedback_tx, mut _feedback_rx) = mpsc::channel(1);
+
+        let task = RecoveryTask {
+            symbol: "WFC".to_string(),
+            action: OrderSide::Buy,
+            quantity: dec!(1000), // Requested 1000, but only 782 available
+            limit_price: None,
+            reason: "Test".to_string(),
+            attempts: 0,
+        };
+
+        crate::application::strategy::dual_leg::execution::perform_recovery_with_backoff(
+            executor.clone(),
+            task,
+            feedback_tx
+        ).await;
+
+        let orders = executor.executed_orders.lock().await;
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0, "WFC");
+        assert_eq!(orders[0].2, dec!(782));
+    }
+
+    #[derive(Debug)]
+    struct MockClock {
+        now: Arc<Mutex<i64>>,
+    }
+
+    impl MockClock {
+        fn new(ts: i64) -> Self {
+            Self {
+                now: Arc::new(Mutex::new(ts)),
+            }
+        }
+    }
+
+    impl Clock for MockClock {
+        fn now(&self) -> DateTime<Utc> {
+            Utc.timestamp_millis(*self.now.try_lock().expect("Failed to lock MockClock"))
+        }
+        fn now_ts_millis(&self) -> i64 {
+            *self.now.try_lock().expect("Failed to lock MockClock")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exit_cooldown_blocks_rapid_exit() {
+        let clock = Arc::new(MockClock::new(10000));
+        let mut manager = PairsManager::new("A:B".into(), 5, 2.0, 0.5);
+
+        // Warm up the manager to avoid Signal::Hold
+        for i in 0..5 {
+            let leg1 = MarketData {
+                symbol: "A".into(),
+                price: dec!(100),
+                instrument_id: None,
+                timestamp: 1000 + i,
+            };
+            let leg2 = MarketData {
+                symbol: "B".into(),
+                price: dec!(100),
+                instrument_id: None,
+                timestamp: 1000 + i,
+            };
+            manager.analyze(&leg1, &leg2).await;
+        }
+
+        let mut strategy = DualLegStrategy::new(
+            Box::new(manager),
+            RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral),
+            ExecutionEngine::new(Arc::new(MockExecutor::new()), mpsc::channel(1).0, 5, 60),
+            DualLegConfig {
+                exit_cooldown_ms: 5000, // 5 second cooldown
+                ..Default::default()
+            },
+            mpsc::channel(1).1,
+            Box::new(MockClock {
+                now: clock.now.clone(),
+            }),
+        );
+
+        // Set state to InPosition
+        strategy.state = StrategyState::InPosition {
+            direction: PositionDirection::Long,
+            leg1_qty: dec!(10),
+            leg2_qty: dec!(10),
+            leg1_entry_price: dec!(100),
+            leg2_entry_price: dec!(100),
+        };
+        // 1. Cooldown Period: Only 1 second has passed
+        strategy.last_state_change_ts = 9000;
+
+        // Create market data that triggers Exit (spread=0, z-score=0 < exit_z_score=0.5)
+        let leg1 = MarketData {
+            symbol: "A".into(),
+            price: dec!(100),
+            instrument_id: None,
+            timestamp: 10000,
+        };
+        let leg2 = MarketData {
+            symbol: "B".into(),
+            price: dec!(100),
+            instrument_id: None,
+            timestamp: 10000,
+        };
+
+        strategy.process_tick(&leg1, &leg2).await;
+
+        // Verify state did NOT change to Exiting (should still be InPosition)
+        if let StrategyState::InPosition { .. } = strategy.state {
+            // Success
+        } else {
+            panic!("Strategy exited before cooldown! State: {:?}", strategy.state);
+        }
+
+        // 2. Cooldown Expired: 6 seconds have passed
+        *clock.now.try_lock().expect("Failed to lock MockClock") = 16000;
+        let leg1_new = MarketData {
+            timestamp: 16000,
+            ..leg1
+        };
+        let leg2_new = MarketData {
+            timestamp: 16000,
+            ..leg2
+        };
+
+        strategy.process_tick(&leg1_new, &leg2_new).await;
+
+        // Verify state IS now Exiting
+        if let StrategyState::Exiting { .. } = strategy.state {
+            // Success
+        } else {
+            panic!(
+                "Strategy failed to exit after cooldown! State: {:?}",
+                strategy.state
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_last_state_change_ts_updates_on_rejected_exit() {
+        let mut strategy = DualLegStrategy::new(
+            Box::new(PairsManager::new("A:B".into(), 5, 2.0, 0.1)),
+            RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral),
+            ExecutionEngine::new(Arc::new(MockExecutor::new()), mpsc::channel(1).0, 5, 60),
+            DualLegConfig::default(),
+            mpsc::channel(1).1,
+            Box::new(SystemClock),
+        );
+
+        strategy.state = StrategyState::Exiting {
+            direction: PositionDirection::Long,
+            leg1_qty: dec!(10),
+            leg2_qty: dec!(10),
+            leg1_entry_price: dec!(100),
+            leg2_entry_price: dec!(100),
+        };
+        strategy.last_state_change_ts = 1000;
+
+        // Simulate rejected exit
+        let report = ExecutionReport {
+            action: Signal::Exit,
+            result: ExecutionResult::TotalFailure(ExecutionError::ExchangeError("Rejected".into())),
+            pnl_delta: None,
+        };
+
+        strategy.handle_execution_report(report);
+
+        // State should revert to InPosition and timestamp should be updated
+        assert!(matches!(strategy.state, StrategyState::InPosition { .. }));
+        assert!(strategy.last_state_change_ts > 1000);
+    }
+
+    #[tokio::test]
+    async fn test_orphan_position_adoption() {
+        // MockExecutor for WFC returns -782 position
+        let executor = Arc::new(MockExecutor::new());
+        let engine = ExecutionEngine::new(executor.clone(), mpsc::channel(1).0, 5, 60);
+
+        let mut strategy = DualLegStrategy::new(
+            Box::new(PairsManager::new("WFC:JPM".into(), 5, 2.0, 0.1)),
+            RiskMonitor::new(dec!(1.0), InstrumentType::Linear, HedgeMode::DollarNeutral),
+            engine,
+            DualLegConfig {
+                spot_symbol: "WFC".to_string(),
+                future_symbol: "JPM".to_string(),
+                ..Default::default()
+            },
+            mpsc::channel(1).1,
+            Box::new(SystemClock),
+        );
+
+        // Initially Flat
+        assert!(matches!(strategy.state, StrategyState::Flat));
+        assert!(!strategy.state_restored);
+
+        strategy.reconcile_state().await;
+
+        // Should adopt WFC position as Short (since it is -782)
+        if let StrategyState::InPosition { direction, leg1_qty, .. } = strategy.state {
+            assert_eq!(direction, PositionDirection::Short);
+            assert_eq!(leg1_qty, dec!(782));
+        } else {
+            panic!("Failed to adopt orphan position! State: {:?}", strategy.state);
         }
     }
 

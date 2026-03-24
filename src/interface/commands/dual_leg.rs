@@ -190,6 +190,7 @@ pub async fn run_dual_leg_trading(
         fee_tier: TransactionCostModel::default(),
         throttle_interval_secs: cli_config.throttle_interval_secs,
         entry_cooldown_ms: 30_000, // 30s cooldown to prevent wash trade detection
+        exit_cooldown_ms: 30_000,  // 30s cooldown to prevent wash trade detection
     };
 
     let mut strategy = DualLegStrategy::new(

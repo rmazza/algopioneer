@@ -180,9 +180,44 @@ pub async fn perform_recovery_with_backoff(
             );
         }
 
+        // RECOVERY QUANTITY CAPPING:
+        // Ensure we don't try to close more than what is actually on the exchange.
+        // This prevents persistent 403 Forbidden: insufficient qty errors.
+        let quantity = match client.get_position(&task.symbol).await {
+            Ok(pos) => {
+                let exchange_qty = pos.abs();
+                if exchange_qty < task.quantity {
+                    warn!(
+                        symbol = %task.symbol,
+                        requested = %task.quantity,
+                        available = %exchange_qty,
+                        "Capping recovery quantity to available exchange position"
+                    );
+                    exchange_qty
+                } else {
+                    task.quantity
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch position for {} during recovery: {}. Using original task quantity.",
+                    task.symbol, e
+                );
+                task.quantity
+            }
+        };
+
+        if quantity.is_zero() {
+            info!("Exchange position is zero for {}. Recovery complete.", task.symbol);
+            let _ = feedback_tx
+                .send(RecoveryResult::Success(task.symbol.clone()))
+                .await;
+            return;
+        }
+
         // Use limit_price if available.
         let order_id = match client
-            .execute_order(&task.symbol, task.action, task.quantity, task.limit_price)
+            .execute_order(&task.symbol, task.action, quantity, task.limit_price)
             .await
         {
             Ok(id) => id,
@@ -723,5 +758,95 @@ impl ExecutionEngine {
            + Send
            + '_ {
         self.client.check_market_hours()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::exchange::ExchangeError;
+    use crate::domain::orders::OrderId;
+    use async_trait::async_trait;
+    use rust_decimal_macros::dec;
+    use tokio::sync::Mutex;
+
+    struct MockExecutor {
+        positions: std::collections::HashMap<String, Decimal>,
+        executed_orders: Arc<Mutex<Vec<(String, OrderSide, Decimal)>>>,
+    }
+
+    #[async_trait]
+    impl Executor for MockExecutor {
+        async fn execute_order(
+            &self,
+            symbol: &str,
+            side: OrderSide,
+            quantity: Decimal,
+            _price: Option<Decimal>,
+        ) -> Result<OrderId, ExchangeError> {
+            self.executed_orders
+                .lock()
+                .await
+                .push((symbol.to_string(), side, quantity));
+            Ok(OrderId::new("mock"))
+        }
+
+        async fn get_position(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+            Ok(self.positions.get(symbol).cloned().unwrap_or(Decimal::ZERO))
+        }
+
+        fn exchange_id(&self) -> crate::domain::exchange::ExchangeId {
+            crate::domain::exchange::ExchangeId::Alpaca
+        }
+
+        async fn get_order_status(
+            &self,
+            _id: &OrderId,
+        ) -> Result<(OrderState, Decimal, Option<Decimal>), ExchangeError> {
+            Ok((OrderState::Filled, Decimal::ZERO, None))
+        }
+
+        async fn cancel_all_orders(&self, _symbol: &str) -> Result<(), ExchangeError> {
+            Ok(())
+        }
+
+        async fn cancel_order(&self, _order_id: &OrderId) -> Result<(), ExchangeError> {
+            Ok(())
+        }
+
+        async fn check_market_hours(&self) -> Result<bool, ExchangeError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recovery_quantity_capping() {
+        let mut positions = std::collections::HashMap::new();
+        positions.insert("WFC".to_string(), dec!(-782));
+
+        let executed_orders = Arc::new(Mutex::new(Vec::new()));
+        let executor = Arc::new(MockExecutor {
+            positions,
+            executed_orders: executed_orders.clone(),
+        });
+
+        let (feedback_tx, mut _feedback_rx) = mpsc::channel(1);
+
+        let task = RecoveryTask {
+            symbol: "WFC".to_string(),
+            action: OrderSide::Buy,
+            quantity: dec!(1000), // Requesting 1000, but only 782 available
+            limit_price: None,
+            reason: "test".into(),
+            attempts: 0,
+        };
+
+        // Run recovery with a single attempt mock
+        perform_recovery_with_backoff(executor, task, feedback_tx).await;
+
+        let orders = executed_orders.lock().await;
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0, "WFC");
+        assert_eq!(orders[0].2, dec!(782)); // Verified: Capped to 782
     }
 }

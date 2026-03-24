@@ -91,9 +91,15 @@ Some modules use `Error` suffix (e.g., `ExecutionError`, `ExchangeError`) while 
 
 ## Completed ✅
 
-### March 2026 - Clean Architecture & Backtesting (v1.9.0/1.9.1/1.9.2)
+### March 2026 - Resilience & Execution Hardening (v1.9.6)
+- [x] **Wash Trade Prevention**: Implemented `exit_cooldown_ms` to block rapid entry-exit flips.
+- [x] **Smart Recovery**: Implemented quantity capping in `RecoveryWorker` to match actual exchange state.
+- [x] **Transition Reliability**: Fixed timestamp update bugs in strategy state machine.
+
+### March 2026 - Clean Architecture & Backtesting (v1.9.0 - v1.9.5)
 - [x] **Project Reorganization**: Consolidated domain logic, application services, and infrastructure details.
 - [x] **Dual-Leg Backtesting**: Advanced spread trading simulation with risk metrics (Sharpe, Sortino).
+- [x] **Parameter Optimization**: Grid search implementation for finding optimal Z-score thresholds.
 - [x] **Security Maintenance**: Upgrade `quinn-proto` and resolve integration test syntax issues.
 - [x] **Exchange Refactor**: Fix `exchange_id` duplication and `RiskManagedExecutor` implementation.
 
