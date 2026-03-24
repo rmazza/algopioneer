@@ -122,8 +122,12 @@ pub async fn run_backtest(config: BacktestCliConfig) -> Result<(), BacktestError
             );
 
             // Create a PairsManager for signal generation
-            // Using default parameters for the backtest
-            let mut strategy = PairsManager::new("BACKTEST".to_string(), 20, 2.0, 0.5);
+            let mut strategy = PairsManager::new(
+                format!("{}/{}", s1, s2),
+                config.window,
+                config.z_entry,
+                config.z_exit,
+            );
             let bt_config = BacktestConfig::with_capital(config.initial_capital);
             backtest::run_dual(&mut strategy, &df1, &df2, &bt_config).await?
         }
@@ -298,6 +302,9 @@ mod tests {
             output_dir: "test_output".to_string(),
             initial_capital: dec!(10000),
             synthetic: true,
+            window: 20,
+            z_entry: 2.0,
+            z_exit: 0.1,
         };
         assert_eq!(config.duration_to_candles().unwrap(), 7 * 24);
 

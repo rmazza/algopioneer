@@ -64,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             output_dir,
             initial_capital,
             synthetic,
+            window,
+            z_entry,
+            z_exit,
         } => {
             let strategy_type: BacktestStrategyType = strategy.parse().map_err(|e: String| {
                 error!("{}", e);
@@ -87,6 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output_dir,
                 initial_capital: initial_capital_decimal,
                 synthetic,
+                window,
+                z_entry,
+                z_exit,
             };
 
             commands::run_backtest(config).await?;

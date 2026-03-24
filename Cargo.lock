@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "algopioneer"
-version = "1.9.4"
+version = "1.9.6"
 dependencies = [
  "apca",
  "async-trait",

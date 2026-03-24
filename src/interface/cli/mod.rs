@@ -74,9 +74,19 @@ pub enum Commands {
         #[arg(long, default_value_t = 10000.0)]
         initial_capital: f64,
         /// Use synthetic data for CI (no CSV files required)
-        #[arg(long, default_value_t = false)]
+        #[arg(long)]
         synthetic: bool,
-    },
+        /// Window size for dual-leg strategy
+        #[arg(long, default_value_t = 20)]
+        window: usize,
+        /// Z-score entry threshold
+        #[arg(long, default_value_t = 2.0)]
+        z_entry: f64,
+        /// Z-score exit threshold
+        #[arg(long, default_value_t = 0.5)]
+        z_exit: f64,
+        },
+
 
     /// Run the Dual-Leg Trading Strategy (Basis or Pairs)
     DualLeg {

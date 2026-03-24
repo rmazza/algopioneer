@@ -503,14 +503,26 @@ pub async fn run_dual(
                 let slipped_a = exec_p_a * slippage_mult_buy;
                 let slipped_b = exec_p_b * slippage_mult_sell;
 
-                let leg_allocation = (capital * config.position_size_pct) / dec!(2);
-                position_size = leg_allocation / slipped_a;
-
+                // Dollar-neutral allocation: Spend half capital on each leg
+                let total_allocation = capital * config.position_size_pct;
+                let leg_allocation = total_allocation / dec!(2);
+                
+                let size_a = leg_allocation / slipped_a;
+                let size_b = leg_allocation / slipped_b;
+                
+                // We track position as a "unit" of the spread. 
+                // To keep it simple and consistent with previous logic, 
+                // we'll store the sizes separately or use an average size.
+                // Re-implementing to track actual shares per leg for accuracy.
                 last_entry_price_a = slipped_a;
                 last_entry_price_b = slipped_b;
+                
+                // Use a custom struct or just use position_size as a multiplier for the ratio
+                // Let's use position_size as the 'base' units and track leg sizes
+                position_size = leg_allocation; // Using allocated dollars as the 'size'
                 current_direction = 1;
 
-                capital -= leg_allocation * dec!(2);
+                capital -= total_allocation;
                 debug!(price_a = %slipped_a, price_b = %slipped_b, "LONG SPREAD executed");
             }
 
@@ -518,14 +530,16 @@ pub async fn run_dual(
                 let slipped_a = exec_p_a * slippage_mult_sell;
                 let slipped_b = exec_p_b * slippage_mult_buy;
 
-                let leg_allocation = (capital * config.position_size_pct) / dec!(2);
-                position_size = leg_allocation / slipped_a;
-
+                let total_allocation = capital * config.position_size_pct;
+                let leg_allocation = total_allocation / dec!(2);
+                
                 last_entry_price_a = slipped_a;
                 last_entry_price_b = slipped_b;
+                
+                position_size = leg_allocation; 
                 current_direction = -1;
 
-                capital -= leg_allocation * dec!(2);
+                capital -= total_allocation;
                 debug!(price_a = %slipped_a, price_b = %slipped_b, "SHORT SPREAD executed");
             }
 
@@ -536,19 +550,23 @@ pub async fn run_dual(
                     (exec_p_a * slippage_mult_buy, exec_p_b * slippage_mult_sell)
                 };
 
+                // PnL calculated based on dollar-neutral legs
+                // size_a = position_size / last_entry_price_a
+                // pnl_a = (exit - entry) * size_a
                 let pnl_a = if current_direction == 1 {
-                    (exit_a - last_entry_price_a) * position_size
+                    (exit_a - last_entry_price_a) * (position_size / last_entry_price_a)
                 } else {
-                    (last_entry_price_a - exit_a) * position_size
+                    (last_entry_price_a - exit_a) * (position_size / last_entry_price_a)
                 };
+                
                 let pnl_b = if current_direction == 1 {
-                    (last_entry_price_b - exit_b) * position_size
+                    (last_entry_price_b - exit_b) * (position_size / last_entry_price_b)
                 } else {
-                    (exit_b - last_entry_price_b) * position_size
+                    (exit_b - last_entry_price_b) * (position_size / last_entry_price_b)
                 };
 
                 let total_pnl = pnl_a + pnl_b;
-                let original_cost = (last_entry_price_a + last_entry_price_b) * position_size;
+                let original_cost = position_size * dec!(2);
                 let pnl_pct = (total_pnl / original_cost) * dec!(100);
 
                 trades.push(TradeRecord {
@@ -556,7 +574,7 @@ pub async fn run_dual(
                     exit_idx: next_idx,
                     entry_price: last_entry_price_a,
                     exit_price: exit_a,
-                    size: position_size,
+                    size: position_size, // Dollar size per leg
                     pnl: total_pnl,
                     pnl_pct,
                 });
@@ -608,6 +626,50 @@ pub async fn run_dual(
             returns.push((current_equity - last_equity) / last_equity);
         }
         last_equity = current_equity;
+    }
+
+    // Final liquidation if position is still open
+    if current_direction != 0 {
+        if let (Some(&exec_p_a), Some(&exec_p_b)) = (data.close_a.last(), data.close_b.last()) {
+            let (exit_a, exit_b) = if current_direction == 1 {
+                (exec_p_a * slippage_mult_sell, exec_p_b * slippage_mult_buy)
+            } else {
+                (exec_p_a * slippage_mult_buy, exec_p_b * slippage_mult_sell)
+            };
+
+            let pnl_a = if current_direction == 1 {
+                (exit_a - last_entry_price_a) * (position_size / last_entry_price_a)
+            } else {
+                (last_entry_price_a - exit_a) * (position_size / last_entry_price_a)
+            };
+            let pnl_b = if current_direction == 1 {
+                (last_entry_price_b - exit_b) * (position_size / last_entry_price_b)
+            } else {
+                (exit_b - last_entry_price_b) * (position_size / last_entry_price_b)
+            };
+
+            let total_pnl = pnl_a + pnl_b;
+            let original_cost = position_size * dec!(2);
+            let pnl_pct = (total_pnl / original_cost) * dec!(100);
+
+            trades.push(TradeRecord {
+                entry_idx: data_len - 1, 
+                exit_idx: data_len - 1,
+                entry_price: last_entry_price_a,
+                exit_price: exit_a,
+                size: position_size,
+                pnl: total_pnl,
+                pnl_pct,
+            });
+
+            capital += original_cost + total_pnl;
+            if total_pnl > Decimal::ZERO {
+                winning_trades += 1;
+            } else {
+                losing_trades += 1;
+            }
+            current_direction = 0;
+        }
     }
 
     let total_trades = trades.len() as u32;

@@ -103,6 +103,12 @@ pub struct BacktestCliConfig {
     pub initial_capital: Decimal,
     /// Use synthetic data (no CSV files required)
     pub synthetic: bool,
+    /// Window size for dual-leg strategy
+    pub window: usize,
+    /// Z-score entry threshold
+    pub z_entry: f64,
+    /// Z-score exit threshold
+    pub z_exit: f64,
 }
 
 impl BacktestCliConfig {
